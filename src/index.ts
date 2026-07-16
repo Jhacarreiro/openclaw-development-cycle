@@ -28,7 +28,10 @@ async function loadConfig() {
     if (idx <= 0) continue;
     cfg[line.slice(0, idx)] = line.slice(idx + 1);
   }
-  return { url: (cfg.EXTERNAL_GATE_URL || defaultUrl).replace(/\/$/, ""), token: cfg.EXTERNAL_GATE_TOKEN || "" };
+  return {
+    url: (cfg.EXTERNAL_GATE_URL || cfg.AI_SERVER_COMMANDER_URL || defaultUrl).replace(/\/$/, ""),
+    token: cfg.EXTERNAL_GATE_TOKEN || cfg.AI_SERVER_COMMANDER_TOKEN || process.env.PIONEER_API_KEY || "",
+  };
 }
 
 function buildQuery(params: Record<string, any>) {

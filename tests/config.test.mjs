@@ -2,20 +2,24 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { loadDevelopmentCycleConfig } from "../dist/config.js";
 
-test("configuration uses portable, command-first defaults", () => {
+test("Gallivanter runtime profile preserves operational defaults", () => {
   const config = loadDevelopmentCycleConfig({ HOME: "/tmp/example-home" });
-  assert.equal(config.stateRoot, "/tmp/example-home/.openclaw/development-cycle");
-  assert.equal(config.projectDocsRoot, "/tmp/example-home/.openclaw/development-cycle/projects");
-  assert.equal(config.projectDocsGitRoot, "");
-  assert.equal(config.implementation.adapter, "command");
+  assert.equal(config.stateRoot, "/data/workspace/project-cycle-handoff");
+  assert.equal(config.projectDocsRoot, "/data/workspace/openclaw-wiki/Projects");
+  assert.equal(config.projectDocsGitRoot, "/data/workspace/openclaw-wiki");
+  assert.equal(config.implementation.adapter, "octopus");
   assert.equal(config.implementation.command, "");
   assert.deepEqual(config.implementation.args, []);
-  assert.equal(config.implementation.octopusRoot, "");
-  assert.equal(config.implementation.octopusSandbox, "workspace-write");
+  assert.equal(config.implementation.octopusRoot, "/data/workspace/contrib/claude-octopus");
+  assert.equal(config.implementation.octopusSandbox, "danger-full-access");
   assert.equal(config.notifications.enabled, false);
   assert.equal(config.notifications.channel, "");
   assert.equal(config.notifications.target, "");
-  assert.equal(config.observer.enabled, false);
+  assert.equal(config.observer.enabled, true);
+  assert.equal(config.externalGate.secretPath, "/data/.openclaw/secrets/ai-server-commander.env");
+  assert.equal(config.externalGate.url, "http://192.168.1.220:33001");
+  assert.equal(config.observer.repository, "Jhacarreiro/claude-octopus");
+  assert.equal(config.observer.branch, "main");
   assert.equal(config.openclawBin, "openclaw");
 });
 

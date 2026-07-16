@@ -34,7 +34,7 @@ test("plugin registers the generic tool and dispatches request_plan", async (t) 
 
   const result = await registered.execute(
     "smoke-call",
-    { action: "request_plan", project: "fixture", projectRoot: process.cwd() },
+    { action: "request_plan", project: "fixture", projectRoot: process.cwd(), notifyExternalGate: false },
     undefined,
     undefined,
   );
@@ -43,5 +43,5 @@ test("plugin registers the generic tool and dispatches request_plan", async (t) 
   await access(result.details.planRequest);
   const request = await readFile(result.details.planRequest, "utf8");
   assert.match(request, /Development plan request/);
-  assert.equal(result.details.notice.reason, "external_gate_not_configured");
+  assert.equal(result.details.notice.reason, "external_gate_notice_disabled");
 });

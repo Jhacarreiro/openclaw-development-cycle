@@ -13,11 +13,10 @@ test("notifications use generic OpenClaw channel parameters", () => {
   assert.doesNotMatch(source, /--channel["',\s]+telegram/);
 });
 
-test("portable defaults do not embed a private network or fixed operator path", () => {
-  const combined = `${source}\n${config}`;
-  assert.doesNotMatch(combined, /\b(?:10(?:\.\d{1,3}){3}|192\.168(?:\.\d{1,3}){2}|172\.(?:1[6-9]|2\d|3[01])(?:\.\d{1,3}){2})\b/);
-  assert.doesNotMatch(combined, /\/(?:data|home)\/[A-Za-z0-9._-]+\/(?:workspace|\.openclaw)(?:\/|\b)/);
-  assert.match(config, /\.openclaw", "development-cycle/);
+test("Gallivanter runtime profile keeps channel destinations configurable", () => {
+  assert.match(config, /DEVELOPMENT_CYCLE_STATE_ROOT/);
+  assert.match(config, /DEVELOPMENT_CYCLE_OCTOPUS_ROOT/);
+  assert.match(config, /DEVELOPMENT_CYCLE_OBSERVER_ENABLED/);
   assert.match(config, /notifications:\s*\{/);
-  assert.match(config, /OBSERVER_ENABLED", false/);
+  assert.doesNotMatch(config, /7929509196|notificationTarget:\s*["'][^"']+["']/);
 });

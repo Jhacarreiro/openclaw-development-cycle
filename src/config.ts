@@ -81,24 +81,36 @@ export function loadDevelopmentCycleConfig(env: NodeJS.ProcessEnv = process.env)
   const stateRoot = text(
     env,
     "DEVELOPMENT_CYCLE_STATE_ROOT",
-    join(home, ".openclaw", "development-cycle"),
+    "/data/workspace/project-cycle-handoff",
   );
-  const observerRoot = text(env, "DEVELOPMENT_CYCLE_OBSERVER_ADAPTER_ROOT");
+  const observerRoot = text(
+    env,
+    "DEVELOPMENT_CYCLE_OBSERVER_ADAPTER_ROOT",
+    "/data/workspace/openai-compatible-tool-adapter/gallivanter-runtime-adapter",
+  );
 
   return {
     stateRoot,
     projectDocsRoot: text(
       env,
       "DEVELOPMENT_CYCLE_PROJECT_DOCS_ROOT",
-      join(stateRoot, "projects"),
+      "/data/workspace/openclaw-wiki/Projects",
     ),
-    projectDocsGitRoot: text(env, "DEVELOPMENT_CYCLE_PROJECT_DOCS_GIT_ROOT"),
+    projectDocsGitRoot: text(
+      env,
+      "DEVELOPMENT_CYCLE_PROJECT_DOCS_GIT_ROOT",
+      "/data/workspace/openclaw-wiki",
+    ),
     implementation: {
-      adapter: text(env, "DEVELOPMENT_CYCLE_IMPLEMENTATION_ADAPTER", "command") === "octopus" ? "octopus" : "command",
+      adapter: text(env, "DEVELOPMENT_CYCLE_IMPLEMENTATION_ADAPTER", "octopus") === "octopus" ? "octopus" : "command",
       command: text(env, "DEVELOPMENT_CYCLE_IMPLEMENTATION_COMMAND"),
       args: stringArray(env, "DEVELOPMENT_CYCLE_IMPLEMENTATION_ARGS_JSON"),
-      octopusRoot: text(env, "DEVELOPMENT_CYCLE_OCTOPUS_ROOT"),
-      octopusSandbox: text(env, "DEVELOPMENT_CYCLE_OCTOPUS_SANDBOX", "workspace-write"),
+      octopusRoot: text(
+        env,
+        "DEVELOPMENT_CYCLE_OCTOPUS_ROOT",
+        text(env, "OCTOPUS_ROOT", "/data/workspace/contrib/claude-octopus"),
+      ),
+      octopusSandbox: text(env, "DEVELOPMENT_CYCLE_OCTOPUS_SANDBOX", "danger-full-access"),
     },
     retentionDays: positiveInteger(env, "DEVELOPMENT_CYCLE_RETENTION_DAYS", 30),
     notifications: {
@@ -110,8 +122,16 @@ export function loadDevelopmentCycleConfig(env: NodeJS.ProcessEnv = process.env)
     },
     openclawBin: text(env, "DEVELOPMENT_CYCLE_OPENCLAW_BIN", "openclaw"),
     externalGate: {
-      secretPath: text(env, "DEVELOPMENT_CYCLE_EXTERNAL_GATE_SECRET_PATH"),
-      url: text(env, "DEVELOPMENT_CYCLE_EXTERNAL_GATE_URL").replace(/\/$/, ""),
+      secretPath: text(
+        env,
+        "DEVELOPMENT_CYCLE_EXTERNAL_GATE_SECRET_PATH",
+        "/data/.openclaw/secrets/ai-server-commander.env",
+      ),
+      url: text(
+        env,
+        "DEVELOPMENT_CYCLE_EXTERNAL_GATE_URL",
+        "http://192.168.1.220:33001",
+      ).replace(/\/$/, ""),
     },
     runner: {
       supervisorPath: text(
@@ -136,7 +156,7 @@ export function loadDevelopmentCycleConfig(env: NodeJS.ProcessEnv = process.env)
       ),
     },
     observer: {
-      enabled: boolean(env, "DEVELOPMENT_CYCLE_OBSERVER_ENABLED", false),
+      enabled: boolean(env, "DEVELOPMENT_CYCLE_OBSERVER_ENABLED", true),
       observeHelperPath: text(
         env,
         "DEVELOPMENT_CYCLE_OBSERVER_HELPER_PATH",
@@ -145,23 +165,27 @@ export function loadDevelopmentCycleConfig(env: NodeJS.ProcessEnv = process.env)
       agentHookPath: text(
         env,
         "DEVELOPMENT_CYCLE_OBSERVER_AGENT_HOOK_PATH",
-        observerRoot ? join(observerRoot, "bin", "agent-lifecycle-hook.mjs") : "",
+        observerRoot ? join(observerRoot, "bin", "octopus-agent-lifecycle-crabfleet.mjs") : "",
       ),
       hookLogPath: text(
         env,
         "DEVELOPMENT_CYCLE_OBSERVER_HOOK_LOG_PATH",
-        observerRoot ? join(observerRoot, "state", "development-cycle-hook.log") : "",
+        observerRoot ? join(observerRoot, "octopus-hook-state", "development-cycle-octopus-hook.log") : "",
       ),
       sessionsRoot: text(
         env,
         "DEVELOPMENT_CYCLE_OBSERVER_SESSIONS_ROOT",
         observerRoot ? join(observerRoot, "sessions") : "",
       ),
-      baseUrl: text(env, "DEVELOPMENT_CYCLE_OBSERVER_BASE_URL").replace(/\/$/, ""),
-      repository: text(env, "DEVELOPMENT_CYCLE_OBSERVER_REPOSITORY"),
-      branch: text(env, "DEVELOPMENT_CYCLE_OBSERVER_BRANCH"),
-      runtime: text(env, "DEVELOPMENT_CYCLE_OBSERVER_RUNTIME", "external"),
-      owner: text(env, "DEVELOPMENT_CYCLE_OBSERVER_OWNER"),
+      baseUrl: text(
+        env,
+        "DEVELOPMENT_CYCLE_OBSERVER_BASE_URL",
+        "http://127.0.0.1:8791",
+      ).replace(/\/$/, ""),
+      repository: text(env, "DEVELOPMENT_CYCLE_OBSERVER_REPOSITORY", "Jhacarreiro/claude-octopus"),
+      branch: text(env, "DEVELOPMENT_CYCLE_OBSERVER_BRANCH", "main"),
+      runtime: text(env, "DEVELOPMENT_CYCLE_OBSERVER_RUNTIME", "crabbox"),
+      owner: text(env, "DEVELOPMENT_CYCLE_OBSERVER_OWNER", "joao"),
     },
   };
 }

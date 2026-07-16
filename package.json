@@ -1,6 +1,6 @@
 {
   "name": "openclaw-plugin-development-cycle",
-  "version": "0.1.0",
+  "version": "0.1.0-gallivanter.1",
   "type": "module",
   "scripts": {
     "build": "tsc -p tsconfig.json",
@@ -8,7 +8,8 @@
     "plugin:validate": "npm run build && openclaw plugins validate --entry ./dist/index.js",
     "test": "npm run build && node --test tests/*.test.mjs",
     "audit:public": "node scripts/audit-public.mjs",
-    "check": "npm test && npm run audit:public && npm run plugin:validate"
+    "check": "npm test && npm run audit:public && npm run plugin:validate",
+    "check:runtime": "npm test && npm run plugin:validate"
   },
   "files": [
     "dist",

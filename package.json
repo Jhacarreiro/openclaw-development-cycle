@@ -1,0 +1,53 @@
+{
+  "name": "openclaw-plugin-development-cycle",
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "plugin:build": "npm run build && openclaw plugins build --entry ./dist/index.js",
+    "plugin:validate": "npm run build && openclaw plugins validate --entry ./dist/index.js",
+    "test": "npm run build && node --test tests/*.test.mjs",
+    "audit:public": "node scripts/audit-public.mjs",
+    "check": "npm test && npm run audit:public && npm run plugin:validate"
+  },
+  "files": [
+    "dist",
+    "docs",
+    "examples",
+    "schemas",
+    "runner-supervisor.py",
+    "openclaw.plugin.json",
+    "README.md",
+    "LICENSE",
+    "SECURITY.md",
+    "CHANGELOG.md"
+  ],
+  "peerDependencies": {
+    "openclaw": ">=2026.5.17"
+  },
+  "dependencies": {
+    "typebox": "^1.1.38"
+  },
+  "devDependencies": {
+    "openclaw": "2026.7.1",
+    "typescript": "^5.9.0"
+  },
+  "openclaw": {
+    "extensions": [
+      "./dist/index.js"
+    ]
+  },
+  "description": "Adapter-agnostic supervised development cycles for OpenClaw with durable state, process supervision, validation gates, and correction loops.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Jhacarreiro/openclaw-development-cycle.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Jhacarreiro/openclaw-development-cycle/issues"
+  },
+  "homepage": "https://github.com/Jhacarreiro/openclaw-development-cycle#readme",
+  "engines": {
+    "node": ">=22"
+  }
+}

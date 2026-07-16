@@ -1,0 +1,31 @@
+name: Feature request
+description: Propose a focused improvement
+title: "[Feature]: "
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What workflow problem should this solve?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives and tradeoffs
+  - type: checkboxes
+    id: portability
+    attributes:
+      label: Portability
+      options:
+        - label: The proposal does not require operator-specific defaults.
+          required: true
+        - label: External integrations remain opt-in.
+          required: true

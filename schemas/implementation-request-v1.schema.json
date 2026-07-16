@@ -1,0 +1,60 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Jhacarreiro/openclaw-development-cycle/schemas/implementation-request-v1.schema.json",
+  "title": "Development Cycle Implementation Request v1",
+  "type": "object",
+  "additionalProperties": true,
+  "required": [
+    "schemaVersion",
+    "project",
+    "runId",
+    "mode",
+    "projectRoot",
+    "promptPath",
+    "resultsRoot",
+    "timeoutSeconds",
+    "command"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": 1
+    },
+    "project": {
+      "type": "string",
+      "minLength": 1
+    },
+    "runId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "mode": {
+      "enum": ["delivery", "corrections"]
+    },
+    "projectRoot": {
+      "type": "string",
+      "minLength": 1
+    },
+    "promptPath": {
+      "type": "string",
+      "minLength": 1
+    },
+    "planPath": {
+      "type": "string"
+    },
+    "validationPath": {
+      "type": "string"
+    },
+    "resultsRoot": {
+      "type": "string",
+      "minLength": 1
+    },
+    "timeoutSeconds": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "command": {
+      "type": "string",
+      "minLength": 1
+    }
+  }
+}

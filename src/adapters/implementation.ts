@@ -94,6 +94,14 @@ export function buildImplementationLaunchSpec(
       env: {
         ...genericEnv,
         OCTOPUS_CODEX_SANDBOX: config.octopusSandbox,
+        // Gallivanter routing policy: the design-review ceremony must use the
+        // same persistent role routing as the rest of Octopus instead of the
+        // upstream hardcoded agy/claude/codex-mini defaults.
+        OCTOPUS_DESIGN_REVIEW_CODEX_AGENT: "commandcode",
+        OCTOPUS_DESIGN_REVIEW_AGY_AGENT: "commandcode-research",
+        OCTOPUS_DESIGN_REVIEW_GEMINI_AGENT: "commandcode-research",
+        OCTOPUS_DESIGN_REVIEW_CLAUDE_AGENT: "claude-sonnet",
+        OCTOPUS_DESIGN_REVIEW_SYNTH_AGENT: "commandcode-research",
         OCTOPUS_AGENT_LIFECYCLE_HOOK: input.observer?.agentHookPath || "",
         OCTOPUS_AGENT_LIFECYCLE_HOOK_LOG: input.observer?.hookLogPath || "",
         OCTOPUS_AGENT_ROOT_SESSION_ID: sessionId,

@@ -9,6 +9,7 @@ export interface ImplementationAdapterConfig {
   args: string[];
   octopusRoot: string;
   octopusSandbox: string;
+  loopUntilApproved: boolean;
 }
 
 export interface ImplementationLaunchInput {
@@ -94,6 +95,7 @@ export function buildImplementationLaunchSpec(
       env: {
         ...genericEnv,
         OCTOPUS_CODEX_SANDBOX: config.octopusSandbox,
+        LOOP_UNTIL_APPROVED: config.loopUntilApproved ? "true" : "false",
         // Gallivanter routing policy: the design-review ceremony must use the
         // same persistent role routing as the rest of Octopus instead of the
         // upstream hardcoded agy/claude/codex-mini defaults.

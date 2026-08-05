@@ -12,6 +12,7 @@ export interface DevelopmentCycleConfig {
     args: string[];
     octopusRoot: string;
     octopusSandbox: string;
+    loopUntilApproved: boolean;
   };
   retentionDays: number;
   notifications: {
@@ -111,6 +112,7 @@ export function loadDevelopmentCycleConfig(env: NodeJS.ProcessEnv = process.env)
         text(env, "OCTOPUS_ROOT", "/data/workspace/contrib/claude-octopus"),
       ),
       octopusSandbox: text(env, "DEVELOPMENT_CYCLE_OCTOPUS_SANDBOX", "danger-full-access"),
+      loopUntilApproved: boolean(env, "DEVELOPMENT_CYCLE_LOOP_UNTIL_APPROVED", true),
     },
     retentionDays: positiveInteger(env, "DEVELOPMENT_CYCLE_RETENTION_DAYS", 30),
     notifications: {

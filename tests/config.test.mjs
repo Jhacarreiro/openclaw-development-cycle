@@ -12,6 +12,7 @@ test("Gallivanter runtime profile preserves operational defaults", () => {
   assert.deepEqual(config.implementation.args, []);
   assert.equal(config.implementation.octopusRoot, "/data/workspace/contrib/claude-octopus");
   assert.equal(config.implementation.octopusSandbox, "danger-full-access");
+  assert.equal(config.implementation.loopUntilApproved, true);
   assert.equal(config.notifications.enabled, false);
   assert.equal(config.notifications.channel, "");
   assert.equal(config.notifications.target, "");
@@ -34,6 +35,7 @@ test("configuration accepts command and Octopus adapter overrides", () => {
     DEVELOPMENT_CYCLE_IMPLEMENTATION_ARGS_JSON: '["--format","json"]',
     DEVELOPMENT_CYCLE_OCTOPUS_ROOT: "/opt/octopus",
     DEVELOPMENT_CYCLE_OCTOPUS_SANDBOX: "read-only",
+    DEVELOPMENT_CYCLE_LOOP_UNTIL_APPROVED: "false",
     DEVELOPMENT_CYCLE_HEARTBEAT_INTERVAL_SECONDS: "15",
     DEVELOPMENT_CYCLE_DEFAULT_TIMEOUT_SECONDS: "900",
     DEVELOPMENT_CYCLE_OBSERVER_ENABLED: "true",
@@ -51,6 +53,7 @@ test("configuration accepts command and Octopus adapter overrides", () => {
   assert.deepEqual(config.implementation.args, ["--format", "json"]);
   assert.equal(config.implementation.octopusRoot, "/opt/octopus");
   assert.equal(config.implementation.octopusSandbox, "read-only");
+  assert.equal(config.implementation.loopUntilApproved, false);
   assert.equal(config.runner.heartbeatIntervalSeconds, 15);
   assert.equal(config.runner.defaultTimeoutSeconds, 900);
   assert.equal(config.observer.enabled, true);

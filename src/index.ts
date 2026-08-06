@@ -1409,6 +1409,10 @@ async function latestRunId(project: string) {
 }
 
 async function projectCycle(params: any) {
+  // Defense-in-depth: host SDKs validate arguments before execute, but direct
+  // or future invocations with null/undefined must behave like {} (the plugin
+  // already defaults every field at runtime), not throw an unhandled trace.
+  params ??= {};
   const supported = [...ACTIONS];
   const action = params.action || "status";
   if (!supported.includes(action)) return { ok: false, error: "unknown_action", action, supported };

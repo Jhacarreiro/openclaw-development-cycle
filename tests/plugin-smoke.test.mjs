@@ -45,3 +45,31 @@ test("plugin registers the generic tool and dispatches request_plan", async (t) 
   assert.match(request, /Development plan request/);
   assert.equal(result.details.notice.reason, "external_gate_not_configured");
 });
+
+test("execute survives null params (defense-in-depth)", async (t) => {
+  const root = join(tmpdir(), `development-cycle-plugin-null-${process.pid}-${Date.now()}`);
+  t.after(() => rm(root, { recursive: true, force: true }));
+
+  process.env.DEVELOPMENT_CYCLE_STATE_ROOT = join(root, "state");
+  process.env.DEVELOPMENT_CYCLE_PROJECT_DOCS_ROOT = join(root, "docs");
+  process.env.DEVELOPMENT_CYCLE_NOTIFICATIONS_ENABLED = "false";
+  process.env.DEVELOPMENT_CYCLE_OBSERVER_ENABLED = "false";
+
+  const { default: plugin } = await import(`../dist/index.js?null=${Date.now()}`);
+  let registered;
+  plugin.register({
+    pluginConfig: {},
+    registerTool(tool) {
+      registered = tool;
+    },
+  });
+
+  // null/undefined must behave like {} (defaults to status/default project),
+  // never throw an unhandled trace.
+  for (const params of [null, undefined]) {
+    const result = await registered.execute("null-call", params, undefined, undefined);
+    assert.equal(result.details.ok, true);
+    assert.equal(result.details.readOnly, true);
+    assert.equal(result.details.project, "default");
+  }
+});

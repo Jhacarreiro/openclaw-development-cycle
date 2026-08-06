@@ -180,3 +180,45 @@ test("planPath via symlink outside roots is rejected", async (t) => {
   assert.equal(blocked.details.ok, false, JSON.stringify(blocked.details));
   assert.equal(blocked.details.error, "plan_path_outside_allowed_roots");
 });
+
+test("malicious projectWikiPath does not expand planPath allowlist", async (t) => {
+  const root = join(tmpdir(), `ocl-pathguard-wiki-${process.pid}-${Date.now()}`);
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await mkdir(join(root, "code"), { recursive: true });
+  await mkdir(join(root, "docs", "fixture-wiki"), { recursive: true });
+  const outside = join(root, "outside");
+  await mkdir(outside, { recursive: true });
+  const secret = join(outside, "secret-plan.md");
+  await writeFile(
+    secret,
+    "# Implementation plan\n\n## Project paths\n- projectRoot\n- projectWikiPath\n\n## Tasks\n1. x\n\n## Validation checks\n- npm test\n\n## Stop conditions\n- none\n\n## Expected artifacts\n- file\n",
+  );
+
+  const tool = await registerPlugin(root);
+  const planReq = await tool.execute(
+    "pw-1",
+    { action: "request_plan", project: "fixture-wiki", projectRoot: join(root, "code"), direction: "wiki path" },
+    undefined,
+    undefined,
+  );
+  assert.equal(planReq.details.ok, true);
+  const runId = planReq.details.runId;
+
+  // Without trust: projectWikiPath=outside would allow planPath under outside.
+  const blocked = await tool.execute(
+    "pw-2",
+    {
+      action: "record_plan",
+      project: "fixture-wiki",
+      runId,
+      projectRoot: join(root, "code"),
+      projectWikiPath: outside,
+      planPath: secret,
+      force: true,
+    },
+    undefined,
+    undefined,
+  );
+  assert.equal(blocked.details.ok, false, JSON.stringify(blocked.details));
+  assert.equal(blocked.details.error, "plan_path_outside_allowed_roots");
+});

@@ -537,15 +537,20 @@ async function packageScriptsBrief(projectRoot: string) {
 }
 async function writePlanningPack(dir: string, params: any) {
   const projectRoot = params.projectRoot || "";
-  const projectWikiPath = params.projectWikiPath || "";
+  // Wiki recon only under projectsWikiRoot — never treat arbitrary paths as wiki.
+  const projectWikiPath = params.projectWikiPath
+    ? resolveTrustedProjectWikiPath(String(params.project || "default"), params.projectWikiPath)
+    : "";
+  const trustedWiki =
+    projectWikiPath && pathWithin(projectsWikiRoot, projectWikiPath) ? projectWikiPath : "";
   const rootStat = projectRoot ? await stat(projectRoot).catch(() => null) : null;
-  const wikiStat = projectWikiPath ? await stat(projectWikiPath).catch(() => null) : null;
+  const wikiStat = trustedWiki ? await stat(trustedWiki).catch(() => null) : null;
   const gitStatus = rootStat?.isDirectory() ? await execSummary("git", ["status", "--short", "--branch"], projectRoot) : "projectRoot missing or not supplied";
   const gitRemote = rootStat?.isDirectory() ? await execSummary("git", ["remote", "-v"], projectRoot) : "projectRoot missing or not supplied";
   const gitDiffStat = rootStat?.isDirectory() ? await execSummary("git", ["diff", "--stat"], projectRoot) : "projectRoot missing or not supplied";
   const rootEntries = rootStat?.isDirectory() ? (await safeDirEntries(projectRoot)).join("\n") : "projectRoot missing or not supplied";
-  const wikiEntries = wikiStat?.isDirectory() ? (await safeDirEntries(projectWikiPath)).join("\n") : "projectWikiPath missing or not supplied";
-  const wikiBrief = wikiStat?.isDirectory() ? await projectWikiBrief(projectWikiPath) : "projectWikiPath missing or not supplied";
+  const wikiEntries = wikiStat?.isDirectory() ? (await safeDirEntries(trustedWiki)).join("\n") : "projectWikiPath missing or not supplied";
+  const wikiBrief = wikiStat?.isDirectory() ? await projectWikiBrief(trustedWiki) : "projectWikiPath missing or not supplied";
   const packageScripts = rootStat?.isDirectory() ? await packageScriptsBrief(projectRoot) : "projectRoot missing or not supplied";
   const contextPack = join(dir, "context_pack.md");
   await writeFile(contextPack, `# Development cycle context pack\n\nProject: ${params.project}\nRun: ${params.runId}\nGenerated: ${new Date().toISOString()}\n\n## User direction\n\n${params.direction || "not supplied"}\n\n## Paths\n\n- projectWikiPath: ${projectWikiPath || "not supplied"}\n- projectWikiPath exists: ${Boolean(wikiStat?.isDirectory())}\n- projectRoot: ${projectRoot || "not supplied"}\n- projectRoot exists: ${Boolean(rootStat?.isDirectory())}\n- existingPlanPath: ${params.existingPlanPath || "not supplied"}\n\n## Project wiki directory\n\n${wikiEntries}\n\n## Project root directory\n\n${rootEntries}\n\n## Git status\n\n\`\`\`text\n${excerpt(gitStatus, 6000)}\n\`\`\`\n\n## Git remotes\n\n\`\`\`text\n${excerpt(gitRemote, 3000)}\n\`\`\`\n\n## Git diff stat\n\n\`\`\`text\n${excerpt(gitDiffStat, 3000)}\n\`\`\`\n\n## Package scripts / validation commands detected\n\n${packageScripts}\n\n## Project wiki brief\n\n${wikiBrief}\n`);
@@ -618,12 +623,37 @@ async function readAllowedTextFile(pathValue: string, roots: Array<string | null
 }
 
 async function persistApprovedPlan(project: string, runId: string, projectWikiPath: string, planText: string) {
-  const normalized = resolve(String(projectWikiPath || ""));
-  if (!pathWithin(projectsWikiRoot, normalized)) return "";
+  const trusted = resolveTrustedProjectWikiPath(project, projectWikiPath);
+  // Resolve through symlinks when the wiki dir already exists so a symlink under
+  // projectsWikiRoot cannot redirect writes outside the root.
+  let normalized = trusted;
+  try {
+    normalized = await realpath(trusted);
+  } catch {
+    normalized = trusted;
+  }
+  let realRoot = resolve(projectsWikiRoot);
+  try {
+    realRoot = await realpath(projectsWikiRoot);
+  } catch {
+    /* root may not exist yet */
+  }
+  const rel = relative(realRoot, normalized).replace(/\\/g, "/");
+  if (!(rel && rel !== ".." && !rel.startsWith("../") && !rel.startsWith("/"))) return "";
   const plansDir = join(normalized, "plans");
   await mkdir(plansDir, { recursive: true });
   const path = join(plansDir, `${new Date().toISOString().slice(0, 10)}-${cleanId(runId)}-implementation-plan.md`);
   await writeFile(path, String(planText).trim() + "\n");
+  // Final containment check on the written path (handles TOCTOU / nested links).
+  try {
+    const realFile = await realpath(path);
+    const fileRel = relative(realRoot, realFile).replace(/\\/g, "/");
+    if (!(fileRel && fileRel !== ".." && !fileRel.startsWith("../") && !fileRel.startsWith("/"))) {
+      return "";
+    }
+  } catch {
+    /* file just written should exist */
+  }
   return path;
 }
 

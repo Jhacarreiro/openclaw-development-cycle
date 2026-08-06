@@ -131,6 +131,29 @@ async function ensureRunnerSupervisor() {
   throw new Error("runner_supervisor_start_failed");
 }
 const cycleDir = filesystemStore.runDir;
+const retentionMs = developmentCycleConfig.retentionDays * 24 * 60 * 60 * 1000;
+
+// Remove run directories whose mtime is older than DEVELOPMENT_CYCLE_RETENTION_DAYS.
+// The config value existed but was never enforced, so run state accumulated forever.
+export async function pruneExpiredRuns() {
+  if (!Number.isFinite(retentionMs) || retentionMs <= 0) return;
+  try {
+    const projects = await readdir(join(cycleRoot, "runs")).catch(() => []);
+    for (const project of projects) {
+      const projectDir = join(cycleRoot, "runs", project);
+      const names = await readdir(projectDir).catch(() => []);
+      for (const name of names) {
+        const runDir = join(projectDir, name);
+        const info = await stat(runDir).catch(() => null);
+        if (info?.isDirectory() && Date.now() - info.mtimeMs > retentionMs) {
+          await rm(runDir, { recursive: true, force: true }).catch(() => null);
+        }
+      }
+    }
+  } catch {
+    // pruning is best-effort
+  }
+}
 const loadJson = filesystemStore.loadJson;
 const saveJson = filesystemStore.saveJson;
 const cycleStatus = filesystemStore.updateStatus;
@@ -1439,6 +1462,8 @@ async function projectCycle(params: any) {
   const supported = [...ACTIONS];
   const action = params.action || "status";
   if (!supported.includes(action)) return { ok: false, error: "unknown_action", action, supported };
+  // status is documented read-only; pruning runs is a side effect, so skip it there.
+  if (action !== "status") await pruneExpiredRuns();
 
   const project = cleanId(params.project || "default");
   const createRun = action === "request_plan" || action === "record_plan";

@@ -3,7 +3,11 @@ export function cleanId(input: unknown, fallback = "run", maxLength = 120): stri
     .replace(/[^a-zA-Z0-9._-]+/g, "-")
     .replace(/^-+|-+$/g, "")
     .slice(0, maxLength);
-  return cleaned || fallback;
+  // path.join treats "." / ".." as traversal; pure-dot tokens must not become dir names.
+  if (!cleaned || cleaned === "." || cleaned === ".." || /^\.+$/.test(cleaned)) {
+    return fallback;
+  }
+  return cleaned;
 }
 
 export function newRunId(project: unknown, now = new Date()): string {

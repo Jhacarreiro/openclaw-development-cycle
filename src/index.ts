@@ -42,7 +42,12 @@ function buildQuery(params: Record<string, any>) {
 }
 
 async function request(path: string, options: any = {}) {
-  const cfg = await loadConfig();
+  let cfg: { url: string; token: string };
+  try {
+    cfg = await loadConfig();
+  } catch (error: any) {
+    return { ok: false, error: `external_gate_config_unreadable: ${String(error?.message || error)}`, secretPath };
+  }
   if (!cfg.token) return { ok: false, error: "missing_external_gate_token", secretPath };
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), options.timeoutMs || 10000);
@@ -1482,6 +1487,15 @@ async function projectCycle(params: any) {
   await mkdir(dir, { recursive: true });
 
   if (action === "request_plan") {
+    // request_plan is always-allowed (it is the cycle restart escape hatch),
+    // but it must not hijack a LIVE run: advancing the phase here would
+    // orphan the running runner (reconcile only observes implementation_*/
+    // corrections_* phases) and stop_implementation is blocked from the
+    // planning phases. Require an explicit stop first.
+    const livePhase = String(status?.phase || "");
+    if (["implementation_launched", "implementation_running", "corrections_launched", "corrections_running"].includes(livePhase)) {
+      return { ok: false, error: "active_run_present", project, runId, dir, phase: livePhase, hint: "Call stop_implementation first, then request a new plan." };
+    }
     const direction = String(params.direction || params.objective || "Create or validate the implementation plan for this development cycle.");
     const projectRoot = String(params.projectRoot || status.projectRoot || "");
     const projectWikiPath = String(params.projectWikiPath || status.projectWikiPath || join(projectsWikiRoot, project));

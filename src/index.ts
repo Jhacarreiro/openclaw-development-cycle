@@ -561,6 +561,29 @@ function pathWithin(root: string, candidate: string) {
   return Boolean(rel) && rel !== ".." && !rel.startsWith("../") && !rel.startsWith("/");
 }
 
+/** True if candidate resolves inside any allowed root (or equals a root). */
+function pathWithinAny(roots: Array<string | null | undefined>, candidate: string) {
+  const c = resolve(String(candidate || ""));
+  for (const root of roots) {
+    if (!root) continue;
+    const r = resolve(String(root));
+    if (c === r || pathWithin(r, c)) return true;
+  }
+  return false;
+}
+
+async function readAllowedTextFile(pathValue: string, roots: Array<string | null | undefined>, errorCode: string) {
+  const raw = String(pathValue || "");
+  if (!raw) return { ok: false as const, error: errorCode };
+  if (!pathWithinAny(roots, raw)) return { ok: false as const, error: errorCode, path: resolve(raw) };
+  try {
+    const text = await readFile(resolve(raw), "utf8");
+    return { ok: true as const, text, path: resolve(raw) };
+  } catch (err: any) {
+    return { ok: false as const, error: "path_unreadable", path: resolve(raw), detail: String(err?.message || err) };
+  }
+}
+
 async function persistApprovedPlan(project: string, runId: string, projectWikiPath: string, planText: string) {
   const normalized = resolve(String(projectWikiPath || ""));
   if (!pathWithin(projectsWikiRoot, normalized)) return "";
@@ -899,7 +922,22 @@ function mergeValidationConfig(base: any, extra: any) {
 
 async function loadProjectValidationConfig(project: string, status: any, params: any = {}) {
   const projectWikiPath = String(params.projectWikiPath || status?.projectWikiPath || join(projectsWikiRoot, project));
-  const candidates = [params.validationConfigPath, join(projectWikiPath, "validation.json")].filter(Boolean).map(String);
+  const allowedRoots = [projectsWikiRoot, wikiRoot, projectWikiPath, cycleRoot];
+  const candidates: string[] = [];
+  if (params.validationConfigPath) {
+    const requested = String(params.validationConfigPath);
+    if (!pathWithinAny(allowedRoots, requested)) {
+      return {
+        config: defaultValidationConfig(),
+        path: "default",
+        projectWikiPath,
+        rejectedValidationConfigPath: resolve(requested),
+        error: "validation_config_path_outside_allowed_roots",
+      };
+    }
+    candidates.push(resolve(requested));
+  }
+  candidates.push(join(projectWikiPath, "validation.json"));
   let config = defaultValidationConfig();
   let path = "default";
   for (const candidate of candidates) {
@@ -1538,7 +1576,14 @@ Create or validate the implementation plan only. Do not implement. The plan must
   }
 
   if (action === "record_plan") {
-    const planText = params.planText || (params.planPath ? await readFile(String(params.planPath), "utf8") : "");
+    let planText = params.planText || "";
+    if (!String(planText).trim() && params.planPath) {
+      const projectRootEarly = String(params.projectRoot || status.projectRoot || "");
+      const projectWikiPathEarly = String(params.projectWikiPath || status.projectWikiPath || join(projectsWikiRoot, project));
+      const loaded = await readAllowedTextFile(String(params.planPath), [dir, cycleRoot, projectsWikiRoot, wikiRoot, projectRootEarly, projectWikiPathEarly], "plan_path_outside_allowed_roots");
+      if (!loaded.ok) return { ok: false, error: loaded.error, project, runId, dir, path: (loaded as any).path };
+      planText = loaded.text;
+    }
     if (!String(planText).trim()) return { ok: false, error: "planText_or_planPath_required", project, runId, dir };
     if (!params.force && looksLikePlanRequest(String(planText))) {
       return { ok: false, error: "plan_request_not_implementation_plan", project, runId, dir, nextAction: "Ask an external gate or human reviewer to write the actual implementation plan, then call record_plan with that plan. Use force only after explicit human confirmation." };
@@ -1562,7 +1607,13 @@ Create or validate the implementation plan only. Do not implement. The plan must
     if (!projectRoot) return { ok: false, error: "projectRoot_required", project, runId, dir, wikiRoot, projectWikiPath, hint: "projectRoot must be the real code checkout; projectWikiPath is only docs/state." };
     const rootStat = await stat(projectRoot).catch(() => null);
     if (!rootStat?.isDirectory()) return { ok: false, error: "projectRoot_missing_or_not_directory", project, runId, dir, projectRoot, wikiRoot, projectWikiPath, hint: "Pass the configured project documentation directory separately from the real code checkout." };
-    const plan = params.planText || (params.planPath ? await readFile(String(params.planPath), "utf8") : await readTextIfExists(join(dir, "implementation_plan.md")));
+    let plan = params.planText || "";
+    if (!String(plan).trim() && params.planPath) {
+      const loaded = await readAllowedTextFile(String(params.planPath), [dir, cycleRoot, projectsWikiRoot, wikiRoot, projectRoot, projectWikiPath], "plan_path_outside_allowed_roots");
+      if (!loaded.ok) return { ok: false, error: loaded.error, project, runId, dir, path: (loaded as any).path };
+      plan = loaded.text;
+    }
+    if (!String(plan).trim()) plan = await readTextIfExists(join(dir, "implementation_plan.md"));
     if (!String(plan).trim()) return { ok: false, error: "missing_implementation_plan", project, runId, dir, expected: join(dir, "implementation_plan.md") };
     const adapter = String(params.implementationAdapter || status.implementationAdapter || implementationConfig.adapter);
     const command = String(params.implementationCommand || (adapter === "octopus" ? "tangle" : "implement"));
@@ -1591,7 +1642,12 @@ Create or validate the implementation plan only. Do not implement. The plan must
   }
 
   if (action === "record_delivery") {
-    const deliveryText = params.deliveryText || (params.deliveryPath ? await readFile(String(params.deliveryPath), "utf8") : "");
+    let deliveryText = params.deliveryText || "";
+    if (!String(deliveryText).trim() && params.deliveryPath) {
+      const loaded = await readAllowedTextFile(String(params.deliveryPath), [dir, cycleRoot, projectsWikiRoot, wikiRoot, status?.projectRoot, status?.projectWikiPath, params.projectRoot, params.projectWikiPath], "delivery_path_outside_allowed_roots");
+      if (!loaded.ok) return { ok: false, error: loaded.error, project, runId, dir, path: (loaded as any).path };
+      deliveryText = loaded.text;
+    }
     if (!String(deliveryText).trim()) return { ok: false, error: "deliveryText_or_deliveryPath_required", project, runId, dir };
     const file = join(dir, "implementation_delivery.md");
     await writeFile(file, String(deliveryText));
@@ -1615,7 +1671,13 @@ Create or validate the implementation plan only. Do not implement. The plan must
   }
 
   if (action === "record_final_validation") {
-    const validationText = params.validationText || params.feedbackText || (params.validationPath ? await readFile(String(params.validationPath), "utf8") : params.feedbackPath ? await readFile(String(params.feedbackPath), "utf8") : "");
+    let validationText = params.validationText || params.feedbackText || "";
+    if (!String(validationText).trim() && (params.validationPath || params.feedbackPath)) {
+      const pathValue = String(params.validationPath || params.feedbackPath);
+      const loaded = await readAllowedTextFile(pathValue, [dir, cycleRoot, projectsWikiRoot, wikiRoot, status?.projectRoot, status?.projectWikiPath, params.projectRoot, params.projectWikiPath], "validation_path_outside_allowed_roots");
+      if (!loaded.ok) return { ok: false, error: loaded.error, project, runId, dir, path: (loaded as any).path };
+      validationText = loaded.text;
+    }
     if (!String(validationText).trim()) return { ok: false, error: "validationText_or_validationPath_required", project, runId, dir };
     const parsedDecision = parseFinalDecision(validationText);
     if (!parsedDecision.ok) return { ok: false, project, runId, dir, ...parsedDecision };
@@ -1631,7 +1693,13 @@ Create or validate the implementation plan only. Do not implement. The plan must
     const projectRoot = String(params.projectRoot || status.projectRoot || "");
     if (!projectRoot) return { ok: false, error: "projectRoot_required", project, runId, dir };
     const plan = await readTextIfExists(join(dir, "implementation_plan.md"));
-    const validation = params.feedbackText || params.validationText || (params.feedbackPath ? await readFile(String(params.feedbackPath), "utf8") : await readTextIfExists(join(dir, "final_validation_response.md")));
+    let validation = params.feedbackText || params.validationText || "";
+    if (!String(validation).trim() && params.feedbackPath) {
+      const loaded = await readAllowedTextFile(String(params.feedbackPath), [dir, cycleRoot, projectsWikiRoot, wikiRoot, projectRoot, status?.projectWikiPath, params.projectWikiPath], "feedback_path_outside_allowed_roots");
+      if (!loaded.ok) return { ok: false, error: loaded.error, project, runId, dir, path: (loaded as any).path };
+      validation = loaded.text;
+    }
+    if (!String(validation).trim()) validation = await readTextIfExists(join(dir, "final_validation_response.md"));
     if (!String(validation).trim()) return { ok: false, error: "missing_final_validation_feedback", project, runId, dir };
     const adapter = String(params.implementationAdapter || status.implementationAdapter || implementationConfig.adapter);
     const command = String(params.implementationCommand || (adapter === "octopus" ? "tangle" : "correct"));

@@ -1631,7 +1631,7 @@ Create or validate the implementation plan only. Do not implement. The plan must
     const projectRoot = String(params.projectRoot || status.projectRoot || "");
     if (!projectRoot) return { ok: false, error: "projectRoot_required", project, runId, dir };
     const plan = await readTextIfExists(join(dir, "implementation_plan.md"));
-    const validation = params.feedbackText || params.validationText || (params.feedbackPath ? await readFile(String(params.feedbackPath), "utf8") : await readTextIfExists(join(dir, "final_validation_response.md")));
+    const validation = params.feedbackText || params.validationText || (params.feedbackPath ? await readFile(String(params.feedbackPath), "utf8") : await readTextIfExists(join(dir, "final_validation_response.md"))) || await readTextIfExists(join(dir, "validation_summary.md"));
     if (!String(validation).trim()) return { ok: false, error: "missing_final_validation_feedback", project, runId, dir };
     const adapter = String(params.implementationAdapter || status.implementationAdapter || implementationConfig.adapter);
     const command = String(params.implementationCommand || (adapter === "octopus" ? "tangle" : "correct"));

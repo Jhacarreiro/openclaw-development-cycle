@@ -32,6 +32,8 @@ const ALLOWED_PHASES: Partial<Record<DevelopmentCycleAction, ReadonlySet<string>
     "implementation_delivered",
     "corrections_completed",
     "external_validation_failed",
+    "external_validation_needs_revision",
+    "external_validation_stopped",
   ]),
   record_delivery: new Set(["implementation_launched", "implementation_running", "implementation_failed"]),
   request_final_validation: new Set([
@@ -41,7 +43,7 @@ const ALLOWED_PHASES: Partial<Record<DevelopmentCycleAction, ReadonlySet<string>
   ]),
   record_final_validation: new Set(["waiting_final_validation"]),
   start_corrections: new Set(["needs_corrections"]),
-  close: new Set(["final_validated", "stopped"]),
+  close: new Set(["final_validated", "stopped", "external_validation_stopped"]),
 };
 
 export type TransitionCheck =

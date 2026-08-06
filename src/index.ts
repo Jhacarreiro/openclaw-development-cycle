@@ -31,14 +31,9 @@ async function loadConfig() {
   return { url: (cfg.EXTERNAL_GATE_URL || defaultUrl).replace(/\/$/, ""), token: cfg.EXTERNAL_GATE_TOKEN || "" };
 }
 
-function buildQuery(params: Record<string, any>) {
-  const qs = new URLSearchParams();
-  for (const [key, value] of Object.entries(params || {})) {
-    if (value === undefined || value === null || value === "") continue;
-    qs.set(key, String(value));
-  }
-  const s = qs.toString();
-  return s ? `?${s}` : "";
+function redactRemoteCredentials(text: string) {
+  // Strip userinfo (user:token@) from remote URLs before they reach context packs / external gates.
+  return String(text || "").replace(/([a-zA-Z][a-zA-Z0-9+.-]*:\/\/)[^@\s]+@/g, "$1***@");
 }
 
 async function request(path: string, options: any = {}) {
@@ -253,11 +248,8 @@ finalize() {
   printf '%s\n' "$exited_at" > ${JSON.stringify(exitedAtPath)}
   terminal_status=completed
   [ "$rc" -eq 0 ] || terminal_status=failed
-  status_tmp="\${STATUS_FILE}.tmp.$$"
-  if jq --arg status "$terminal_status" --arg launchState exited --argjson exitCode "$rc" --arg exitedAt "$exited_at" --arg updatedAt "$exited_at" '.status = $status | .launchState = $launchState | .exitCode = $exitCode | .exitedAt = $exitedAt | .updatedAt = $updatedAt' "$STATUS_FILE" > "$status_tmp"; then
-    mv "$status_tmp" "$STATUS_FILE"
-  else
-    rm -f "$status_tmp"
+  if python3 -c 'import json, os, sys; p = sys.argv[1]; d = json.load(open(p)) if os.path.exists(p) else {}; d.update(status=sys.argv[2], launchState=sys.argv[3], exitCode=int(sys.argv[4]), exitedAt=sys.argv[5], updatedAt=sys.argv[5]); open(p, "w").write(json.dumps(d, indent=2) + "\n")' "$STATUS_FILE" "$terminal_status" exited "$rc" "$exited_at" 2>/dev/null; then
+    :
   fi
   cleanup_process_group
 }
@@ -313,17 +305,28 @@ ${commandLine} > ${JSON.stringify(stdoutPath)} 2> ${JSON.stringify(stderrPath)}
   });
   await saveJson(statusPath, status);
 
-  const supervisor = await ensureRunnerSupervisor();
-  const launched = await execFileAsync("python3", [runnerSupervisorPath, "--socket", runnerSupervisorSocket, "launch", runnerPath, sessionDir], {
-    cwd: sessionDir,
-    env: { ...process.env, HOME: runtimeHome },
-    timeout: 5000,
-    maxBuffer: 64 * 1024,
-  });
+  const supervisor = await ensureRunnerSupervisor().catch((error: any) => ({ error: String(error?.message || error) }));
+  if (supervisor?.error) {
+    await saveJson(statusPath, { ...status, status: "failed", launchState: "failed", ok: false, error: `runner_supervisor_start_failed: ${supervisor.error}`, failedAt: new Date().toISOString(), updatedAt: new Date().toISOString(), message: "Implementation runner supervisor could not be started; session marked failed." }).catch(() => null);
+    return { ok: false, error: `runner_supervisor_start_failed: ${supervisor.error}`, adapter: launchSpec.adapter, sessionId, sessionDir, statusPath };
+  }
+  let launched;
+  try {
+    launched = await execFileAsync("python3", [runnerSupervisorPath, "--socket", runnerSupervisorSocket, "launch", runnerPath, sessionDir], {
+      cwd: sessionDir,
+      env: { ...process.env, HOME: runtimeHome },
+      timeout: 5000,
+      maxBuffer: 64 * 1024,
+    });
+  } catch (error: any) {
+    await saveJson(statusPath, { ...status, status: "failed", launchState: "failed", ok: false, error: String(error?.message || error), failedAt: new Date().toISOString(), updatedAt: new Date().toISOString(), message: "Implementation runner launch failed; session marked failed." }).catch(() => null);
+    return { ok: false, error: String(error?.message || error), adapter: launchSpec.adapter, sessionId, sessionDir, statusPath };
+  }
   const launchInfo = JSON.parse(String(launched.stdout || "{}"));
   const runnerPid = Number(launchInfo?.pid || 0);
   if (!launchInfo?.ok || !Number.isInteger(runnerPid) || runnerPid <= 1) {
-    throw new Error(`supervised_runner_pid_invalid:${String(launched.stdout || "").trim()}`);
+    await saveJson(statusPath, { ...status, status: "failed", launchState: "failed", ok: false, error: `supervised_runner_pid_invalid:${String(launched.stdout || "").trim()}`, failedAt: new Date().toISOString(), updatedAt: new Date().toISOString(), message: "Implementation runner supervisor returned an invalid pid; session marked failed." }).catch(() => null);
+    return { ok: false, error: `supervised_runner_pid_invalid:${String(launched.stdout || "").trim()}`, adapter: launchSpec.adapter, sessionId, sessionDir, statusPath };
   }
   status.runnerPid = runnerPid;
   status.processGroupId = Number(launchInfo?.pgid || runnerPid);
@@ -541,7 +544,7 @@ async function writePlanningPack(dir: string, params: any) {
   const rootStat = projectRoot ? await stat(projectRoot).catch(() => null) : null;
   const wikiStat = projectWikiPath ? await stat(projectWikiPath).catch(() => null) : null;
   const gitStatus = rootStat?.isDirectory() ? await execSummary("git", ["status", "--short", "--branch"], projectRoot) : "projectRoot missing or not supplied";
-  const gitRemote = rootStat?.isDirectory() ? await execSummary("git", ["remote", "-v"], projectRoot) : "projectRoot missing or not supplied";
+  const gitRemote = rootStat?.isDirectory() ? redactRemoteCredentials(await execSummary("git", ["remote", "-v"], projectRoot)) : "projectRoot missing or not supplied";
   const gitDiffStat = rootStat?.isDirectory() ? await execSummary("git", ["diff", "--stat"], projectRoot) : "projectRoot missing or not supplied";
   const rootEntries = rootStat?.isDirectory() ? (await safeDirEntries(projectRoot)).join("\n") : "projectRoot missing or not supplied";
   const wikiEntries = wikiStat?.isDirectory() ? (await safeDirEntries(projectWikiPath)).join("\n") : "projectWikiPath missing or not supplied";
@@ -651,7 +654,10 @@ async function collectObserverSessions(status: any) {
 async function refreshLaunchedImplementationStatus(dir: string, status: any) {
   const phase = String(status?.phase || "");
   if (!["implementation_launched", "implementation_running", "implementation_failed", "implementation_delivered", "corrections_launched", "corrections_running", "corrections_failed", "corrections_completed"].includes(phase)) return status;
-  const statusPath = status?.directImplementationStatus || status?.directCorrectionsStatus;
+  const isCorrections = phase.startsWith("corrections") || Boolean(status?.directCorrectionsStatus);
+  const statusPath = isCorrections
+    ? (status?.directCorrectionsStatus || status?.directImplementationStatus)
+    : (status?.directImplementationStatus || status?.directCorrectionsStatus);
   let session: any = statusPath ? await readJsonIfExists(String(statusPath)) : null;
   if (!session) {
     const sid = status?.observerSessionId || status?.observerCorrectionsSessionId;
@@ -672,7 +678,7 @@ async function refreshLaunchedImplementationStatus(dir: string, status: any) {
     if (!runnerAlive) {
       const interruptedAt = new Date().toISOString();
       if (statusPath) await saveJson(String(statusPath), { ...session, status: 'interrupted', launchState: 'runner_missing', interruptedAt, updatedAt: interruptedAt, message: 'Implementation runner process disappeared without an exit marker.' });
-      const patch = phase.startsWith('implementation_corrections')
+      const patch = isCorrections
         ? { phase: 'corrections_failed', owner: 'main', ok: false, error: 'implementation_runner_process_missing', correctionsStdout: stdoutPath, correctionsStderr: stderrPath, directCorrectionsStatus: statusPath }
         : { phase: 'implementation_failed', owner: 'main', ok: false, nextAction: 'Inspect Implementation stdout/stderr and agent manifest; reconcile or launch a clean handoff.', error: 'implementation_runner_process_missing', implementationStdout: stdoutPath, implementationStderr: stderrPath, directImplementationStatus: statusPath };
       return await cycleStatus(dir, patch);
@@ -697,12 +703,12 @@ async function refreshLaunchedImplementationStatus(dir: string, status: any) {
       });
     }
     if (exitCode === 0) {
-      const patch = phase.startsWith("implementation_corrections")
+      const patch = isCorrections
         ? { phase: "corrections_completed", owner: "main", nextAction: "Run mechanical validation and council code review again for the corrected delivery.", ok: true, correctionsStdout: stdoutPath, correctionsStderr: stderrPath, directCorrectionsStatus: statusPath, externalValidation: "", validationSummary: "", councilReviewSummary: "", councilReviewSynthesis: "", councilReviewNeedsCorrections: null }
         : { phase: "implementation_delivered", owner: "main", nextAction: "Run mechanical final validation, then council code review.", ok: true, implementationStdout: stdoutPath, implementationStderr: stderrPath, directImplementationStatus: statusPath };
       return await cycleStatus(dir, patch);
     }
-    const patch = phase.startsWith("implementation_corrections")
+    const patch = isCorrections
       ? { phase: "corrections_failed", owner: "main", ok: false, error: `Implementation exited non-zero: ${exitCode}`, correctionsStdout: stdoutPath, correctionsStderr: stderrPath, directCorrectionsStatus: statusPath }
       : { phase: "implementation_failed", owner: "main", ok: false, nextAction: "Inspect Implementation stdout/stderr, fix blockers, then launch a new clean handoff.", error: `Implementation exited non-zero: ${exitCode}`, implementationStdout: stdoutPath, implementationStderr: stderrPath, directImplementationStatus: statusPath };
     return await cycleStatus(dir, patch);

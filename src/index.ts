@@ -1,7 +1,7 @@
 // @ts-nocheck
 import { Type } from "typebox";
 import { defineToolPlugin } from "openclaw/plugin-sdk/tool-plugin";
-import { mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, realpath, stat, writeFile } from "node:fs/promises";
 import { join, relative, resolve } from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -573,14 +573,35 @@ function pathWithinAny(roots: Array<string | null | undefined>, candidate: strin
 }
 
 async function readAllowedTextFile(pathValue: string, roots: Array<string | null | undefined>, errorCode: string) {
-  const raw = String(pathValue || "");
+  const raw = String(pathValue || "").trim();
   if (!raw) return { ok: false as const, error: errorCode };
-  if (!pathWithinAny(roots, raw)) return { ok: false as const, error: errorCode, path: resolve(raw) };
+  const abs = resolve(raw);
+  let realCandidate: string;
   try {
-    const text = await readFile(resolve(raw), "utf8");
-    return { ok: true as const, text, path: resolve(raw) };
-  } catch (err: any) {
-    return { ok: false as const, error: "path_unreadable", path: resolve(raw), detail: String(err?.message || err) };
+    realCandidate = await realpath(abs);
+  } catch (e: any) {
+    return { ok: false as const, error: errorCode, path: abs, detail: String(e?.message || e) };
+  }
+  let allowed = false;
+  for (const root of roots) {
+    if (!root) continue;
+    try {
+      const realRoot = await realpath(resolve(String(root)));
+      const rel = relative(realRoot, realCandidate).replace(/\\/g, "/");
+      if (rel === "" || (Boolean(rel) && rel !== ".." && !rel.startsWith("../") && !rel.startsWith("/"))) {
+        allowed = true;
+        break;
+      }
+    } catch {
+      // root may not exist
+    }
+  }
+  if (!allowed) return { ok: false as const, error: errorCode, path: abs };
+  try {
+    const text = await readFile(realCandidate, "utf8");
+    return { ok: true as const, path: realCandidate, text };
+  } catch (e: any) {
+    return { ok: false as const, error: errorCode, path: realCandidate, detail: String(e?.message || e) };
   }
 }
 
@@ -925,17 +946,41 @@ async function loadProjectValidationConfig(project: string, status: any, params:
   const allowedRoots = [projectsWikiRoot, wikiRoot, projectWikiPath, cycleRoot];
   const candidates: string[] = [];
   if (params.validationConfigPath) {
-    const requested = String(params.validationConfigPath);
-    if (!pathWithinAny(allowedRoots, requested)) {
+    const requested = resolve(String(params.validationConfigPath));
+    let realRequested = "";
+    try {
+      realRequested = await realpath(requested);
+    } catch {
       return {
         config: defaultValidationConfig(),
         path: "default",
         projectWikiPath,
-        rejectedValidationConfigPath: resolve(requested),
+        rejectedValidationConfigPath: requested,
+        error: "validation_config_path_unreadable",
+      };
+    }
+    let allowed = false;
+    for (const root of allowedRoots) {
+      if (!root) continue;
+      try {
+        const realRoot = await realpath(resolve(String(root)));
+        const rel = relative(realRoot, realRequested).replace(/\\/g, "/");
+        if (rel === "" || (Boolean(rel) && rel !== ".." && !rel.startsWith("../") && !rel.startsWith("/"))) {
+          allowed = true;
+          break;
+        }
+      } catch {}
+    }
+    if (!allowed) {
+      return {
+        config: defaultValidationConfig(),
+        path: "default",
+        projectWikiPath,
+        rejectedValidationConfigPath: requested,
         error: "validation_config_path_outside_allowed_roots",
       };
     }
-    candidates.push(resolve(requested));
+    candidates.push(realRequested);
   }
   candidates.push(join(projectWikiPath, "validation.json"));
   let config = defaultValidationConfig();

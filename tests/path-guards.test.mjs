@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, readFile, writeFile, rm, access } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, writeFile, rm, access, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -140,4 +140,43 @@ test("run_final_validation ignores validationConfigPath outside allowed roots", 
     const joined = JSON.stringify(cmds);
     assert.doesNotMatch(joined, /RCE_OK|evil-validation/);
   }
+});
+
+
+test("planPath via symlink outside roots is rejected", async (t) => {
+  const root = join(tmpdir(), `ocl-pathguard-sym-${process.pid}-${Date.now()}`);
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await mkdir(join(root, "code"), { recursive: true });
+  await mkdir(join(root, "docs", "fixture-sym"), { recursive: true });
+  const outside = join(root, "outside");
+  await mkdir(outside, { recursive: true });
+  await writeFile(join(outside, "secret.txt"), "SECRET=should-not-leak\n");
+  // symlink under project docs pointing outside allowed tree
+  await symlink(outside, join(root, "docs", "fixture-sym", "escape"));
+
+  const tool = await registerPlugin(root);
+  const planReq = await tool.execute(
+    "ps-1",
+    { action: "request_plan", project: "fixture-sym", projectRoot: join(root, "code"), direction: "symlink guard" },
+    undefined,
+    undefined,
+  );
+  assert.equal(planReq.details.ok, true);
+  const runId = planReq.details.runId;
+
+  const blocked = await tool.execute(
+    "ps-2",
+    {
+      action: "record_plan",
+      project: "fixture-sym",
+      runId,
+      projectRoot: join(root, "code"),
+      planPath: join(root, "docs", "fixture-sym", "escape", "secret.txt"),
+      force: true,
+    },
+    undefined,
+    undefined,
+  );
+  assert.equal(blocked.details.ok, false, JSON.stringify(blocked.details));
+  assert.equal(blocked.details.error, "plan_path_outside_allowed_roots");
 });

@@ -17,7 +17,13 @@ export function createFilesystemStore(stateRoot: string, now: () => Date = () =>
   const loadJson = async <T extends object = Record<string, unknown>>(path: string): Promise<T> => {
     try {
       return JSON.parse(await readFile(path, "utf8")) as T;
-    } catch {
+    } catch (err: any) {
+      // ENOENT = first run (expected). Anything else (syntax error,
+      // partial write survivor, disk corruption) -> log so corrupt state
+      // cannot silently reset merges or bypass dedup.
+      if (err && err.code !== "ENOENT") {
+        console.error(`[filesystemStore] unreadable state file; using empty object: ${path}:`, err?.message || err);
+      }
       return {} as T;
     }
   };

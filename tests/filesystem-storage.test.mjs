@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { createFilesystemStore } from "../dist/storage/filesystem.js";
+import { cleanId } from "../dist/core/ids.js";
 
 test("filesystem storage uses safe run paths and atomic status updates", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "development-cycle-"));
@@ -11,7 +12,10 @@ test("filesystem storage uses safe run paths and atomic status updates", async (
   const fixedNow = new Date("2026-07-16T10:00:00.000Z");
   const store = createFilesystemStore(root, () => fixedNow);
   const runDir = store.runDir("Project / One", "Run #1");
-  assert.equal(runDir, join(root, "runs", "Project-One", "Run-1"));
+  assert.equal(runDir, join(root, "runs", cleanId("Project / One"), cleanId("Run #1")));
+  // cleanId is injective: sanitized ids differ from their raw inputs.
+  assert.notEqual(cleanId("Project / One"), "Project-One");
+  assert.notEqual(cleanId("Run #1"), "Run-1");
 
   const status = await store.updateStatus(runDir, { phase: "planned" });
   assert.equal(status.updatedAt, fixedNow.toISOString());

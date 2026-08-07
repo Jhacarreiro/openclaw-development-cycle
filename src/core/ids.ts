@@ -21,9 +21,12 @@ export function cleanId(input: unknown, fallback = "run", maxLength = 120): stri
 }
 
 export function newRunId(project: unknown, now = new Date()): string {
-  // Millisecond precision: second precision meant two parallel plan requests
-  // for one project within the same second produced the identical run id and
-  // therefore the identical run directory (status.json overwrite / mixed plans).
+  // Millisecond precision + random tiebreaker: second precision meant two
+  // parallel plan requests for one project within the same second produced
+  // the identical run id and therefore the identical run directory (status
+  // overwrite / mixed plans); ms precision alone still collides when two
+  // requests land in the same millisecond.
   const timestamp = now.toISOString().replace(/[-:T.Z]/g, "").slice(0, 17);
-  return `${cleanId(project)}-${timestamp}`;
+  const tiebreaker = Math.random().toString(36).slice(2, 8);
+  return `${cleanId(project)}-${timestamp}-${tiebreaker}`;
 }

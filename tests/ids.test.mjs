@@ -26,8 +26,10 @@ test("cleanId is injective for colliding inputs", () => {
 
 test("newRunId is deterministic with an injected clock", () => {
   const now = new Date("2026-07-16T12:34:56.000Z");
-  assert.equal(newRunId("Example Project", now), "Example-Project-791490b6-20260716123456000");
-  assert.equal(newRunId("", now), "run-20260716123456000");
+  const id = newRunId("Example Project", now);
+  assert.ok(id.startsWith("Example-Project-791490b6-20260716123456000-"));
+  const id2 = newRunId("", now);
+  assert.ok(id2.startsWith("run-20260716123456000-"));
 });
 
 test("newRunId differs within the same second (ms precision)", () => {

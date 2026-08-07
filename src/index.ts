@@ -356,7 +356,7 @@ async function observerObservation(dir: string, payload: any) {
   try {
     const helperStat = await stat(observerObserveHelper).catch(() => null);
     if (!helperStat?.isFile()) return { ok: false, skipped: true, reason: "observer_observe_helper_missing", helper: observerObserveHelper };
-    const file = join(dir, `observer_observation_${Date.now()}.json`);
+    const file = join(dir, `observer_observation_${Date.now()}_${Math.random().toString(16).slice(2, 10)}.json`);
     await writeFile(file, JSON.stringify(payload, null, 2) + "\n");
     const res = await execFileAsync("node", [observerObserveHelper, file], {
       cwd: dir,

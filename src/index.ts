@@ -152,8 +152,11 @@ export async function pruneExpiredRuns() {
         // in place never updates the dir mtime - it would look "stale"
         // and be pruned while still running. Skip runs with a recent
         // heartbeat (in-place printf rewrite by run-implementation-session.sh).
-        const heartbeat = await stat(join(runDir, "implementation_session", "heartbeat.json")).catch(() => null);
-        if (heartbeat?.isFile() && Date.now() - heartbeat.mtimeMs <= retentionMs) continue;
+        // Corrections runners write to corrections_session/ - check both.
+        const implHeartbeat = await stat(join(runDir, "implementation_session", "heartbeat.json")).catch(() => null);
+        if (implHeartbeat?.isFile() && Date.now() - implHeartbeat.mtimeMs <= retentionMs) continue;
+        const corrHeartbeat = await stat(join(runDir, "corrections_session", "heartbeat.json")).catch(() => null);
+        if (corrHeartbeat?.isFile() && Date.now() - corrHeartbeat.mtimeMs <= retentionMs) continue;
         await rm(runDir, { recursive: true, force: true }).catch(() => null);
       }
     }

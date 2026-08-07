@@ -95,13 +95,18 @@ async function ensureRunnerSupervisor() {
     return parsed;
   };
   try { return await ping(); } catch {}
-  await execFileAsync("sh", ["-c", 'rm -f "$1"; nohup setsid python3 "$2" --socket "$1" serve >/tmp/development-cycle-runner-supervisor.log 2>&1 < /dev/null &', "development-cycle-supervisor-launcher", runnerSupervisorSocket, runnerSupervisorPath], {
+  const launch = await execFileAsync("sh", ["-c", 'rm -f "$1"; setsid python3 "$2" --socket "$1" serve >/tmp/development-cycle-runner-supervisor.log 2>&1 < /dev/null & echo $!', "development-cycle-supervisor-launcher", runnerSupervisorSocket, runnerSupervisorPath], {
     timeout: 5000,
     maxBuffer: 64 * 1024,
   });
+  const supervisorPid = Number.parseInt(String(launch.stdout || "").trim(), 10);
   for (let i = 0; i < 30; i++) {
     await sleep(100);
     try { return await ping(); } catch {}
+  }
+  // Startup failed — do not leave an orphaned supervisor reparented to init.
+  if (Number.isInteger(supervisorPid) && supervisorPid > 1) {
+    try { process.kill(supervisorPid, "SIGTERM"); } catch {}
   }
   throw new Error("runner_supervisor_start_failed");
 }

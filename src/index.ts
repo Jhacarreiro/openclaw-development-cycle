@@ -557,7 +557,14 @@ async function writePlanningPack(dir: string, params: any) {
 }
 function pathWithin(root: string, candidate: string) {
   if (!root || !candidate) return false;
-  const rel = relative(resolve(root), resolve(candidate)).replace(/\\/g, "/");
+  // Normalize to NFC before comparing: macOS/APFS stores and returns
+  // NFD filenames while config env vars are typically NFC, so the same
+  // directory compared across normalization forms produced a false
+  // "outside root" verdict and silently denied plan persistence.
+  const a = resolve(root).normalize("NFC");
+  const b = resolve(candidate).normalize("NFC");
+  if (a === b) return true; // same directory across normalization forms
+  const rel = relative(a, b).replace(/\\/g, "/");
   return Boolean(rel) && rel !== ".." && !rel.startsWith("../") && !rel.startsWith("/");
 }
 

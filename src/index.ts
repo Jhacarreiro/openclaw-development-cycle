@@ -311,7 +311,9 @@ ${commandLine} > ${JSON.stringify(stdoutPath)} 2> ${JSON.stringify(stderrPath)}
     promptPath,
     purpose: params.purpose || "development_cycle implementation",
   });
-  await saveJson(statusPath, status);
+  // Do NOT persist status as "running" yet: if the supervisor launch fails
+  // below we throw, and a persisted running state with no runnerPid would
+  // be permanent phantom litter that never reconciles.
 
   const supervisor = await ensureRunnerSupervisor();
   const launched = await execFileAsync("python3", [runnerSupervisorPath, "--socket", runnerSupervisorSocket, "launch", runnerPath, sessionDir], {
@@ -331,7 +333,10 @@ ${commandLine} > ${JSON.stringify(stdoutPath)} 2> ${JSON.stringify(stderrPath)}
   status.runnerSupervisorSocket = runnerSupervisorSocket;
   status.useProcessGroup = true;
   status.stopSignalPolicy = "process-group-term-kill";
+  status.launchState = "running";
   status.updatedAt = new Date().toISOString();
+  // Only now that the supervisor confirmed the runner PID persist the
+  // running state - a launch failure leaves no phantom running session.
   await saveJson(statusPath, status);
   return {
     ok: true,
@@ -1127,8 +1132,11 @@ async function latestFileByMtime(paths: string[]) {
 
 function councilNeedsCorrectionsText(text: string) {
   const t = String(text || "").toLowerCase();
-  if (/\b(no blocking|no blockers|ready to ship|ship as-is|go\b)/i.test(text) && !/conditional go|must fix|blocker|before ship|before deploy|high\s+[—-]|critical\s+[—-]/i.test(text)) return false;
-  return /conditional go|must fix|blocker|before ship|before deploy|do not ship|revise|high\s+[—-]|critical\s+[—-]/i.test(text) || t.includes("corrections required");
+  // A verdict like "no blockers found, ready to ship" is a PASS: the word
+  // "blocker" inside "no blockers" must not flip it into needing corrections.
+  const cleaned = t.replace(/\bno (blocking|blockers?)\b/g, "pass-signal");
+  if (/\b(no blocking|no blockers|ready to ship|ship as-is|go\b)/i.test(cleaned) && !/conditional go|must fix|blocker|before ship|before deploy|high\s+[—-]|critical\s+[—-]/i.test(cleaned)) return false;
+  return /conditional go|must fix|blocker|before ship|before deploy|do not ship|revise|high\s+[—-]|critical\s+[—-]/i.test(cleaned) || cleaned.includes("corrections required");
 }
 
 function extractCouncilFindings(text: string, max = 10) {
@@ -1264,7 +1272,9 @@ async function launchCouncilCorrections(dir: string, status: any, council: any, 
   const projectRoot = String(params.projectRoot || status?.projectRoot || "");
   const projectWikiPath = String(params.projectWikiPath || status?.projectWikiPath || join(projectsWikiRoot, project));
   const count = Number(status?.councilCorrectionCount || 0);
-  const max = Number(params.autoCouncilCorrectionsMax || 2);
+  const max = params.autoCouncilCorrectionsMax === undefined || params.autoCouncilCorrectionsMax === null || params.autoCouncilCorrectionsMax === ""
+    ? 2
+    : Math.max(0, Number(params.autoCouncilCorrectionsMax) || 0);
   if (!projectRoot) return { ok: false, error: "projectRoot_required" };
   if (count >= max) {
     const next = await cycleStatus(dir, { phase: "council_review_waiting_human", owner: "main", ok: false, nextAction: "Council requested corrections but auto-correction limit was reached." });

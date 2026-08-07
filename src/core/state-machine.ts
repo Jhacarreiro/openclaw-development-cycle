@@ -40,8 +40,17 @@ const ALLOWED_PHASES: Partial<Record<DevelopmentCycleAction, ReadonlySet<string>
     "external_validation_passed",
   ]),
   record_final_validation: new Set(["waiting_final_validation"]),
-  start_corrections: new Set(["needs_corrections"]),
-  close: new Set(["final_validated", "stopped"]),
+  start_corrections: new Set(["needs_corrections", "council_review_needs_corrections"]),
+  close: new Set([
+    "final_validated",
+    "stopped",
+    // Council endgate phases are terminal review states: after a passed
+    // council review (or a failed one / exhausted auto-corrections) the
+    // operator must be able to close the run.
+    "council_validated",
+    "council_review_failed",
+    "council_review_waiting_human",
+  ]),
 };
 
 export type TransitionCheck =

@@ -145,9 +145,16 @@ export async function pruneExpiredRuns() {
       for (const name of names) {
         const runDir = join(projectDir, name);
         const info = await stat(runDir).catch(() => null);
-        if (info?.isDirectory() && Date.now() - info.mtimeMs > retentionMs) {
-          await rm(runDir, { recursive: true, force: true }).catch(() => null);
-        }
+        if (!info?.isDirectory()) continue;
+        if (Date.now() - info.mtimeMs <= retentionMs) continue;
+        // Dir mtime only bumps on entry create/rename/delete, so a
+        // long-running implementation whose heartbeat file is rewritten
+        // in place never updates the dir mtime - it would look "stale"
+        // and be pruned while still running. Skip runs with a recent
+        // heartbeat (in-place printf rewrite by run-implementation-session.sh).
+        const heartbeat = await stat(join(runDir, "implementation_session", "heartbeat.json")).catch(() => null);
+        if (heartbeat?.isFile() && Date.now() - heartbeat.mtimeMs <= retentionMs) continue;
+        await rm(runDir, { recursive: true, force: true }).catch(() => null);
       }
     }
   } catch {

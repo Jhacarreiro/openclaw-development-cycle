@@ -1090,8 +1090,35 @@ async function maybeHandleStalledRun(dir: string, status: any, params: any = {})
   if (!activeRoots.length || !activeProviders.length) return null;
   const activity = await latestRunActivityMtime(status);
   if (!activity.latest) return null;
-  const quietMs = Date.now() - activity.latest;
-  if (quietMs < quietSeconds * 1000) return null;
+  const nowMs = Date.now();
+  const naiveQuietMs = nowMs - activity.latest;
+  if (naiveQuietMs < quietSeconds * 1000) {
+    // Activity is fresh: clear any accumulated quiet time.
+    if (Number(status?.stallQuietAccumMs || 0) > 0) {
+      await cycleStatus(dir, { stallQuietAccumMs: 0 });
+    }
+    return null;
+  }
+  // Accumulate quiet time with a per-check cap. quietMs = now - mtime mixes
+  // wall clock with fs mtimes: a forward clock jump (NTP correction, suspend/
+  // resume) inflates it and would auto-stop a HEALTHY run. Capping each
+  // check's contribution to ~3 heartbeat intervals means a clock jump can
+  // only ever add that much, never the full jump.
+  const heartbeatIntervalMs = Number(
+    params.heartbeatIntervalSeconds || status?.heartbeatIntervalSeconds || 60,
+  ) * 1000;
+  const capMs = Math.max(heartbeatIntervalMs * 3, 1000);
+  const lastCheck = Number(status?.stallLastCheckAt || 0);
+  let delta = lastCheck > 0 ? nowMs - lastCheck : 0;
+  if (delta < 0) delta = 0; // backward jump: contribute nothing
+  if (delta > capMs) delta = capMs;
+  const accumMs = Math.min(
+    Number(status?.stallQuietAccumMs || 0) + delta,
+    quietSeconds * 1000,
+  );
+  await cycleStatus(dir, { stallQuietAccumMs: accumMs, stallLastCheckAt: nowMs });
+  if (accumMs < quietSeconds * 1000) return null;
+  const quietMs = accumMs;
   const reason = `development_cycle stall detector: provider alive but runner artifacts quiet for ${Math.round(quietMs / 1000)}s (threshold ${quietSeconds}s).`;
   const stopped = await stopLaunchedImplementation(dir, status, reason);
   const validation = await runExternalFinalValidation(dir, stopped.status || status, { ...params, project }, "stalled_provider");

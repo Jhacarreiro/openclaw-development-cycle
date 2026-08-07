@@ -103,8 +103,23 @@ def serve(socket_path: str) -> None:
     def ignore_sigchld(_sig, _frame):
         return None
 
+    def shutdown(_sig, _frame):
+        # Runners are setsid()'d into their own process groups; if the
+        # supervisor dies without terminating them they survive, reparent
+        # to init, and run unmanaged (a relaunched supervisor starts with
+        # an empty runners dict and never sees them). Kill every group on
+        # SIGTERM/SIGINT so a supervisor restart cannot orphan runners.
+        for pgid in list(runners.values()):
+            try:
+                terminate_group(pgid, runners)
+            except BaseException:
+                pass
+        os._exit(0)
+
     signal.signal(signal.SIGCHLD, ignore_sigchld)
     signal.signal(signal.SIGPIPE, signal.SIG_IGN)
+    signal.signal(signal.SIGTERM, shutdown)
+    signal.signal(signal.SIGINT, shutdown)
 
     while True:
         try:

@@ -622,7 +622,7 @@ async function readAllowedTextFile(pathValue: string, roots: Array<string | null
   }
 }
 
-async function persistApprovedPlan(project: string, runId: string, projectWikiPath: string, planText: string) {
+async function resolveContainedWikiDir(project: string, projectWikiPath: string): Promise<string> {
   const trusted = resolveTrustedProjectWikiPath(project, projectWikiPath);
   // Resolve through symlinks when the wiki dir already exists so a symlink under
   // projectsWikiRoot cannot redirect writes outside the root.
@@ -640,6 +640,18 @@ async function persistApprovedPlan(project: string, runId: string, projectWikiPa
   }
   const rel = relative(realRoot, normalized).replace(/\\/g, "/");
   if (!(rel && rel !== ".." && !rel.startsWith("../") && !rel.startsWith("/"))) return "";
+  return normalized;
+}
+
+async function persistApprovedPlan(project: string, runId: string, projectWikiPath: string, planText: string) {
+  const normalized = await resolveContainedWikiDir(project, projectWikiPath);
+  if (!normalized) return "";
+  let realRoot = resolve(projectsWikiRoot);
+  try {
+    realRoot = await realpath(projectsWikiRoot);
+  } catch {
+    /* root may not exist yet */
+  }
   const plansDir = join(normalized, "plans");
   await mkdir(plansDir, { recursive: true });
   const path = join(plansDir, `${new Date().toISOString().slice(0, 10)}-${cleanId(runId)}-implementation-plan.md`);
@@ -1335,7 +1347,18 @@ async function runCouncilCodeReview(dir: string, status: any, params: any = {}) 
 async function writeCouncilOnePager(dir: string, status: any, council: any, params: any = {}) {
   const project = cleanId(params.project || status?.project || "default");
   const runId = cleanId(params.runId || status?.runId || "run");
-  const projectWikiPath = resolveTrustedProjectWikiPath(project, params.projectWikiPath, status?.projectWikiPath);
+  const projectWikiPath = await resolveContainedWikiDir(project, String(params.projectWikiPath || status?.projectWikiPath || ""));
+  if (!projectWikiPath) {
+    // Fall back to cycle dir when wiki path escapes or is missing.
+    const reportsDir = join(dir, "reports");
+    await mkdir(reportsDir, { recursive: true });
+    const stamp = new Date().toISOString().slice(0, 19).replace(/[-:T]/g, "");
+    const out = join(reportsDir, `${stamp}-${runId}-code-review-one-pager.md`);
+    const content = `# ${project} — code review one-pager\n\nRun: ${runId}\nGenerated: ${new Date().toISOString()}\n\n(wiki path untrusted; wrote under cycle dir)\n`;
+    await writeFile(out, content);
+    const next = await cycleStatus(dir, { councilOnePagerWikiPath: out, councilOnePagerGeneratedAt: new Date().toISOString() });
+    return { path: out, content, status: next };
+  }
   const reportsDir = join(projectWikiPath, "reports");
   await mkdir(reportsDir, { recursive: true });
   const stamp = new Date().toISOString().slice(0, 19).replace(/[-:T]/g, "");

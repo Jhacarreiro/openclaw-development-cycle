@@ -222,3 +222,67 @@ test("malicious projectWikiPath does not expand planPath allowlist", async (t) =
   assert.equal(blocked.details.ok, false, JSON.stringify(blocked.details));
   assert.equal(blocked.details.error, "plan_path_outside_allowed_roots");
 });
+
+test("projectWikiPath that is a dir-symlink under wiki root does not write outside", async (t) => {
+  const root = join(tmpdir(), `ocl-pathguard-wsym-${process.pid}-${Date.now()}`);
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await mkdir(join(root, "code"), { recursive: true });
+  await mkdir(join(root, "docs", "fixture-wsym"), { recursive: true });
+  const outside = join(root, "outside-target");
+  await mkdir(outside, { recursive: true });
+  // Lexically under projectsWikiRoot, but realpath escapes:
+  await symlink(outside, join(root, "docs", "fixture-wsym", "escape-dir"));
+
+  const tool = await registerPlugin(root);
+  const planReq = await tool.execute(
+    "ws-1",
+    { action: "request_plan", project: "fixture-wsym", projectRoot: join(root, "code"), direction: "wiki symlink write" },
+    undefined,
+    undefined,
+  );
+  assert.equal(planReq.details.ok, true);
+  const runId = planReq.details.runId;
+
+  const planBody = `# Implementation plan
+
+## Project paths
+- projectRoot
+- projectWikiPath
+
+## Tasks
+1. x
+
+## Validation checks
+- npm test
+
+## Stop conditions
+- none
+
+## Expected artifacts
+- file
+`;
+  const recorded = await tool.execute(
+    "ws-2",
+    {
+      action: "record_plan",
+      project: "fixture-wsym",
+      runId,
+      projectRoot: join(root, "code"),
+      projectWikiPath: join(root, "docs", "fixture-wsym", "escape-dir"),
+      planText: planBody,
+      force: true,
+    },
+    undefined,
+    undefined,
+  );
+  // Plan may record into cycle state, but must NOT create outside-target/plans/*
+  const leaked = join(outside, "plans");
+  let leakedExists = false;
+  try {
+    await access(leaked);
+    leakedExists = true;
+  } catch {
+    leakedExists = false;
+  }
+  assert.equal(leakedExists, false, `write escaped to ${leaked}; details=${JSON.stringify(recorded.details)}`);
+});

@@ -648,6 +648,32 @@ async function collectObserverSessions(status: any) {
   return out;
 }
 
+
+async function finalizeObserverSessions(dir: string, status: any, terminal: string) {
+  if (!developmentCycleConfig.observer.enabled) return;
+  const ids = [
+    status?.observerSessionId,
+    status?.observerCorrectionsSessionId,
+    status?.observerObservationId,
+    status?.observerCorrectionsObservationId,
+  ].filter(Boolean).map(String);
+  for (const id of ids) {
+    try {
+      await updateImplementationObserverSession(dir, id, {
+        project: status?.project,
+        runId: status?.runId,
+        projectRoot: status?.projectRoot,
+        projectWikiPath: status?.projectWikiPath,
+        status: terminal,
+        summary: `development_cycle ${terminal} ${status?.project || ""}`,
+        message: `Development cycle ${terminal} for ${status?.project || "project"}`,
+      });
+    } catch {
+      /* observer is optional */
+    }
+  }
+}
+
 async function refreshLaunchedImplementationStatus(dir: string, status: any) {
   const phase = String(status?.phase || "");
   if (!["implementation_launched", "implementation_running", "implementation_failed", "implementation_delivered", "corrections_launched", "corrections_running", "corrections_failed", "corrections_completed"].includes(phase)) return status;
@@ -700,11 +726,13 @@ async function refreshLaunchedImplementationStatus(dir: string, status: any) {
       const patch = phase.startsWith("implementation_corrections")
         ? { phase: "corrections_completed", owner: "main", nextAction: "Run mechanical validation and council code review again for the corrected delivery.", ok: true, correctionsStdout: stdoutPath, correctionsStderr: stderrPath, directCorrectionsStatus: statusPath, externalValidation: "", validationSummary: "", councilReviewSummary: "", councilReviewSynthesis: "", councilReviewNeedsCorrections: null }
         : { phase: "implementation_delivered", owner: "main", nextAction: "Run mechanical final validation, then council code review.", ok: true, implementationStdout: stdoutPath, implementationStderr: stderrPath, directImplementationStatus: statusPath };
+      await finalizeObserverSessions(dir, status, "completed");
       return await cycleStatus(dir, patch);
     }
     const patch = phase.startsWith("implementation_corrections")
       ? { phase: "corrections_failed", owner: "main", ok: false, error: `Implementation exited non-zero: ${exitCode}`, correctionsStdout: stdoutPath, correctionsStderr: stderrPath, directCorrectionsStatus: statusPath }
       : { phase: "implementation_failed", owner: "main", ok: false, nextAction: "Inspect Implementation stdout/stderr, fix blockers, then launch a new clean handoff.", error: `Implementation exited non-zero: ${exitCode}`, implementationStdout: stdoutPath, implementationStderr: stderrPath, directImplementationStatus: statusPath };
+    await finalizeObserverSessions(dir, status, "failed");
     return await cycleStatus(dir, patch);
   }
   return status;
@@ -1385,6 +1413,7 @@ async function stopLaunchedImplementation(dir: string, status: any, reason: stri
   const stopped = [];
   for (const target of targets) stopped.push(await stopDirectImplementationRunnerSession(target, reason));
   const stoppedAt = new Date().toISOString();
+  await finalizeObserverSessions(dir, status, "stopped");
   const next = await cycleStatus(dir, {
     phase: "stopped",
     owner: "main",

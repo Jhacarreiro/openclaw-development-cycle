@@ -1413,6 +1413,14 @@ async function latestRunId(project: string) {
   } catch { return ""; }
 }
 
+const LIVE_RUN_PHASES = ["implementation_launched", "implementation_running", "corrections_launched", "corrections_running"];
+
+// Returns the current live phase when the run has an active runner, else "".
+function liveRunPhase(phase: any): string {
+  const p = String(phase || "");
+  return LIVE_RUN_PHASES.includes(p) ? p : "";
+}
+
 async function projectCycle(params: any) {
   const supported = [...ACTIONS];
   const action = params.action || "status";
@@ -1492,8 +1500,8 @@ async function projectCycle(params: any) {
     // orphan the running runner (reconcile only observes implementation_*/
     // corrections_* phases) and stop_implementation is blocked from the
     // planning phases. Require an explicit stop first.
-    const livePhase = String(status?.phase || "");
-    if (["implementation_launched", "implementation_running", "corrections_launched", "corrections_running"].includes(livePhase)) {
+    const livePhase = liveRunPhase(status?.phase);
+    if (livePhase) {
       return { ok: false, error: "active_run_present", project, runId, dir, phase: livePhase, hint: "Call stop_implementation first, then request a new plan." };
     }
     const direction = String(params.direction || params.objective || "Create or validate the implementation plan for this development cycle.");
@@ -1546,8 +1554,19 @@ Create or validate the implementation plan only. Do not implement. The plan must
 `;
     const file = join(dir, "plan_request.md");
     await writeFile(file, text);
+    // TOCTOU: `status` above was read before any of the writes in this
+    // handler; a concurrent start_implementation may have recorded its launch
+    // since. Re-read the freshest status and re-apply the live-run guard
+    // immediately before the phase transition that would orphan the runner.
+    const freshPhase = liveRunPhase((await loadJson(join(dir, "status.json")))?.phase);
+    if (freshPhase) {
+      return { ok: false, error: "active_run_present", project, runId, dir, phase: freshPhase, hint: "Call stop_implementation first, then request a new plan." };
+    }
     const next = await cycleStatus(dir, { phase: "waiting_external_plan", owner: "external_gate_or_human", nextAction: "Send plan_request.md plus planning pack to an external gate or human reviewer, then call record_plan with planText or planPath.", project, runId, projectRoot, projectWikiPath, direction, planRequest: file, planningPack });
     const notice = await sendCycleNotice(params, runId, `Development plan needed: ${project}`, `Development plan request ready for an external gate or human reviewer validation: ${file}`);
+    // A failing notice must not be silently dropped: persist the error into
+    // status so later status reads show the gate was never notified.
+    if (!notice.ok) await cycleStatus(dir, { externalGateNotice: { ...notice, sentAt: new Date().toISOString() } });
     return { ok: true, project, runId, dir, phase: next.phase, planRequest: file, notice };
   }
 
@@ -1625,6 +1644,9 @@ Create or validate the implementation plan only. Do not implement. The plan must
     await writeFile(file, `# Final validation request for external gate\n\nProject: ${project}\nRun: ${runId}\n\nReview the approved plan, delivery summary, test evidence, Observer sessions and risk checklist. Return exactly one decision as the first token: go | revise | stop.\n\nGO only if the plan was fulfilled, evidence is adequate, no protected/risky paths were changed without explicit authorization, worktree state is understood, and required docs/runbooks/state were updated. If revise, include direct delta-only correction instructions for Implementation. If stop, explain the blocker for the operator.\n\nValidation pack files:\n- deliverySummary: ${validationPack.deliverySummary}\n- artifactManifest: ${validationPack.artifactManifest}\n- observerSessions: ${validationPack.observerSessions}\n- testEvidence: ${validationPack.testEvidence}\n- riskChecklist: ${validationPack.riskChecklist}\n\n${parts.join("\n\n---\n\n")}\n`);
     const next = await cycleStatus(dir, { phase: "waiting_final_validation", owner: "external_gate_or_human", nextAction: "Send final_validation_request.md plus validation pack to an external gate or human reviewer, then call record_final_validation.", finalValidationRequest: file, validationPack });
     const notice = await sendCycleNotice(params, runId, `Final validation needed: ${project}`, `Final validation request ready for an external gate or human reviewer: ${file}`);
+    // A failing notice must not be silently dropped: persist the error into
+    // status so later status reads show the gate was never notified.
+    if (!notice.ok) await cycleStatus(dir, { externalGateNotice: { ...notice, sentAt: new Date().toISOString() } });
     return { ok: true, project, runId, dir, phase: next.phase, finalValidationRequest: file, validationPack, notice };
   }
 

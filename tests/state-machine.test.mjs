@@ -24,3 +24,8 @@ test("close only accepts terminal human decisions", () => {
   assert.equal(checkActionTransition("close", "stopped").ok, true);
   assert.equal(checkActionTransition("close", "implementation_delivered").ok, false);
 });
+
+test("mechanical revision outcome routes into the corrections path", () => {
+  assert.equal(checkActionTransition("start_corrections", "external_validation_needs_revision").ok, true);
+  assert.equal(checkActionTransition("start_corrections", "external_validation_needs_revision").error, undefined);
+});

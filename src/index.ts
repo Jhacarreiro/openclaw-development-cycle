@@ -33,7 +33,8 @@ async function loadConfig() {
 
 function redactRemoteCredentials(text: string) {
   // Strip userinfo (user:token@) from remote URLs before they reach context packs / external gates.
-  return String(text || "").replace(/([a-zA-Z][a-zA-Z0-9+.-]*:\/\/)[^@\s]+@/g, "$1***@");
+  // Consume ALL userinfo segments (userinfo may itself contain '@') so no credential material leaks past the last '@' before the host.
+  return String(text || "").replace(/([a-zA-Z][a-zA-Z0-9+.-]*:\/\/)(?:[^@\s]+@)+/g, "$1***@");
 }
 
 async function request(path: string, options: any = {}) {
@@ -248,7 +249,7 @@ finalize() {
   printf '%s\n' "$exited_at" > ${JSON.stringify(exitedAtPath)}
   terminal_status=completed
   [ "$rc" -eq 0 ] || terminal_status=failed
-  if python3 -c 'import json, os, sys; p = sys.argv[1]; d = json.load(open(p)) if os.path.exists(p) else {}; d.update(status=sys.argv[2], launchState=sys.argv[3], exitCode=int(sys.argv[4]), exitedAt=sys.argv[5], updatedAt=sys.argv[5]); open(p, "w").write(json.dumps(d, indent=2) + "\n")' "$STATUS_FILE" "$terminal_status" exited "$rc" "$exited_at" 2>/dev/null; then
+  if python3 -c 'import json, os, sys; p = sys.argv[1]; d = json.load(open(p)) if os.path.exists(p) else {}; d.update(status=sys.argv[2], launchState=sys.argv[3], exitCode=int(sys.argv[4]), exitedAt=sys.argv[5], updatedAt=sys.argv[5]); tmp = p + ".tmp-" + str(os.getpid()); open(tmp, "w").write(json.dumps(d, indent=2) + "\n"); os.replace(tmp, p)' "$STATUS_FILE" "$terminal_status" exited "$rc" "$exited_at" 2>/dev/null; then
     :
   fi
   cleanup_process_group
@@ -311,6 +312,7 @@ ${commandLine} > ${JSON.stringify(stdoutPath)} 2> ${JSON.stringify(stderrPath)}
     return { ok: false, error: `runner_supervisor_start_failed: ${supervisor.error}`, adapter: launchSpec.adapter, sessionId, sessionDir, statusPath };
   }
   let launched;
+  let launchInfo: any = null;
   try {
     launched = await execFileAsync("python3", [runnerSupervisorPath, "--socket", runnerSupervisorSocket, "launch", runnerPath, sessionDir], {
       cwd: sessionDir,
@@ -318,11 +320,11 @@ ${commandLine} > ${JSON.stringify(stdoutPath)} 2> ${JSON.stringify(stderrPath)}
       timeout: 5000,
       maxBuffer: 64 * 1024,
     });
+    try { launchInfo = JSON.parse(String(launched.stdout || "{}")); } catch { launchInfo = null; }
   } catch (error: any) {
     await saveJson(statusPath, { ...status, status: "failed", launchState: "failed", ok: false, error: String(error?.message || error), failedAt: new Date().toISOString(), updatedAt: new Date().toISOString(), message: "Implementation runner launch failed; session marked failed." }).catch(() => null);
     return { ok: false, error: String(error?.message || error), adapter: launchSpec.adapter, sessionId, sessionDir, statusPath };
   }
-  const launchInfo = JSON.parse(String(launched.stdout || "{}"));
   const runnerPid = Number(launchInfo?.pid || 0);
   if (!launchInfo?.ok || !Number.isInteger(runnerPid) || runnerPid <= 1) {
     await saveJson(statusPath, { ...status, status: "failed", launchState: "failed", ok: false, error: `supervised_runner_pid_invalid:${String(launched.stdout || "").trim()}`, failedAt: new Date().toISOString(), updatedAt: new Date().toISOString(), message: "Implementation runner supervisor returned an invalid pid; session marked failed." }).catch(() => null);
@@ -654,7 +656,7 @@ async function collectObserverSessions(status: any) {
 async function refreshLaunchedImplementationStatus(dir: string, status: any) {
   const phase = String(status?.phase || "");
   if (!["implementation_launched", "implementation_running", "implementation_failed", "implementation_delivered", "corrections_launched", "corrections_running", "corrections_failed", "corrections_completed"].includes(phase)) return status;
-  const isCorrections = phase.startsWith("corrections") || Boolean(status?.directCorrectionsStatus);
+  const isCorrections = phase.startsWith("corrections");
   const statusPath = isCorrections
     ? (status?.directCorrectionsStatus || status?.directImplementationStatus)
     : (status?.directImplementationStatus || status?.directCorrectionsStatus);
@@ -1068,7 +1070,7 @@ async function runExternalFinalValidation(dir: string, status: any, params: any 
   await writeFile(stderrPath, commandResults.map((r) => `# ${r.command}\n\n${r.stderr || r.error || ""}`).join("\n\n---\n\n"));
   await writeFile(summaryPath, `# Mechanical final validation\n\nProject: ${project}\nRun: ${runId}\nReason: ${reason}\nDecision: ${decision}\nOK: ${ok}\nGenerated: ${result.generatedAt}\nConfig: ${loaded.path}\n\n## Commands\n\n${commandResults.map((r) => `- ${r.ok ? "PASS" : "FAIL"}: ${r.command}${r.timedOut ? " (timed out)" : ""}`).join("\n") || "none"}\n\n## Failures\n\n${failures.length ? failures.map((f) => `- [${f.severity || "revise"}] ${f.check}: ${f.reason || f.path || f.command}`).join("\n") : "none"}\n\n## Preserved diff\n\n${preservedDiff ? `- worktree: ${preservedDiff.worktreePatch} (${preservedDiff.worktreeBytes} bytes)\n- index: ${preservedDiff.indexPatch} (${preservedDiff.indexBytes} bytes)` : "not preserved"}\n`);
   const phase = ok ? "external_validation_passed" : decision === "stop" ? "external_validation_stopped" : "external_validation_needs_revision";
-  const nextAction = ok ? "Mechanical validation passed; human/AI final review may record go or close when appropriate." : decision === "stop" ? "Stop and report the validation blocker to the operator." : "Send delta-only corrections to Implementation or apply a minimal manual fix, then rerun run_final_validation.";
+  const nextAction = ok ? "Mechanical validation passed; human/AI final review may record go or close when appropriate." : decision === "stop" ? "Stop and report the validation blocker to the operator." : "Mechanical validation needs revision; call start_corrections with the validation feedback to launch delta-only corrections.";
   const next = await cycleStatus(dir, { phase, owner: "main", ok, externalValidationDecision: decision, externalValidation: resultPath, validationSummary: summaryPath, validationStdout: stdoutPath, validationStderr: stderrPath, validationConfigPath: loaded.path, nextAction });
   return { ok, decision, project, runId, dir, phase: next.phase, validationResult: resultPath, validationSummary: summaryPath, validationStdout: stdoutPath, validationStderr: stderrPath, failures, commandResults: commandResults.map((r) => ({ command: r.command, ok: r.ok, exitCode: r.exitCode, timedOut: r.timedOut || false, durationMs: r.durationMs })), preservedDiff, status: next };
 }
@@ -1637,7 +1639,7 @@ Create or validate the implementation plan only. Do not implement. The plan must
     const projectRoot = String(params.projectRoot || status.projectRoot || "");
     if (!projectRoot) return { ok: false, error: "projectRoot_required", project, runId, dir };
     const plan = await readTextIfExists(join(dir, "implementation_plan.md"));
-    const validation = params.feedbackText || params.validationText || (params.feedbackPath ? await readFile(String(params.feedbackPath), "utf8") : await readTextIfExists(join(dir, "final_validation_response.md")));
+    const validation = params.feedbackText || params.validationText || (params.feedbackPath ? await readFile(String(params.feedbackPath), "utf8") : (await readTextIfExists(join(dir, "final_validation_response.md"))) || (await readTextIfExists(join(dir, "validation_summary.md"))));
     if (!String(validation).trim()) return { ok: false, error: "missing_final_validation_feedback", project, runId, dir };
     const adapter = String(params.implementationAdapter || status.implementationAdapter || implementationConfig.adapter);
     const command = String(params.implementationCommand || (adapter === "octopus" ? "tangle" : "correct"));

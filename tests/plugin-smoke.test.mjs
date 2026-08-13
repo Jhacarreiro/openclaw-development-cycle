@@ -65,11 +65,16 @@ test("execute survives null params (defense-in-depth)", async (t) => {
   });
 
   // null/undefined must behave like {} (defaults to status/default project),
-  // never throw an unhandled trace.
+  // and with no run recorded yet the documented no-run response is returned
+  // (runId/dir/status null, empty files) instead of a phantom "run" directory.
   for (const params of [null, undefined]) {
     const result = await registered.execute("null-call", params, undefined, undefined);
     assert.equal(result.details.ok, true);
-    assert.equal(result.details.readOnly, true);
     assert.equal(result.details.project, "default");
+    assert.equal(result.details.runId, null);
+    assert.equal(result.details.dir, null);
+    assert.equal(result.details.status, null);
+    assert.deepEqual(result.details.files, []);
+    assert.equal(result.details.nextAction, "request_plan or record_plan");
   }
 });

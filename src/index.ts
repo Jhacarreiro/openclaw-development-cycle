@@ -537,12 +537,11 @@ async function packageScriptsBrief(projectRoot: string) {
 }
 async function writePlanningPack(dir: string, params: any) {
   const projectRoot = params.projectRoot || "";
-  // Wiki recon only under projectsWikiRoot — never treat arbitrary paths as wiki.
-  const projectWikiPath = params.projectWikiPath
-    ? resolveTrustedProjectWikiPath(String(params.project || "default"), params.projectWikiPath)
+  // Resolve through symlinks so a wiki dir under projectsWikiRoot cannot redirect recon reads.
+  const trustedWiki = params.projectWikiPath
+    ? await resolveContainedWikiDir(String(params.project || "default"), String(params.projectWikiPath))
     : "";
-  const trustedWiki =
-    projectWikiPath && pathWithin(projectsWikiRoot, projectWikiPath) ? projectWikiPath : "";
+  const projectWikiPath = trustedWiki;
   const rootStat = projectRoot ? await stat(projectRoot).catch(() => null) : null;
   const wikiStat = trustedWiki ? await stat(trustedWiki).catch(() => null) : null;
   const gitStatus = rootStat?.isDirectory() ? await execSummary("git", ["status", "--short", "--branch"], projectRoot) : "projectRoot missing or not supplied";
@@ -563,7 +562,11 @@ async function writePlanningPack(dir: string, params: any) {
 
 /** Prefer caller-supplied wiki path only when it stays under projectsWikiRoot. */
 function resolveTrustedProjectWikiPath(project: string, ...candidates: Array<string | null | undefined>): string {
-  const fallback = resolve(join(projectsWikiRoot, cleanId(project || "default")));
+  let fallback = resolve(join(projectsWikiRoot, cleanId(project || "default")));
+  // Dot-tokens (`.` / `..`) survive cleanId and would make the fallback the wiki root or its parent.
+  if (!pathWithin(projectsWikiRoot, fallback) || fallback === resolve(projectsWikiRoot)) {
+    fallback = resolve(join(projectsWikiRoot, "default"));
+  }
   for (const c of candidates) {
     if (!c) continue;
     const abs = resolve(String(c));
@@ -587,6 +590,30 @@ function pathWithinAny(roots: Array<string | null | undefined>, candidate: strin
     if (c === r || pathWithin(r, c)) return true;
   }
   return false;
+}
+
+/** Realpath of value when it is an existing directory; else ''. Reject roots that would swallow cycle/wiki trees. */
+async function trustedProjectRoot(value: string): Promise<string> {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  try {
+    const abs = resolve(raw);
+    const st = await stat(abs);
+    if (!st.isDirectory()) return "";
+    const real = await realpath(abs);
+    if (real === resolve("/")) return "";
+    for (const owned of [cycleRoot, projectsWikiRoot, wikiRoot]) {
+      if (!owned) continue;
+      try {
+        const ownedReal = await realpath(resolve(String(owned)));
+        const rel = relative(real, ownedReal).replace(/\\/g, "/");
+        if (rel === "" || (rel && rel !== ".." && !rel.startsWith("../") && !rel.startsWith("/"))) return "";
+      } catch { /* owned root may not exist yet */ }
+    }
+    return real;
+  } catch {
+    return "";
+  }
 }
 
 async function readAllowedTextFile(pathValue: string, roots: Array<string | null | undefined>, errorCode: string) {
@@ -654,6 +681,15 @@ async function persistApprovedPlan(project: string, runId: string, projectWikiPa
   }
   const plansDir = join(normalized, "plans");
   await mkdir(plansDir, { recursive: true });
+  try {
+    const realPlansDir = await realpath(plansDir);
+    const plansRel = relative(realRoot, realPlansDir).replace(/\\/g, "/");
+    if (!(plansRel && plansRel !== ".." && !plansRel.startsWith("../") && !plansRel.startsWith("/"))) {
+      return "";
+    }
+  } catch {
+    return "";
+  }
   const path = join(plansDir, `${new Date().toISOString().slice(0, 10)}-${cleanId(runId)}-implementation-plan.md`);
   await writeFile(path, String(planText).trim() + "\n");
   // Final containment check on the written path (handles TOCTOU / nested links).
@@ -1193,15 +1229,15 @@ async function runExternalFinalValidation(dir: string, status: any, params: any 
   const stop = failures.some((f) => f.severity === "stop");
   const ok = failures.length === 0;
   const decision = ok ? "go" : stop ? "stop" : "revise";
-  const result = { ok, decision, reason, project, runId, generatedAt: new Date().toISOString(), projectRoot, validationConfigPath: loaded.path, config, preservedDiff, commandResults, failures };
+  const result = { ok, decision, reason, project, runId, generatedAt: new Date().toISOString(), projectRoot, validationConfigPath: loaded.path, rejectedValidationConfigPath: loaded.rejectedValidationConfigPath || null, error: loaded.error || null, config, preservedDiff, commandResults, failures };
   await saveJson(resultPath, result);
   await writeFile(stdoutPath, commandResults.map((r) => `# ${r.command}\n\n${r.stdout || ""}`).join("\n\n---\n\n"));
   await writeFile(stderrPath, commandResults.map((r) => `# ${r.command}\n\n${r.stderr || r.error || ""}`).join("\n\n---\n\n"));
-  await writeFile(summaryPath, `# Mechanical final validation\n\nProject: ${project}\nRun: ${runId}\nReason: ${reason}\nDecision: ${decision}\nOK: ${ok}\nGenerated: ${result.generatedAt}\nConfig: ${loaded.path}\n\n## Commands\n\n${commandResults.map((r) => `- ${r.ok ? "PASS" : "FAIL"}: ${r.command}${r.timedOut ? " (timed out)" : ""}`).join("\n") || "none"}\n\n## Failures\n\n${failures.length ? failures.map((f) => `- [${f.severity || "revise"}] ${f.check}: ${f.reason || f.path || f.command}`).join("\n") : "none"}\n\n## Preserved diff\n\n${preservedDiff ? `- worktree: ${preservedDiff.worktreePatch} (${preservedDiff.worktreeBytes} bytes)\n- index: ${preservedDiff.indexPatch} (${preservedDiff.indexBytes} bytes)` : "not preserved"}\n`);
+  await writeFile(summaryPath, `# Mechanical final validation\n\nProject: ${project}\nRun: ${runId}\nReason: ${reason}\nDecision: ${decision}\nOK: ${ok}\nGenerated: ${result.generatedAt}\nConfig: ${loaded.path}\nRejected config: ${loaded.rejectedValidationConfigPath || "none"}${loaded.error ? `\nConfig error: ${loaded.error}` : ""}\n\n## Commands\n\n${commandResults.map((r) => `- ${r.ok ? "PASS" : "FAIL"}: ${r.command}${r.timedOut ? " (timed out)" : ""}`).join("\n") || "none"}\n\n## Failures\n\n${failures.length ? failures.map((f) => `- [${f.severity || "revise"}] ${f.check}: ${f.reason || f.path || f.command}`).join("\n") : "none"}\n\n## Preserved diff\n\n${preservedDiff ? `- worktree: ${preservedDiff.worktreePatch} (${preservedDiff.worktreeBytes} bytes)\n- index: ${preservedDiff.indexPatch} (${preservedDiff.indexBytes} bytes)` : "not preserved"}\n`);
   const phase = ok ? "external_validation_passed" : decision === "stop" ? "external_validation_stopped" : "external_validation_needs_revision";
   const nextAction = ok ? "Mechanical validation passed; human/AI final review may record go or close when appropriate." : decision === "stop" ? "Stop and report the validation blocker to the operator." : "Send delta-only corrections to Implementation or apply a minimal manual fix, then rerun run_final_validation.";
-  const next = await cycleStatus(dir, { phase, owner: "main", ok, externalValidationDecision: decision, externalValidation: resultPath, validationSummary: summaryPath, validationStdout: stdoutPath, validationStderr: stderrPath, validationConfigPath: loaded.path, nextAction });
-  return { ok, decision, project, runId, dir, phase: next.phase, validationResult: resultPath, validationSummary: summaryPath, validationStdout: stdoutPath, validationStderr: stderrPath, failures, commandResults: commandResults.map((r) => ({ command: r.command, ok: r.ok, exitCode: r.exitCode, timedOut: r.timedOut || false, durationMs: r.durationMs })), preservedDiff, status: next };
+  const next = await cycleStatus(dir, { phase, owner: "main", ok, externalValidationDecision: decision, externalValidation: resultPath, validationSummary: summaryPath, validationStdout: stdoutPath, validationStderr: stderrPath, validationConfigPath: loaded.path, rejectedValidationConfigPath: loaded.rejectedValidationConfigPath || null, validationConfigError: loaded.error || null, nextAction });
+  return { ok, decision, project, runId, dir, phase: next.phase, validationResult: resultPath, validationSummary: summaryPath, validationStdout: stdoutPath, validationStderr: stderrPath, failures, commandResults: commandResults.map((r) => ({ command: r.command, ok: r.ok, exitCode: r.exitCode, timedOut: r.timedOut || false, durationMs: r.durationMs })), preservedDiff, rejectedValidationConfigPath: loaded.rejectedValidationConfigPath || null, validationConfigError: loaded.error || null, status: next };
 }
 async function latestRunActivityMtime(status: any) {
   const paths = [status?.implementationStdout, status?.implementationStderr, status?.correctionsStdout, status?.correctionsStderr, status?.directImplementationStdout, status?.directImplementationStderr].filter(Boolean).map(String);
@@ -1347,22 +1383,6 @@ async function runCouncilCodeReview(dir: string, status: any, params: any = {}) 
 async function writeCouncilOnePager(dir: string, status: any, council: any, params: any = {}) {
   const project = cleanId(params.project || status?.project || "default");
   const runId = cleanId(params.runId || status?.runId || "run");
-  const projectWikiPath = await resolveContainedWikiDir(project, String(params.projectWikiPath || status?.projectWikiPath || ""));
-  if (!projectWikiPath) {
-    // Fall back to cycle dir when wiki path escapes or is missing.
-    const reportsDir = join(dir, "reports");
-    await mkdir(reportsDir, { recursive: true });
-    const stamp = new Date().toISOString().slice(0, 19).replace(/[-:T]/g, "");
-    const out = join(reportsDir, `${stamp}-${runId}-code-review-one-pager.md`);
-    const content = `# ${project} — code review one-pager\n\nRun: ${runId}\nGenerated: ${new Date().toISOString()}\n\n(wiki path untrusted; wrote under cycle dir)\n`;
-    await writeFile(out, content);
-    const next = await cycleStatus(dir, { councilOnePagerWikiPath: out, councilOnePagerGeneratedAt: new Date().toISOString() });
-    return { path: out, content, status: next };
-  }
-  const reportsDir = join(projectWikiPath, "reports");
-  await mkdir(reportsDir, { recursive: true });
-  const stamp = new Date().toISOString().slice(0, 19).replace(/[-:T]/g, "");
-  const out = join(reportsDir, `${stamp}-${runId}-code-review-one-pager.md`);
   const projectRoot = String(status?.projectRoot || params.projectRoot || "");
   const gitStat = projectRoot ? await execSummary("git", ["diff", "--stat"], projectRoot, 15000) : "projectRoot not supplied";
   const gitNames = projectRoot ? await execSummary("git", ["diff", "--name-only"], projectRoot, 15000) : "projectRoot not supplied";
@@ -1372,6 +1392,22 @@ async function writeCouncilOnePager(dir: string, status: any, council: any, para
   const decision = council?.needsCorrections ? "Corrections required before ship" : council?.ok ? "Council validated" : "Council review failed or inconclusive";
   const nextSteps = council?.needsCorrections ? "Implementation corrections were/will be launched automatically from the council feedback. Re-run mechanical validation and council review after corrections." : "Ready for human deploy/commit decision after checking the worktree and excluding local runtime artifacts.";
   const content = `# ${project} — code review one-pager\n\nRun: ${runId}\nGenerated: ${new Date().toISOString()}\nDecision: **${decision}**\n\n## What the work was\n\nImplement the approved development-cycle plan for ${project}. The council reviewed the resulting code diff, not the planning document.\n\n## What changed\n\n\`\`\`text\n${excerpt(gitStat, 3000)}\n\`\`\`\n\nChanged files:\n\n\`\`\`text\n${excerpt(gitNames, 2000)}\n\`\`\`\n\n## Mechanical validation\n\n${excerpt(validation, 2500)}\n\n## Council verdict\n\n${excerpt(synthesis, 4500)}\n\n## Key findings\n\n${findings.length ? findings.map((f: string) => `- ${f}`).join("\n") : "- No key findings extracted."}\n\n## Next steps\n\n${nextSteps}\n\n## Artifacts\n\n- Council summary: ${council?.summaryPath || status?.councilReviewSummary || "not available"}\n- Council synthesis: ${council?.synthesisPath || status?.councilReviewSynthesis || "not available"}\n- Mechanical validation: ${status?.externalValidation || "not available"}\n- Run directory: ${dir}\n`;
+  const projectWikiPath = await resolveContainedWikiDir(project, String(params.projectWikiPath || status?.projectWikiPath || ""));
+  if (!projectWikiPath) {
+    // Fall back to cycle dir when wiki path escapes or is missing.
+    const reportsDir = join(dir, "reports");
+    await mkdir(reportsDir, { recursive: true });
+    const stamp = new Date().toISOString().slice(0, 19).replace(/[-:T]/g, "");
+    const out = join(reportsDir, `${stamp}-${runId}-code-review-one-pager.md`);
+    const fallbackContent = `${content}(wiki path untrusted; wrote under cycle dir)\n`;
+    await writeFile(out, fallbackContent);
+    const next = await cycleStatus(dir, { councilOnePagerWikiPath: out, councilOnePagerGeneratedAt: new Date().toISOString() });
+    return { path: out, content: fallbackContent, status: next };
+  }
+  const reportsDir = join(projectWikiPath, "reports");
+  await mkdir(reportsDir, { recursive: true });
+  const stamp = new Date().toISOString().slice(0, 19).replace(/[-:T]/g, "");
+  const out = join(reportsDir, `${stamp}-${runId}-code-review-one-pager.md`);
   await writeFile(out, content);
   const next = await cycleStatus(dir, { councilOnePagerWikiPath: out, councilOnePagerGeneratedAt: new Date().toISOString() });
   return { path: out, content, status: next };
@@ -1688,7 +1724,7 @@ Create or validate the implementation plan only. Do not implement. The plan must
   if (action === "record_plan") {
     let planText = params.planText || "";
     if (!String(planText).trim() && params.planPath) {
-      const projectRootEarly = String(params.projectRoot || status.projectRoot || "");
+      const projectRootEarly = await trustedProjectRoot(String(params.projectRoot || status.projectRoot || ""));
       const projectWikiPathEarly = resolveTrustedProjectWikiPath(project, params.projectWikiPath, status.projectWikiPath);
       const loaded = await readAllowedTextFile(String(params.planPath), [dir, cycleRoot, projectsWikiRoot, wikiRoot, projectRootEarly, projectWikiPathEarly], "plan_path_outside_allowed_roots");
       if (!loaded.ok) return { ok: false, error: loaded.error, project, runId, dir, path: (loaded as any).path };
@@ -1719,7 +1755,7 @@ Create or validate the implementation plan only. Do not implement. The plan must
     if (!rootStat?.isDirectory()) return { ok: false, error: "projectRoot_missing_or_not_directory", project, runId, dir, projectRoot, wikiRoot, projectWikiPath, hint: "Pass the configured project documentation directory separately from the real code checkout." };
     let plan = params.planText || "";
     if (!String(plan).trim() && params.planPath) {
-      const loaded = await readAllowedTextFile(String(params.planPath), [dir, cycleRoot, projectsWikiRoot, wikiRoot, projectRoot, projectWikiPath], "plan_path_outside_allowed_roots");
+      const loaded = await readAllowedTextFile(String(params.planPath), [dir, cycleRoot, projectsWikiRoot, wikiRoot, await trustedProjectRoot(projectRoot), projectWikiPath], "plan_path_outside_allowed_roots");
       if (!loaded.ok) return { ok: false, error: loaded.error, project, runId, dir, path: (loaded as any).path };
       plan = loaded.text;
     }
@@ -1754,7 +1790,7 @@ Create or validate the implementation plan only. Do not implement. The plan must
   if (action === "record_delivery") {
     let deliveryText = params.deliveryText || "";
     if (!String(deliveryText).trim() && params.deliveryPath) {
-      const loaded = await readAllowedTextFile(String(params.deliveryPath), [dir, cycleRoot, projectsWikiRoot, wikiRoot, status?.projectRoot, status?.projectWikiPath && pathWithin(projectsWikiRoot, String(status.projectWikiPath)) ? status.projectWikiPath : null, params.projectRoot, params.projectWikiPath && pathWithin(projectsWikiRoot, String(params.projectWikiPath)) ? params.projectWikiPath : null], "delivery_path_outside_allowed_roots");
+      const loaded = await readAllowedTextFile(String(params.deliveryPath), [dir, cycleRoot, projectsWikiRoot, wikiRoot, await trustedProjectRoot(status?.projectRoot), status?.projectWikiPath && pathWithin(projectsWikiRoot, String(status.projectWikiPath)) ? status.projectWikiPath : null, await trustedProjectRoot(params.projectRoot), params.projectWikiPath && pathWithin(projectsWikiRoot, String(params.projectWikiPath)) ? params.projectWikiPath : null], "delivery_path_outside_allowed_roots");
       if (!loaded.ok) return { ok: false, error: loaded.error, project, runId, dir, path: (loaded as any).path };
       deliveryText = loaded.text;
     }
@@ -1784,7 +1820,7 @@ Create or validate the implementation plan only. Do not implement. The plan must
     let validationText = params.validationText || params.feedbackText || "";
     if (!String(validationText).trim() && (params.validationPath || params.feedbackPath)) {
       const pathValue = String(params.validationPath || params.feedbackPath);
-      const loaded = await readAllowedTextFile(pathValue, [dir, cycleRoot, projectsWikiRoot, wikiRoot, status?.projectRoot, status?.projectWikiPath && pathWithin(projectsWikiRoot, String(status.projectWikiPath)) ? status.projectWikiPath : null, params.projectRoot, params.projectWikiPath && pathWithin(projectsWikiRoot, String(params.projectWikiPath)) ? params.projectWikiPath : null], "validation_path_outside_allowed_roots");
+      const loaded = await readAllowedTextFile(pathValue, [dir, cycleRoot, projectsWikiRoot, wikiRoot, await trustedProjectRoot(status?.projectRoot), status?.projectWikiPath && pathWithin(projectsWikiRoot, String(status.projectWikiPath)) ? status.projectWikiPath : null, await trustedProjectRoot(params.projectRoot), params.projectWikiPath && pathWithin(projectsWikiRoot, String(params.projectWikiPath)) ? params.projectWikiPath : null], "validation_path_outside_allowed_roots");
       if (!loaded.ok) return { ok: false, error: loaded.error, project, runId, dir, path: (loaded as any).path };
       validationText = loaded.text;
     }
@@ -1805,7 +1841,7 @@ Create or validate the implementation plan only. Do not implement. The plan must
     const plan = await readTextIfExists(join(dir, "implementation_plan.md"));
     let validation = params.feedbackText || params.validationText || "";
     if (!String(validation).trim() && params.feedbackPath) {
-      const loaded = await readAllowedTextFile(String(params.feedbackPath), [dir, cycleRoot, projectsWikiRoot, wikiRoot, projectRoot, status?.projectWikiPath && pathWithin(projectsWikiRoot, String(status.projectWikiPath)) ? status.projectWikiPath : null, params.projectWikiPath && pathWithin(projectsWikiRoot, String(params.projectWikiPath)) ? params.projectWikiPath : null], "feedback_path_outside_allowed_roots");
+      const loaded = await readAllowedTextFile(String(params.feedbackPath), [dir, cycleRoot, projectsWikiRoot, wikiRoot, await trustedProjectRoot(projectRoot), status?.projectWikiPath && pathWithin(projectsWikiRoot, String(status.projectWikiPath)) ? status.projectWikiPath : null, params.projectWikiPath && pathWithin(projectsWikiRoot, String(params.projectWikiPath)) ? params.projectWikiPath : null], "feedback_path_outside_allowed_roots");
       if (!loaded.ok) return { ok: false, error: loaded.error, project, runId, dir, path: (loaded as any).path };
       validation = loaded.text;
     }

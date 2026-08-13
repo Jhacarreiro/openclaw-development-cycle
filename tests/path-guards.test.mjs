@@ -286,3 +286,126 @@ test("projectWikiPath that is a dir-symlink under wiki root does not write outsi
   }
   assert.equal(leakedExists, false, `write escaped to ${leaked}; details=${JSON.stringify(recorded.details)}`);
 });
+
+test("broad projectRoot does not make outside planPath readable", async (t) => {
+  const root = join(tmpdir(), `ocl-pathguard-pr-${process.pid}-${Date.now()}`);
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await mkdir(join(root, "code"), { recursive: true });
+  const secret = join(root, "secret.env");
+  await writeFile(secret, "SECRET=should-not-leak\n");
+
+  const tool = await registerPlugin(root);
+  const planReq = await tool.execute(
+    "ppr-1",
+    { action: "request_plan", project: "fixture-pr", projectRoot: join(root, "code"), direction: "projectRoot guard" },
+    undefined,
+    undefined,
+  );
+  assert.equal(planReq.details.ok, true);
+  const runId = planReq.details.runId;
+
+  for (const projectRoot of ["/", root]) {
+    const blocked = await tool.execute(
+      "ppr-2",
+      {
+        action: "record_plan",
+        project: "fixture-pr",
+        runId,
+        projectRoot,
+        planPath: secret,
+        force: true,
+      },
+      undefined,
+      undefined,
+    );
+    assert.equal(blocked.details.ok, false, `projectRoot=${projectRoot} ${JSON.stringify(blocked.details)}`);
+    assert.equal(blocked.details.error, "plan_path_outside_allowed_roots");
+  }
+});
+
+test("resolveTrustedProjectWikiPath fallback does not escape for dot-token projects", async (t) => {
+  const root = join(tmpdir(), `ocl-pathguard-dot-${process.pid}-${Date.now()}`);
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await mkdir(join(root, "code"), { recursive: true });
+  await writeFile(join(root, "code", "package.json"), JSON.stringify({ name: "x", scripts: { check: "true" } }));
+  const sibling = join(root, "sibling");
+  await mkdir(sibling, { recursive: true });
+  const siblingConfig = join(sibling, "validation.json");
+  await writeFile(siblingConfig, JSON.stringify({ commands: ["printf SIBLING_LEAK"] }));
+  await mkdir(join(root, "docs"), { recursive: true });
+  await writeFile(join(root, "docs", "validation.json"), JSON.stringify({ commands: ["printf DOT_ROOT_LEAK"] }));
+
+  const tool = await registerPlugin(root);
+
+  for (const project of ["..", "."]) {
+    const planReq = await tool.execute(
+      "pdot-1",
+      { action: "request_plan", project, projectRoot: join(root, "code"), direction: "dot-token fallback" },
+      undefined,
+      undefined,
+    );
+    assert.equal(planReq.details.ok, true, JSON.stringify(planReq.details));
+    const runId = planReq.details.runId;
+    const dir = planReq.details.dir;
+    const statusPath = join(dir, "status.json");
+    const status = JSON.parse(await readFile(statusPath, "utf8"));
+    status.phase = "implementation_delivered";
+    await writeFile(statusPath, `${JSON.stringify(status, null, 2)}\n`);
+
+    const result = await tool.execute(
+      "pdot-2",
+      {
+        action: "run_final_validation",
+        project,
+        runId,
+        projectRoot: join(root, "code"),
+        validationConfigPath: siblingConfig,
+      },
+      undefined,
+      undefined,
+    );
+    const cmds = JSON.stringify(result.details.commandResults || result.details.failures || []);
+    assert.doesNotMatch(cmds, /SIBLING_LEAK|DOT_ROOT_LEAK/);
+    const loadedPath = result.details.status?.validationConfigPath || result.details.validationConfigPath;
+    assert.ok(
+      !loadedPath || loadedPath === "default" || !String(loadedPath).includes("sibling"),
+      `config path must not be the sibling file; got ${loadedPath}`,
+    );
+    if (result.details.ok !== false || result.details.error !== "invalid_phase_transition") {
+      assert.equal(result.details.status?.validationConfigPath || "default", "default");
+      assert.ok(
+        result.details.rejectedValidationConfigPath || result.details.status?.rejectedValidationConfigPath,
+        `rejected path should surface; details=${JSON.stringify(result.details)}`,
+      );
+    }
+  }
+});
+
+test("writePlanningPack recon does not follow wiki symlink outside the root", async (t) => {
+  const root = join(tmpdir(), `ocl-pathguard-recon-${process.pid}-${Date.now()}`);
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await mkdir(join(root, "code"), { recursive: true });
+  await mkdir(join(root, "docs", "fixture-recon"), { recursive: true });
+  const outside = join(root, "outside-wiki");
+  await mkdir(outside, { recursive: true });
+  await writeFile(join(outside, "README.md"), "SECRET_RECON_LEAK=should-not-appear\n");
+  await symlink(outside, join(root, "docs", "fixture-recon", "escape"));
+
+  const tool = await registerPlugin(root);
+  const planReq = await tool.execute(
+    "precon-1",
+    {
+      action: "request_plan",
+      project: "fixture-recon",
+      projectRoot: join(root, "code"),
+      projectWikiPath: join(root, "docs", "fixture-recon", "escape"),
+      direction: "recon symlink",
+    },
+    undefined,
+    undefined,
+  );
+  assert.equal(planReq.details.ok, true, JSON.stringify(planReq.details));
+  const pack = await readFile(join(planReq.details.dir, "context_pack.md"), "utf8");
+  assert.doesNotMatch(pack, /SECRET_RECON_LEAK/);
+  assert.match(pack, /projectWikiPath missing or not supplied/);
+});

@@ -1,8 +1,8 @@
 // @ts-nocheck
 import { Type } from "typebox";
 import { defineToolPlugin } from "openclaw/plugin-sdk/tool-plugin";
-import { mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
-import { join, relative, resolve } from "node:path";
+import { lstat, mkdir, readFile, readdir, realpath, rm, stat, writeFile } from "node:fs/promises";
+import { join, relative, resolve, sep } from "node:path";
 import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -138,13 +138,27 @@ const retentionMs = developmentCycleConfig.retentionDays * 24 * 60 * 60 * 1000;
 export async function pruneExpiredRuns() {
   if (!Number.isFinite(retentionMs) || retentionMs <= 0) return;
   try {
-    const projects = await readdir(join(cycleRoot, "runs")).catch(() => []);
+    const runsRoot = join(cycleRoot, "runs");
+    const runsRootReal = await realpath(runsRoot).catch(() => resolve(runsRoot));
+    const projects = await readdir(runsRoot).catch(() => []);
     for (const project of projects) {
-      const projectDir = join(cycleRoot, "runs", project);
+      const projectDir = join(runsRoot, project);
+      // Containment: never follow symlinks. readdir() on a symlinked project
+      // directory lists the target, and rm(recursive) on the joined children
+      // would then delete real directories OUTSIDE the runs root. Reject any
+      // symlinked or escaping entry before touching anything under it.
+      const projectInfo = await lstat(projectDir).catch(() => null);
+      if (!projectInfo?.isDirectory()) continue;
+      const projectReal = await realpath(projectDir).catch(() => "");
+      if (!projectReal.startsWith(runsRootReal + sep)) continue;
       const names = await readdir(projectDir).catch(() => []);
       for (const name of names) {
         const runDir = join(projectDir, name);
-        const info = await stat(runDir).catch(() => null);
+        const runInfo = await lstat(runDir).catch(() => null);
+        if (!runInfo?.isDirectory()) continue;
+        const runReal = await realpath(runDir).catch(() => "");
+        if (!runReal.startsWith(runsRootReal + sep)) continue;
+        const info = await stat(runReal).catch(() => null);
         if (!info?.isDirectory()) continue;
         if (Date.now() - info.mtimeMs <= retentionMs) continue;
         // Dir mtime only bumps on entry create/rename/delete, so a
@@ -153,11 +167,11 @@ export async function pruneExpiredRuns() {
         // and be pruned while still running. Skip runs with a recent
         // heartbeat (in-place printf rewrite by run-implementation-session.sh).
         // Corrections runners write to corrections_session/ - check both.
-        const implHeartbeat = await stat(join(runDir, "implementation_session", "heartbeat.json")).catch(() => null);
+        const implHeartbeat = await stat(join(runReal, "implementation_session", "heartbeat.json")).catch(() => null);
         if (implHeartbeat?.isFile() && Date.now() - implHeartbeat.mtimeMs <= retentionMs) continue;
-        const corrHeartbeat = await stat(join(runDir, "corrections_session", "heartbeat.json")).catch(() => null);
+        const corrHeartbeat = await stat(join(runReal, "corrections_session", "heartbeat.json")).catch(() => null);
         if (corrHeartbeat?.isFile() && Date.now() - corrHeartbeat.mtimeMs <= retentionMs) continue;
-        await rm(runDir, { recursive: true, force: true }).catch(() => null);
+        await rm(runReal, { recursive: true, force: true }).catch(() => null);
       }
     }
   } catch {

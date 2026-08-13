@@ -57,6 +57,15 @@ function positiveInteger(env: NodeJS.ProcessEnv, name: string, fallback: number)
   return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
 }
 
+function nonNegativeInteger(env: NodeJS.ProcessEnv, name: string, fallback: number): number {
+  // Retention is the one integer that documents 0 as a meaningful value
+  // ("disabled" opt-out), so it must not fall back on zero like the others.
+  const raw = String(env[name] ?? "").trim();
+  if (raw === "") return fallback;
+  const parsed = Number(raw);
+  return Number.isInteger(parsed) && parsed >= 0 ? parsed : fallback;
+}
+
 function stringArray(env: NodeJS.ProcessEnv, name: string): string[] {
   const value = String(env[name] ?? "").trim();
   if (!value) return [];
@@ -102,7 +111,7 @@ export function loadDevelopmentCycleConfig(env: NodeJS.ProcessEnv = process.env)
       octopusSandbox: text(env, "DEVELOPMENT_CYCLE_OCTOPUS_SANDBOX", "workspace-write"),
       loopUntilApproved: boolean(env, "DEVELOPMENT_CYCLE_LOOP_UNTIL_APPROVED", true),
     },
-    retentionDays: positiveInteger(env, "DEVELOPMENT_CYCLE_RETENTION_DAYS", 30),
+    retentionDays: nonNegativeInteger(env, "DEVELOPMENT_CYCLE_RETENTION_DAYS", 30),
     notifications: {
       enabled: boolean(env, "DEVELOPMENT_CYCLE_NOTIFICATIONS_ENABLED", false),
       channel: text(env, "DEVELOPMENT_CYCLE_NOTIFICATION_CHANNEL"),

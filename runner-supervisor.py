@@ -99,9 +99,19 @@ def serve(socket_path: str) -> None:
     server.listen(16)
     server.settimeout(0.2)
     runners: dict[int, int] = {}
+    launch_in_flight = False
+    shutdown_requested = False
 
     def ignore_sigchld(_sig, _frame):
         return None
+
+    def cleanup_and_exit() -> None:
+        for pgid in list(runners.values()):
+            try:
+                terminate_group(pgid, runners)
+            except BaseException:
+                pass
+        os._exit(0)
 
     def shutdown(_sig, _frame):
         # Runners are setsid()'d into their own process groups; if the
@@ -109,12 +119,14 @@ def serve(socket_path: str) -> None:
         # to init, and run unmanaged (a relaunched supervisor starts with
         # an empty runners dict and never sees them). Kill every group on
         # SIGTERM/SIGINT so a supervisor restart cannot orphan runners.
-        for pgid in list(runners.values()):
-            try:
-                terminate_group(pgid, runners)
-            except BaseException:
-                pass
-        os._exit(0)
+        # launch_runner() forks and setsid()s before serve() records
+        # runners[pid]; if a signal arrives in that window, defer _exit
+        # until the new group is tracked.
+        nonlocal shutdown_requested
+        shutdown_requested = True
+        if launch_in_flight:
+            return
+        cleanup_and_exit()
 
     signal.signal(signal.SIGCHLD, ignore_sigchld)
     signal.signal(signal.SIGPIPE, signal.SIG_IGN)
@@ -142,9 +154,15 @@ def serve(socket_path: str) -> None:
                     elif action == 'launch':
                         runner_path = str(request['runnerPath'])
                         cwd = str(request['cwd'])
-                        pid = launch_runner(runner_path, cwd)
-                        runners[pid] = pid
-                        response = {'ok': True, 'pid': pid, 'pgid': pid, 'supervisorPid': os.getpid()}
+                        launch_in_flight = True
+                        try:
+                            pid = launch_runner(runner_path, cwd)
+                            runners[pid] = pid
+                            response = {'ok': True, 'pid': pid, 'pgid': pid, 'supervisorPid': os.getpid()}
+                        finally:
+                            launch_in_flight = False
+                            if shutdown_requested:
+                                cleanup_and_exit()
                     else:
                         response = {'ok': False, 'error': 'unknown_action'}
                 except Exception as exc:

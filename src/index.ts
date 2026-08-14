@@ -9,6 +9,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { ACTIONS, checkActionTransition } from "./core/state-machine.js";
 import { parseFinalDecision } from "./core/decisions.js";
 import { cleanId, newRunId as createRunId } from "./core/ids.js";
+import { nextStallQuietAccounting } from "./core/stall-accounting.js";
 import { loadDevelopmentCycleConfig } from "./config.js";
 import { createFilesystemStore } from "./storage/filesystem.js";
 import { buildImplementationLaunchSpec, renderShellCommand, renderShellEnvironment } from "./adapters/implementation.js";
@@ -1091,34 +1092,25 @@ async function maybeHandleStalledRun(dir: string, status: any, params: any = {})
   const activity = await latestRunActivityMtime(status);
   if (!activity.latest) return null;
   const nowMs = Date.now();
-  const naiveQuietMs = nowMs - activity.latest;
-  if (naiveQuietMs < quietSeconds * 1000) {
-    // Activity is fresh: clear any accumulated quiet time.
-    if (Number(status?.stallQuietAccumMs || 0) > 0) {
-      await cycleStatus(dir, { stallQuietAccumMs: 0 });
-    }
-    return null;
-  }
-  // Accumulate quiet time with a per-check cap. quietMs = now - mtime mixes
-  // wall clock with fs mtimes: a forward clock jump (NTP correction, suspend/
-  // resume) inflates it and would auto-stop a HEALTHY run. Capping each
-  // check's contribution to ~3 heartbeat intervals means a clock jump can
-  // only ever add that much, never the full jump.
-  const heartbeatIntervalMs = Number(
-    params.heartbeatIntervalSeconds || status?.heartbeatIntervalSeconds || 60,
-  ) * 1000;
-  const capMs = Math.max(heartbeatIntervalMs * 3, 1000);
-  const lastCheck = Number(status?.stallLastCheckAt || 0);
-  let delta = lastCheck > 0 ? nowMs - lastCheck : 0;
-  if (delta < 0) delta = 0; // backward jump: contribute nothing
-  if (delta > capMs) delta = capMs;
-  const accumMs = Math.min(
-    Number(status?.stallQuietAccumMs || 0) + delta,
-    quietSeconds * 1000,
+  const heartbeatIntervalSeconds = Number(
+    params.heartbeatIntervalSeconds || status?.heartbeatIntervalSeconds || runnerHeartbeatIntervalSeconds,
   );
-  await cycleStatus(dir, { stallQuietAccumMs: accumMs, stallLastCheckAt: nowMs });
-  if (accumMs < quietSeconds * 1000) return null;
-  const quietMs = accumMs;
+  const next = nextStallQuietAccounting({
+    nowMs,
+    activityLatestMs: activity.latest,
+    stallQuietAccumMs: Number(status?.stallQuietAccumMs || 0),
+    stallLastCheckAt: Number(status?.stallLastCheckAt || 0),
+    stallLastActivityMtime: Number(status?.stallLastActivityMtime || 0),
+    quietThresholdMs: quietSeconds * 1000,
+    heartbeatIntervalMs: heartbeatIntervalSeconds * 1000,
+  });
+  await cycleStatus(dir, {
+    stallQuietAccumMs: next.stallQuietAccumMs,
+    stallLastCheckAt: next.stallLastCheckAt,
+    stallLastActivityMtime: next.stallLastActivityMtime,
+  });
+  if (!next.shouldStop) return null;
+  const quietMs = next.stallQuietAccumMs;
   const reason = `development_cycle stall detector: provider alive but runner artifacts quiet for ${Math.round(quietMs / 1000)}s (threshold ${quietSeconds}s).`;
   const stopped = await stopLaunchedImplementation(dir, status, reason);
   const validation = await runExternalFinalValidation(dir, stopped.status || status, { ...params, project }, "stalled_provider");

@@ -4,6 +4,7 @@ import {
   buildImplementationLaunchSpec,
   renderShellCommand,
   renderShellEnvironment,
+  jsonShellQuote,
   shellQuote,
 } from "../dist/adapters/implementation.js";
 
@@ -81,4 +82,11 @@ test("shell rendering quotes executable, arguments and environment values", () =
   });
   assert.equal(command, `'/tmp/my runner' 'a'"'"'b' '$(touch /tmp/nope)'`);
   assert.equal(renderShellEnvironment({ SAFE_NAME: "a'b", "bad-name": "ignored" }), `export SAFE_NAME='a'"'"'b'`);
+});
+
+test("jsonShellQuote encodes JSON then shell-quotes the result", () => {
+  assert.equal(jsonShellQuote(`foo"bar`), `'"foo\\"bar"'`);
+  assert.equal(jsonShellQuote("foo\\bar"), `'"foo\\\\bar"'`);
+  assert.equal(jsonShellQuote("foo\nbar"), `'"foo\\nbar"'`);
+  assert.equal(jsonShellQuote("a'b"), `'"a'"'"'b"'`);
 });

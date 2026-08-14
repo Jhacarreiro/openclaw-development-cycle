@@ -1,7 +1,7 @@
 // @ts-nocheck
 import { Type } from "typebox";
 import { defineToolPlugin } from "openclaw/plugin-sdk/tool-plugin";
-import { mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, realpath, stat, writeFile } from "node:fs/promises";
 import { join, relative, resolve } from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -9,6 +9,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { ACTIONS, checkActionTransition } from "./core/state-machine.js";
 import { parseFinalDecision } from "./core/decisions.js";
 import { cleanId, newRunId as createRunId } from "./core/ids.js";
+import { pathWithin } from "./core/paths.js";
 import { loadDevelopmentCycleConfig } from "./config.js";
 import { createFilesystemStore } from "./storage/filesystem.js";
 import { buildImplementationLaunchSpec, renderShellCommand, renderShellEnvironment } from "./adapters/implementation.js";
@@ -555,24 +556,30 @@ async function writePlanningPack(dir: string, params: any) {
   await writeFile(expectedPlanContract, `# Expected implementation plan contract\n\nThe plan returned by an external planner or human reviewer must be an implementation plan, not another planning request.\n\n## Required sections\n\n1. Objective and non-goals\n2. Project paths: projectWikiPath, projectRoot, planPath, affected paths, artifacts, protected/risky paths\n3. Current state summary from context_pack.md\n4. Ordered implementation tasks\n5. Observer / Implementation observation plan\n6. Validation checks and smoke tests\n7. Stop conditions and human-confirmation points\n8. Rollback or recovery notes\n9. Final acceptance criteria\n\nA plan without projectRoot, affected files, validation checks, stop conditions and expected artifacts is not ready for Implementation handoff.\n`);
   return { contextPack, operatorConstraints, expectedPlanContract };
 }
-function pathWithin(root: string, candidate: string) {
-  if (!root || !candidate) return false;
-  // Normalize to NFC before comparing: macOS/APFS stores and returns
-  // NFD filenames while config env vars are typically NFC, so the same
-  // directory compared across normalization forms produced a false
-  // "outside root" verdict and silently denied plan persistence.
-  const a = resolve(root).normalize("NFC");
-  const b = resolve(candidate).normalize("NFC");
-  if (a === b) return true; // same directory across normalization forms
-  const rel = relative(a, b).replace(/\\/g, "/");
-  return Boolean(rel) && rel !== ".." && !rel.startsWith("../") && !rel.startsWith("/");
-}
-
 async function persistApprovedPlan(project: string, runId: string, projectWikiPath: string, planText: string) {
-  const normalized = resolve(String(projectWikiPath || ""));
-  if (!pathWithin(projectsWikiRoot, normalized)) return "";
-  const plansDir = join(normalized, "plans");
+  const requested = resolve(String(projectWikiPath || ""));
+  if (!pathWithin(projectsWikiRoot, requested)) return "";
+  let dest = requested;
+  try {
+    dest = await realpath(requested);
+  } catch {
+    dest = requested;
+  }
+  let realRoot = resolve(projectsWikiRoot);
+  try {
+    realRoot = await realpath(projectsWikiRoot);
+  } catch {
+    /* root may not exist yet */
+  }
+  if (!pathWithin(realRoot, dest)) return "";
+  const plansDir = join(dest, "plans");
   await mkdir(plansDir, { recursive: true });
+  try {
+    const realPlans = await realpath(plansDir);
+    if (!pathWithin(realRoot, realPlans)) return "";
+  } catch {
+    return "";
+  }
   const path = join(plansDir, `${new Date().toISOString().slice(0, 10)}-${cleanId(runId)}-implementation-plan.md`);
   await writeFile(path, String(planText).trim() + "\n");
   return path;

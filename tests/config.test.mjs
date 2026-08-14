@@ -56,3 +56,53 @@ test("configuration accepts command and Octopus adapter overrides", () => {
   assert.equal(config.notifications.account, "work");
   assert.equal(config.openclawBin, "/usr/local/bin/openclaw");
 });
+
+test("positive integer env values accept trimmed decimal digits only", () => {
+  const accepted = loadDevelopmentCycleConfig({
+    HOME: "/tmp/example-home",
+    DEVELOPMENT_CYCLE_RETENTION_DAYS: "14",
+    DEVELOPMENT_CYCLE_HEARTBEAT_INTERVAL_SECONDS: " 45 ",
+    DEVELOPMENT_CYCLE_DEFAULT_TIMEOUT_SECONDS: "3600",
+  });
+  assert.equal(accepted.retentionDays, 14);
+  assert.equal(accepted.runner.heartbeatIntervalSeconds, 45);
+  assert.equal(accepted.runner.defaultTimeoutSeconds, 3600);
+
+  const maxSafe = String(Number.MAX_SAFE_INTEGER);
+  const atLimit = loadDevelopmentCycleConfig({
+    HOME: "/tmp/example-home",
+    DEVELOPMENT_CYCLE_RETENTION_DAYS: maxSafe,
+    DEVELOPMENT_CYCLE_HEARTBEAT_INTERVAL_SECONDS: maxSafe,
+    DEVELOPMENT_CYCLE_DEFAULT_TIMEOUT_SECONDS: maxSafe,
+  });
+  assert.equal(atLimit.retentionDays, Number.MAX_SAFE_INTEGER);
+  assert.equal(atLimit.runner.heartbeatIntervalSeconds, Number.MAX_SAFE_INTEGER);
+  assert.equal(atLimit.runner.defaultTimeoutSeconds, Number.MAX_SAFE_INTEGER);
+});
+
+test("positive integer env values reject Number() syntax and unsafe integers", () => {
+  const cases = [
+    { DEVELOPMENT_CYCLE_RETENTION_DAYS: "1e3" },
+    { DEVELOPMENT_CYCLE_HEARTBEAT_INTERVAL_SECONDS: "1e3" },
+    { DEVELOPMENT_CYCLE_DEFAULT_TIMEOUT_SECONDS: "1e3" },
+    { DEVELOPMENT_CYCLE_RETENTION_DAYS: "0x10" },
+    { DEVELOPMENT_CYCLE_HEARTBEAT_INTERVAL_SECONDS: "0x10" },
+    { DEVELOPMENT_CYCLE_DEFAULT_TIMEOUT_SECONDS: "0x10" },
+    { DEVELOPMENT_CYCLE_RETENTION_DAYS: "0b101" },
+    { DEVELOPMENT_CYCLE_HEARTBEAT_INTERVAL_SECONDS: "0b101" },
+    { DEVELOPMENT_CYCLE_DEFAULT_TIMEOUT_SECONDS: "0b101" },
+    { DEVELOPMENT_CYCLE_RETENTION_DAYS: "9007199254740993" },
+    { DEVELOPMENT_CYCLE_HEARTBEAT_INTERVAL_SECONDS: "0" },
+    { DEVELOPMENT_CYCLE_DEFAULT_TIMEOUT_SECONDS: "-30" },
+    { DEVELOPMENT_CYCLE_RETENTION_DAYS: "30.0" },
+    { DEVELOPMENT_CYCLE_HEARTBEAT_INTERVAL_SECONDS: "+15" },
+    { DEVELOPMENT_CYCLE_DEFAULT_TIMEOUT_SECONDS: "" },
+  ];
+
+  for (const env of cases) {
+    const config = loadDevelopmentCycleConfig({ HOME: "/tmp/example-home", ...env });
+    assert.equal(config.retentionDays, 30, `retentionDays for ${JSON.stringify(env)}`);
+    assert.equal(config.runner.heartbeatIntervalSeconds, 30, `heartbeat for ${JSON.stringify(env)}`);
+    assert.equal(config.runner.defaultTimeoutSeconds, 7200, `timeout for ${JSON.stringify(env)}`);
+  }
+});

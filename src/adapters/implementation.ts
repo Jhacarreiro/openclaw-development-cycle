@@ -1,3 +1,4 @@
+import { existsSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 
 export type ImplementationAdapterKind = "command" | "octopus";
@@ -42,6 +43,21 @@ export interface ImplementationLaunchSpec {
   requestPath: string;
 }
 
+function resolveOpenClawCodexHome(): string {
+  if (process.env.CODEX_HOME && existsSync(join(process.env.CODEX_HOME, "auth.json"))) return process.env.CODEX_HOME;
+  const stateDir = process.env.OPENCLAW_STATE_DIR || "/data/.openclaw";
+  const root = join(stateDir, "agents", "main", "agent", "harness-auth", "codex");
+  if (!existsSync(root)) return "";
+
+  const candidates = readdirSync(root, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => join(root, entry.name))
+    .filter((dir) => existsSync(join(dir, "auth.json")))
+    .sort((a, b) => statSync(join(b, "auth.json")).mtimeMs - statSync(join(a, "auth.json")).mtimeMs);
+
+  return candidates[0] || "";
+}
+
 function genericEnvironment(input: ImplementationLaunchInput): Record<string, string> {
   return {
     DEVELOPMENT_CYCLE_PROJECT: input.project,
@@ -80,6 +96,7 @@ export function buildImplementationLaunchSpec(
       throw new Error("octopus_root_not_configured");
     }
     const sessionId = input.observer?.sessionId || "";
+    const codexHome = resolveOpenClawCodexHome();
     return {
       adapter,
       displayName: "Octopus",
@@ -95,6 +112,7 @@ export function buildImplementationLaunchSpec(
       env: {
         ...genericEnv,
         OCTOPUS_CODEX_SANDBOX: config.octopusSandbox,
+        ...(codexHome ? { CODEX_HOME: codexHome } : {}),
         LOOP_UNTIL_APPROVED: config.loopUntilApproved ? "true" : "false",
         // Gallivanter routing policy: the design-review ceremony must use the
         // same persistent role routing as the rest of Octopus instead of the

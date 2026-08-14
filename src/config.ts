@@ -187,7 +187,7 @@ export function loadDevelopmentCycleConfig(env: NodeJS.ProcessEnv = process.env)
       repository: text(env, "DEVELOPMENT_CYCLE_OBSERVER_REPOSITORY", "Jhacarreiro/claude-octopus"),
       branch: text(env, "DEVELOPMENT_CYCLE_OBSERVER_BRANCH", "main"),
       runtime: text(env, "DEVELOPMENT_CYCLE_OBSERVER_RUNTIME", "crabbox"),
-      owner: text(env, "DEVELOPMENT_CYCLE_OBSERVER_OWNER", "joao"),
+      owner: text(env, "DEVELOPMENT_CYCLE_OBSERVER_OWNER", "bootstrap"),
     },
   };
 }

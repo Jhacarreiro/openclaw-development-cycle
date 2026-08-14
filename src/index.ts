@@ -650,16 +650,18 @@ async function collectObserverSessions(status: any) {
 
 
 async function finalizeObserverSessions(dir: string, status: any, terminal: string) {
-  if (!developmentCycleConfig.observer.enabled) return;
+  if (!developmentCycleConfig.observer.enabled) return { ok: true, skipped: true, reason: "observer_disabled" };
   const ids = [
     status?.observerSessionId,
     status?.observerCorrectionsSessionId,
     status?.observerObservationId,
     status?.observerCorrectionsObservationId,
   ].filter(Boolean).map(String);
+  if (!ids.length) return { ok: true, skipped: true, reason: "no_observer_roots" };
+  const results: any[] = [];
   for (const id of ids) {
     try {
-      await updateImplementationObserverSession(dir, id, {
+      const result = await updateImplementationObserverSession(dir, id, {
         project: status?.project,
         runId: status?.runId,
         projectRoot: status?.projectRoot,
@@ -668,10 +670,16 @@ async function finalizeObserverSessions(dir: string, status: any, terminal: stri
         summary: `development_cycle ${terminal} ${status?.project || ""}`,
         message: `Development cycle ${terminal} for ${status?.project || "project"}`,
       });
-    } catch {
-      /* observer is optional */
+      if (!result || result.ok !== true) {
+        results.push({ id, ok: false, result: result || { ok: false, error: "observer_update_unsuccessful" } });
+        continue;
+      }
+      results.push({ id, ok: true, result });
+    } catch (err: any) {
+      results.push({ id, ok: false, result: { ok: false, error: String(err?.message || err) } });
     }
   }
+  return { ok: results.every((entry) => entry.ok), terminal, results };
 }
 
 async function refreshLaunchedImplementationStatus(dir: string, status: any) {
@@ -701,7 +709,8 @@ async function refreshLaunchedImplementationStatus(dir: string, status: any) {
       const patch = phase.startsWith('implementation_corrections')
         ? { phase: 'corrections_failed', owner: 'main', ok: false, error: 'implementation_runner_process_missing', correctionsStdout: stdoutPath, correctionsStderr: stderrPath, directCorrectionsStatus: statusPath }
         : { phase: 'implementation_failed', owner: 'main', ok: false, nextAction: 'Inspect Implementation stdout/stderr and agent manifest; reconcile or launch a clean handoff.', error: 'implementation_runner_process_missing', implementationStdout: stdoutPath, implementationStderr: stderrPath, directImplementationStatus: statusPath };
-      return await cycleStatus(dir, patch);
+      const observerFinalization = await finalizeObserverSessions(dir, status, "failed");
+      return await cycleStatus(dir, { ...patch, observerFinalization });
     }
     if (heartbeatAgeMs !== null && heartbeatAgeMs > 10 * 60 * 1000 && statusPath) {
       await saveJson(String(statusPath), { ...session, stalled: true, heartbeatAgeMs, updatedAt: new Date().toISOString(), message: 'Runner is alive but heartbeat is stale; no wall timeout is enforced.' });
@@ -726,14 +735,14 @@ async function refreshLaunchedImplementationStatus(dir: string, status: any) {
       const patch = phase.startsWith("implementation_corrections")
         ? { phase: "corrections_completed", owner: "main", nextAction: "Run mechanical validation and council code review again for the corrected delivery.", ok: true, correctionsStdout: stdoutPath, correctionsStderr: stderrPath, directCorrectionsStatus: statusPath, externalValidation: "", validationSummary: "", councilReviewSummary: "", councilReviewSynthesis: "", councilReviewNeedsCorrections: null }
         : { phase: "implementation_delivered", owner: "main", nextAction: "Run mechanical final validation, then council code review.", ok: true, implementationStdout: stdoutPath, implementationStderr: stderrPath, directImplementationStatus: statusPath };
-      await finalizeObserverSessions(dir, status, "completed");
-      return await cycleStatus(dir, patch);
+      const observerFinalization = await finalizeObserverSessions(dir, status, "completed");
+      return await cycleStatus(dir, { ...patch, observerFinalization });
     }
     const patch = phase.startsWith("implementation_corrections")
       ? { phase: "corrections_failed", owner: "main", ok: false, error: `Implementation exited non-zero: ${exitCode}`, correctionsStdout: stdoutPath, correctionsStderr: stderrPath, directCorrectionsStatus: statusPath }
       : { phase: "implementation_failed", owner: "main", ok: false, nextAction: "Inspect Implementation stdout/stderr, fix blockers, then launch a new clean handoff.", error: `Implementation exited non-zero: ${exitCode}`, implementationStdout: stdoutPath, implementationStderr: stderrPath, directImplementationStatus: statusPath };
-    await finalizeObserverSessions(dir, status, "failed");
-    return await cycleStatus(dir, patch);
+    const observerFinalization = await finalizeObserverSessions(dir, status, "failed");
+    return await cycleStatus(dir, { ...patch, observerFinalization });
   }
   return status;
 }
@@ -1313,7 +1322,8 @@ async function launchCouncilCorrections(dir: string, status: any, council: any, 
   if (developmentCycleConfig.observer.enabled && !observerObservationId) return { ok: false, error: "observer_root_session_creation_failed" };
   const launch = await createImplementationRunnerSession(dir, { project, runId: `${runId}-council-corrections-${count + 1}`, projectRoot, command: "tangle", prompt, kind: "corrections", implementationAdapter: "octopus", planPath: join(dir, "implementation_plan.md"), validationPath: feedbackPath, timeoutSeconds: Number(params.timeoutSeconds ?? params.timeout_ms ?? 0), observerObservationId, purpose: `development_cycle council corrections ${project}` });
   if (!launch.ok) {
-    const next = await cycleStatus(dir, { phase: "corrections_failed", owner: "main", ok: false, error: launch.error || "direct_runner_launch_failed", projectRoot, codexSandbox: defaultCodexSandbox, councilCorrectionFeedback: feedbackPath, observerCorrectionsObservationId: observerObservationId, implementationCorrectionsRequest: requestPath });
+    const observerFinalization = await finalizeObserverSessions(dir, { ...status, observerCorrectionsObservationId: observerObservationId }, "failed");
+    const next = await cycleStatus(dir, { phase: "corrections_failed", owner: "main", ok: false, error: launch.error || "direct_runner_launch_failed", projectRoot, codexSandbox: defaultCodexSandbox, councilCorrectionFeedback: feedbackPath, observerCorrectionsObservationId: observerObservationId, observerFinalization, implementationCorrectionsRequest: requestPath });
     return { ok: false, error: launch.error, status: next };
   }
   await updateImplementationObserverSession(dir, observerObservationId, { project, runId, command: "council-corrections", projectRoot, projectWikiPath, stdoutPath: launch.stdoutPath, stderrPath: launch.stderrPath, status: "running", summary: `development_cycle council corrections ${project} running`, message: "Octopus council corrections runner launched; observer integration is optional." });
@@ -1413,7 +1423,7 @@ async function stopLaunchedImplementation(dir: string, status: any, reason: stri
   const stopped = [];
   for (const target of targets) stopped.push(await stopDirectImplementationRunnerSession(target, reason));
   const stoppedAt = new Date().toISOString();
-  await finalizeObserverSessions(dir, status, "stopped");
+  const observerFinalization = await finalizeObserverSessions(dir, status, "stopped");
   const next = await cycleStatus(dir, {
     phase: "stopped",
     owner: "main",
@@ -1424,6 +1434,7 @@ async function stopLaunchedImplementation(dir: string, status: any, reason: stri
     stoppedAt,
     stoppedReason: reason,
     processGroupStopResults: stopped,
+    observerFinalization,
     nextAction: "Inspect logs and dirty worktree before deciding whether to clean/relaunch.",
     error: reason,
   });
@@ -1608,8 +1619,9 @@ Create or validate the implementation plan only. Do not implement. The plan must
     }
     const launch = await createImplementationRunnerSession(dir, { project, runId, projectRoot, command, prompt, kind: "delivery", implementationAdapter: adapter, planPath: String(params.planPath || status.plan || join(dir, "implementation_plan.md")), timeoutSeconds: Number(params.timeoutSeconds ?? params.timeout_ms ?? 0), observerObservationId, purpose: `development_cycle ${command} ${project}` });
     if (!launch.ok) {
-      const next = await cycleStatus(dir, { phase: "implementation_failed", owner: "main", ok: false, nextAction: "Fix direct runner launch blocker, then launch a new clean handoff.", error: launch.error || "direct_runner_launch_failed", projectRoot, projectWikiPath, implementationCommand: command, codexSandbox: defaultCodexSandbox, observerObservationId, implementationHandoffRequest: handoffRequest });
-      return { ok: false, project, runId, dir, phase: next.phase, error: next.error, observerObservationId };
+      const observerFinalization = await finalizeObserverSessions(dir, { ...status, observerObservationId }, "failed");
+      const next = await cycleStatus(dir, { phase: "implementation_failed", owner: "main", ok: false, nextAction: "Fix direct runner launch blocker, then launch a new clean handoff.", error: launch.error || "direct_runner_launch_failed", projectRoot, projectWikiPath, implementationCommand: command, codexSandbox: defaultCodexSandbox, observerObservationId, observerFinalization, implementationHandoffRequest: handoffRequest });
+      return { ok: false, project, runId, dir, phase: next.phase, error: next.error, observerObservationId, observerFinalization };
     }
     await updateImplementationObserverSession(dir, observerObservationId, { project, runId, command, projectRoot, projectWikiPath, stdoutPath: launch.stdoutPath, stderrPath: launch.stderrPath, status: "running", summary: `development_cycle ${command} ${project} running`, message: "Implementation runner launched; observer integration is optional." });
     const launchRecord = join(dir, "implementation_launch.json");
@@ -1677,8 +1689,9 @@ Create or validate the implementation plan only. Do not implement. The plan must
     }
     const launch = await createImplementationRunnerSession(dir, { project, runId: `${runId}-corrections`, projectRoot, command, prompt, kind: "corrections", implementationAdapter: adapter, planPath: String(status.plan || join(dir, "implementation_plan.md")), validationPath: String(status.finalValidation || join(dir, "final_validation_response.md")), timeoutSeconds: Number(params.timeoutSeconds ?? params.timeout_ms ?? 0), observerObservationId, purpose: `development_cycle corrections ${project}` });
     if (!launch.ok) {
-      const next = await cycleStatus(dir, { phase: "corrections_failed", owner: "main", ok: false, error: launch.error || "direct_runner_launch_failed", projectRoot, codexSandbox: defaultCodexSandbox, observerCorrectionsObservationId: observerObservationId, implementationCorrectionsRequest: requestPath });
-      return { ok: false, project, runId, dir, phase: next.phase, error: next.error, observerObservationId };
+      const observerFinalization = await finalizeObserverSessions(dir, { ...status, observerCorrectionsObservationId: observerObservationId }, "failed");
+      const next = await cycleStatus(dir, { phase: "corrections_failed", owner: "main", ok: false, error: launch.error || "direct_runner_launch_failed", projectRoot, codexSandbox: defaultCodexSandbox, observerCorrectionsObservationId: observerObservationId, observerFinalization, implementationCorrectionsRequest: requestPath });
+      return { ok: false, project, runId, dir, phase: next.phase, error: next.error, observerObservationId, observerFinalization };
     }
     await updateImplementationObserverSession(dir, observerObservationId, { project, runId, command: "corrections", projectRoot, projectWikiPath: status.projectWikiPath || "", stdoutPath: launch.stdoutPath, stderrPath: launch.stderrPath, status: "running", summary: `development_cycle corrections ${project} running`, message: "Corrections runner launched; observer integration is optional." });
     const launchRecord = join(dir, "implementation_corrections_launch.json");

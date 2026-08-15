@@ -1,7 +1,4 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
-import { tmpdir } from "node:os";
 import test from "node:test";
 import {
   buildImplementationLaunchSpec,
@@ -80,38 +77,16 @@ test("Octopus adapter translates the generic request into orchestrate.sh", () =>
   assert.equal(spec.env.CRABFLEET_ROOT_SESSION_ID, "session-1");
 });
 
-test("Octopus adapter reuses the OpenClaw Codex harness auth as CODEX_HOME", () => {
-  const root = mkdtempSync(join(tmpdir(), "development-cycle-codex-"));
-  const previousStateDir = process.env.OPENCLAW_STATE_DIR;
-  const previousCodexHome = process.env.CODEX_HOME;
-  try {
-    process.env.CODEX_HOME = join(root, "stale-codex-home");
-    mkdirSync(process.env.CODEX_HOME, { recursive: true });
-    process.env.OPENCLAW_STATE_DIR = root;
-    const harnessHome = join(root, "agents", "main", "agent", "harness-auth", "codex", "profile-1");
-    mkdirSync(harnessHome, { recursive: true });
-    writeFileSync(join(harnessHome, "auth.json"), "{}\n");
-
-    const spec = buildImplementationLaunchSpec(
-      {
-        adapter: "octopus",
-        command: "",
-        args: [],
-        octopusRoot: "/opt/octopus",
-        octopusSandbox: "workspace-write",
-        loopUntilApproved: true,
-      },
-      { ...baseInput, adapter: "octopus" },
-    );
-
-    assert.equal(spec.env.CODEX_HOME, harnessHome);
-  } finally {
-    if (previousStateDir === undefined) delete process.env.OPENCLAW_STATE_DIR;
-    else process.env.OPENCLAW_STATE_DIR = previousStateDir;
-    if (previousCodexHome === undefined) delete process.env.CODEX_HOME;
-    else process.env.CODEX_HOME = previousCodexHome;
-    rmSync(root, { recursive: true, force: true });
-  }
+test("Octopus adapter does not persist or reuse Codex auth files", () => {
+  const spec = buildImplementationLaunchSpec(
+    { adapter: "octopus", command: "", args: [], octopusRoot: "/opt/octopus", octopusSandbox: "workspace-write", loopUntilApproved: true },
+    { ...baseInput, adapter: "octopus" },
+  );
+  assert.equal(Object.hasOwn(spec.env, "CODEX_HOME"), false);
+  assert.equal(Object.keys(spec.env).some((key) => /TOKEN|SECRET|PASSWORD/.test(key)), false);
+  assert.match(spec.env.PATH, /^\/data\/workspace\/plugins\/development-cycle\/bin:/);
+  assert.equal(spec.env.DEVELOPMENT_CYCLE_CODEX_REAL_BIN, "/data/npm-global/bin/codex");
+  assert.equal(spec.env.DEVELOPMENT_CYCLE_CODEX_APP_SERVER_SANDBOX, "danger-full-access");
 });
 
 test("shell rendering quotes executable, arguments and environment values", () => {

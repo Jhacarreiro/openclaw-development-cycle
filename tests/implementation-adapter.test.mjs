@@ -81,6 +81,15 @@ test("Octopus adapter translates the generic request into orchestrate.sh", () =>
   assert.equal(spec.env.CRABFLEET_ROOT_SESSION_ID, "session-1");
 });
 
+test("Octopus adapter defers to upstream timeout policy when no override is supplied", () => {
+  const spec = buildImplementationLaunchSpec(
+    { adapter: "octopus", command: "", args: [], octopusRoot: "/opt/octopus", octopusSandbox: "workspace-write", loopUntilApproved: true },
+    { ...baseInput, adapter: "octopus", timeoutSeconds: undefined },
+  );
+  assert.deepEqual(spec.args.slice(0, 3), ["--dir", "/tmp/project", "implement"]);
+  assert.equal(spec.args.includes("--timeout"), false);
+});
+
 test("Octopus adapter does not persist or reuse Codex auth files", () => {
   const spec = buildImplementationLaunchSpec(
     { adapter: "octopus", command: "", args: [], octopusRoot: "/opt/octopus", octopusSandbox: "workspace-write", loopUntilApproved: true },
@@ -102,6 +111,9 @@ test("Codex bridge resolves OpenClaw OAuth by workspace without private auth-sto
   assert.doesNotMatch(bridge, /agents[\"',)]*,[\"']main/);
   assert.match(bridge, /chatgpt_account_id/);
   assert.match(bridge, /chatgpt_plan_type/);
+  assert.match(bridge, /DEVELOPMENT_CYCLE_CODEX_TURN_TIMEOUT_SECONDS/);
+  assert.match(bridge, /turn_timeout>0 else None/);
+  assert.doesNotMatch(bridge, /CODEX_TURN_TIMEOUT_SECONDS\",\"1800/);
 });
 
 test("Codex bridge discovers the real binary when provider isolation removes the explicit env override", () => {

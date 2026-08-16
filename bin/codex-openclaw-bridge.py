@@ -104,8 +104,9 @@ try:
  if effort:q["effort"]=effort
  z=req("turn/start",q)
  if not(z.get("turn")or{}).get("id"):raise RuntimeError("no turn id")
+ turn_timeout=int(os.getenv("DEVELOPMENT_CYCLE_CODEX_TURN_TIMEOUT_SECONDS","0"))
  with cv:
-  if not cv.wait_for(lambda:done,int(os.getenv("DEVELOPMENT_CYCLE_CODEX_TURN_TIMEOUT_SECONDS","1800"))):raise RuntimeError("turn timeout")
+  if not cv.wait_for(lambda:done,turn_timeout if turn_timeout>0 else None):raise RuntimeError("turn timeout")
  if err:raise RuntimeError(err)
  text="".join(out).strip()
  if not text:raise RuntimeError("no assistant text")

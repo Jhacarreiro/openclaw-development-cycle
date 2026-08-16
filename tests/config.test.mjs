@@ -13,6 +13,7 @@ test("Gallivanter runtime profile preserves operational defaults", () => {
   assert.equal(config.implementation.octopusRoot, "/data/workspace/contrib/claude-octopus");
   assert.equal(config.implementation.octopusSandbox, "danger-full-access");
   assert.equal(config.implementation.loopUntilApproved, true);
+  assert.equal(config.runner.defaultTimeoutSeconds, 0);
   assert.equal(config.notifications.enabled, false);
   assert.equal(config.notifications.channel, "");
   assert.equal(config.notifications.target, "");

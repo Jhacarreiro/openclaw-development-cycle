@@ -21,7 +21,7 @@ export interface ImplementationLaunchInput {
   requestPath: string;
   promptPath: string;
   prompt: string;
-  timeoutSeconds: number;
+  timeoutSeconds?: number;
   command?: string;
   observer?: {
     sessionId?: string;
@@ -87,8 +87,7 @@ export function buildImplementationLaunchSpec(
       args: [
         "--dir",
         input.projectRoot,
-        "--timeout",
-        String(input.timeoutSeconds),
+        ...(Number(input.timeoutSeconds || 0) > 0 ? ["--timeout", String(input.timeoutSeconds)] : []),
         input.command || "tangle",
         input.prompt,
       ],

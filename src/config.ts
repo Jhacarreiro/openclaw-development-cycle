@@ -154,7 +154,7 @@ export function loadDevelopmentCycleConfig(env: NodeJS.ProcessEnv = process.env)
       defaultTimeoutSeconds: positiveInteger(
         env,
         "DEVELOPMENT_CYCLE_DEFAULT_TIMEOUT_SECONDS",
-        7200,
+        0,
       ),
     },
     observer: {

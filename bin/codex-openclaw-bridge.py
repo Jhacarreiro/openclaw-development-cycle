@@ -39,10 +39,33 @@ while i<len(a):
  elif x not in ("--skip-git-repo-check","-") and not x.startswith("-"): pos.append(x)
  i+=1
 sandbox=os.getenv("DEVELOPMENT_CYCLE_CODEX_APP_SERVER_SANDBOX",sandbox)
+def resolve_openclaw_package_root():
+ candidates=[]
+ for d in os.getenv("PATH","").split(os.pathsep):
+  if d:
+   candidates.append(os.path.join(d,"openclaw"))
+ candidates.append("/data/npm-global/bin/openclaw")
+ seen=set()
+ for candidate in candidates:
+  if candidate in seen or not (os.path.isfile(candidate) and os.access(candidate,os.X_OK)): continue
+  seen.add(candidate)
+  cur=os.path.dirname(os.path.realpath(candidate))
+  for _ in range(4):
+   pkg=os.path.join(cur,"package.json")
+   if os.path.isfile(pkg):
+    try:
+     with open(pkg,"r",encoding="utf-8") as f:
+      if json.load(f).get("name")=="openclaw": return cur
+    except Exception:
+     pass
+   parent=os.path.dirname(cur)
+   if parent==cur: break
+   cur=parent
+ return ""
+
 def resolve_openclaw_oauth():
- oc=shutil.which("openclaw")
- if not oc: raise RuntimeError("openclaw binary not found")
- root=os.path.dirname(os.path.realpath(oc))
+ root=resolve_openclaw_package_root()
+ if not root: raise RuntimeError("openclaw package root not found")
  workspace=os.getenv("DEVELOPMENT_CYCLE_OPENCLAW_WORKSPACE_DIR","/data/workspace")
  js="import {resolveApiKeyForProvider} from 'openclaw/plugin-sdk/agent-runtime'; import {loadConfig} from 'openclaw/plugin-sdk/config-runtime'; const cfg=loadConfig(); const r=await resolveApiKeyForProvider({provider:'openai',cfg,workspaceDir:process.env.DC_WORKSPACE_DIR,forceRefresh:false}); const token=r.apiKey||''; let payload={},auth={}; try{payload=JSON.parse(Buffer.from((token.split('.')[1]||''),'base64url').toString('utf8')); auth=payload['https://api.openai.com/auth']||{}}catch{}; const accountId=typeof auth.chatgpt_account_id==='string'?auth.chatgpt_account_id.trim():''; const planType=typeof auth.chatgpt_plan_type==='string'?auth.chatgpt_plan_type.trim():''; if(!token||!accountId) throw new Error('openai oauth identity unavailable'); console.log(JSON.stringify({token,accountId,planType}));"
  e=os.environ.copy(); e["DC_WORKSPACE_DIR"]=workspace

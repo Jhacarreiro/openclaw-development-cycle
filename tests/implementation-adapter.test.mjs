@@ -104,6 +104,9 @@ test("Octopus adapter does not persist or reuse Codex auth files", () => {
 
 test("Codex bridge resolves OpenClaw OAuth by workspace without private auth-store paths", () => {
   const bridge = readFileSync("/data/workspace/plugins/development-cycle/bin/codex-openclaw-bridge.py", "utf8");
+  assert.match(bridge, /resolve_openclaw_package_root/);
+  assert.match(bridge, /json\.load\(f\)\.get\(\"name\"\)==\"openclaw\"/);
+  assert.doesNotMatch(bridge, /root=os\.path\.dirname\(os\.path\.realpath\(oc\)\)/);
   assert.match(bridge, /workspaceDir:process\.env\.DC_WORKSPACE_DIR/);
   assert.match(bridge, /DEVELOPMENT_CYCLE_OPENCLAW_WORKSPACE_DIR/);
   assert.doesNotMatch(bridge, /ensureAuthProfileStore/);

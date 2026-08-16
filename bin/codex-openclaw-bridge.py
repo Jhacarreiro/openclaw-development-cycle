@@ -43,10 +43,9 @@ def resolve_openclaw_oauth():
  oc=shutil.which("openclaw")
  if not oc: raise RuntimeError("openclaw binary not found")
  root=os.path.dirname(os.path.realpath(oc))
- state=os.getenv("OPENCLAW_STATE_DIR","/data/.openclaw")
- agent=os.path.join(state,"agents","main","agent")
- js="import {ensureAuthProfileStore,resolveApiKeyForProvider} from 'openclaw/plugin-sdk/agent-runtime'; import {loadConfig} from 'openclaw/plugin-sdk/config-runtime'; const agentDir=process.env.DC_AGENT_DIR; const cfg=loadConfig(); const store=ensureAuthProfileStore(agentDir); const r=await resolveApiKeyForProvider({provider:'openai',cfg,store,agentDir,forceRefresh:false}); const p=r.profileId?store.profiles[r.profileId]:null; if(!r.apiKey||!p) throw new Error('openai oauth profile unavailable'); console.log(JSON.stringify({token:r.apiKey,accountId:p.accountId||p.email||r.profileId,planType:p.chatgptPlanType||''}));"
- e=os.environ.copy(); e["DC_AGENT_DIR"]=agent
+ workspace=os.getenv("DEVELOPMENT_CYCLE_OPENCLAW_WORKSPACE_DIR","/data/workspace")
+ js="import {resolveApiKeyForProvider} from 'openclaw/plugin-sdk/agent-runtime'; import {loadConfig} from 'openclaw/plugin-sdk/config-runtime'; const cfg=loadConfig(); const r=await resolveApiKeyForProvider({provider:'openai',cfg,workspaceDir:process.env.DC_WORKSPACE_DIR,forceRefresh:false}); const token=r.apiKey||''; let payload={},auth={}; try{payload=JSON.parse(Buffer.from((token.split('.')[1]||''),'base64url').toString('utf8')); auth=payload['https://api.openai.com/auth']||{}}catch{}; const accountId=typeof auth.chatgpt_account_id==='string'?auth.chatgpt_account_id.trim():''; const planType=typeof auth.chatgpt_plan_type==='string'?auth.chatgpt_plan_type.trim():''; if(!token||!accountId) throw new Error('openai oauth identity unavailable'); console.log(JSON.stringify({token,accountId,planType}));"
+ e=os.environ.copy(); e["DC_WORKSPACE_DIR"]=workspace
  r=subprocess.run(["node","--input-type=module","-e",js],cwd=root,env=e,text=True,capture_output=True,timeout=30)
  if r.returncode!=0: raise RuntimeError("OpenClaw OAuth resolution failed")
  try: q=json.loads(r.stdout)

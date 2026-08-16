@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -91,6 +91,17 @@ test("Octopus adapter does not persist or reuse Codex auth files", () => {
   assert.match(spec.env.PATH, /^\/data\/workspace\/plugins\/development-cycle\/bin:/);
   assert.equal(spec.env.DEVELOPMENT_CYCLE_CODEX_REAL_BIN, "/data/npm-global/bin/codex");
   assert.equal(spec.env.DEVELOPMENT_CYCLE_CODEX_APP_SERVER_SANDBOX, "danger-full-access");
+});
+
+test("Codex bridge resolves OpenClaw OAuth by workspace without private auth-store paths", () => {
+  const bridge = readFileSync("/data/workspace/plugins/development-cycle/bin/codex-openclaw-bridge.py", "utf8");
+  assert.match(bridge, /workspaceDir:process\.env\.DC_WORKSPACE_DIR/);
+  assert.match(bridge, /DEVELOPMENT_CYCLE_OPENCLAW_WORKSPACE_DIR/);
+  assert.doesNotMatch(bridge, /ensureAuthProfileStore/);
+  assert.doesNotMatch(bridge, /auth-profiles\.json/);
+  assert.doesNotMatch(bridge, /agents[\"',)]*,[\"']main/);
+  assert.match(bridge, /chatgpt_account_id/);
+  assert.match(bridge, /chatgpt_plan_type/);
 });
 
 test("Codex bridge discovers the real binary when provider isolation removes the explicit env override", () => {

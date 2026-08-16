@@ -1,4 +1,8 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 import {
   buildImplementationLaunchSpec,
@@ -87,6 +91,32 @@ test("Octopus adapter does not persist or reuse Codex auth files", () => {
   assert.match(spec.env.PATH, /^\/data\/workspace\/plugins\/development-cycle\/bin:/);
   assert.equal(spec.env.DEVELOPMENT_CYCLE_CODEX_REAL_BIN, "/data/npm-global/bin/codex");
   assert.equal(spec.env.DEVELOPMENT_CYCLE_CODEX_APP_SERVER_SANDBOX, "danger-full-access");
+});
+
+test("Codex bridge discovers the real binary when provider isolation removes the explicit env override", () => {
+  const root = mkdtempSync(join(tmpdir(), "dc-codex-path-"));
+  const fakeBinDir = join(root, "real");
+  mkdirSync(fakeBinDir, { recursive: true });
+  const fakeCodex = join(fakeBinDir, "codex");
+  writeFileSync(fakeCodex, "#!/bin/sh\nprintf '%s\\n' REAL_CODEX_OK\n");
+  chmodSync(fakeCodex, 0o755);
+
+  try {
+    const stdout = execFileSync(
+      "/data/workspace/plugins/development-cycle/bin/codex-openclaw-bridge.py",
+      ["--version"],
+      {
+        encoding: "utf8",
+        env: {
+          PATH: `/data/workspace/plugins/development-cycle/bin:${fakeBinDir}:/usr/bin:/bin`,
+          HOME: "/tmp",
+        },
+      },
+    );
+    assert.equal(stdout.trim(), "REAL_CODEX_OK");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("shell rendering quotes executable, arguments and environment values", () => {

@@ -5,9 +5,24 @@ def env(home):
  e=os.environ.copy()
  for k in S+("OPENAI_API_KEY","CODEX_API_KEY","CODEX_ACCESS_TOKEN"): e.pop(k,None)
  e["CODEX_HOME"]=home; return e
-real=os.getenv("DEVELOPMENT_CYCLE_CODEX_REAL_BIN","")
+def resolve_real_codex():
+ explicit=os.getenv("DEVELOPMENT_CYCLE_CODEX_REAL_BIN","").strip()
+ if explicit:return explicit
+ self_real=os.path.realpath(__file__)
+ for d in os.getenv("PATH","").split(os.pathsep):
+  if not d:continue
+  candidate=os.path.join(d,"codex")
+  if not(os.path.isfile(candidate) and os.access(candidate,os.X_OK)):continue
+  if os.path.realpath(candidate)==self_real:continue
+  return candidate
+ fallback="/data/npm-global/bin/codex"
+ if os.path.isfile(fallback) and os.access(fallback,os.X_OK) and os.path.realpath(fallback)!=self_real:return fallback
+ return ""
+real=resolve_real_codex()
 a=sys.argv[1:]
-if not real: sys.exit(64)
+if not real:
+ print("development-cycle codex bridge: real codex binary not found",file=sys.stderr)
+ sys.exit(64)
 if not a or a[0]!="exec": os.execvpe(real,[real,*a],env(os.getenv("CODEX_HOME","")))
 i=1; model=""; sandbox="workspace-write"; effort=""; pos=[]
 if i<len(a) and a[i]=="review": i+=1

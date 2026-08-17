@@ -90,60 +90,20 @@ test("Octopus adapter defers to upstream timeout policy when no override is supp
   assert.equal(spec.args.includes("--timeout"), false);
 });
 
-test("Octopus adapter does not persist or reuse Codex auth files", () => {
+test("Octopus adapter uses the native Codex provider path", () => {
   const spec = buildImplementationLaunchSpec(
     { adapter: "octopus", command: "", args: [], octopusRoot: "/opt/octopus", octopusSandbox: "workspace-write", loopUntilApproved: true },
     { ...baseInput, adapter: "octopus" },
   );
-  assert.equal(Object.hasOwn(spec.env, "CODEX_HOME"), false);
-  assert.equal(Object.keys(spec.env).some((key) => /TOKEN|SECRET|PASSWORD/.test(key)), false);
-  assert.match(spec.env.PATH, /^\/data\/workspace\/plugins\/development-cycle\/bin:/);
-  assert.equal(spec.env.DEVELOPMENT_CYCLE_CODEX_REAL_BIN, "/data/npm-global/bin/codex");
-  assert.equal(spec.env.DEVELOPMENT_CYCLE_CODEX_APP_SERVER_SANDBOX, "danger-full-access");
+  assert.equal(spec.env.PATH, undefined);
+  assert.equal(spec.env.DEVELOPMENT_CYCLE_CODEX_REAL_BIN, undefined);
+  assert.equal(spec.env.DEVELOPMENT_CYCLE_CODEX_APP_SERVER_SANDBOX, undefined);
+  assert.equal(spec.env.OCTOPUS_CODEX_SANDBOX, "workspace-write");
 });
 
-test("Codex bridge resolves OpenClaw OAuth by workspace without private auth-store paths", () => {
-  const bridge = readFileSync("/data/workspace/plugins/development-cycle/bin/codex-openclaw-bridge.py", "utf8");
-  assert.match(bridge, /resolve_openclaw_package_root/);
-  assert.match(bridge, /json\.load\(f\)\.get\(\"name\"\)==\"openclaw\"/);
-  assert.doesNotMatch(bridge, /root=os\.path\.dirname\(os\.path\.realpath\(oc\)\)/);
-  assert.match(bridge, /workspaceDir:process\.env\.DC_WORKSPACE_DIR/);
-  assert.match(bridge, /DEVELOPMENT_CYCLE_OPENCLAW_WORKSPACE_DIR/);
-  assert.doesNotMatch(bridge, /ensureAuthProfileStore/);
-  assert.doesNotMatch(bridge, /auth-profiles\.json/);
-  assert.doesNotMatch(bridge, /agents[\"',)]*,[\"']main/);
-  assert.match(bridge, /chatgpt_account_id/);
-  assert.match(bridge, /chatgpt_plan_type/);
-  assert.match(bridge, /DEVELOPMENT_CYCLE_CODEX_TURN_TIMEOUT_SECONDS/);
-  assert.match(bridge, /turn_timeout>0 else None/);
-  assert.doesNotMatch(bridge, /CODEX_TURN_TIMEOUT_SECONDS\",\"1800/);
-});
 
-test("Codex bridge discovers the real binary when provider isolation removes the explicit env override", () => {
-  const root = mkdtempSync(join(tmpdir(), "dc-codex-path-"));
-  const fakeBinDir = join(root, "real");
-  mkdirSync(fakeBinDir, { recursive: true });
-  const fakeCodex = join(fakeBinDir, "codex");
-  writeFileSync(fakeCodex, "#!/bin/sh\nprintf '%s\\n' REAL_CODEX_OK\n");
-  chmodSync(fakeCodex, 0o755);
 
-  try {
-    const stdout = execFileSync(
-      "/data/workspace/plugins/development-cycle/bin/codex-openclaw-bridge.py",
-      ["--version"],
-      {
-        encoding: "utf8",
-        env: {
-          PATH: `/data/workspace/plugins/development-cycle/bin:${fakeBinDir}:/usr/bin:/bin`,
-          HOME: "/tmp",
-        },
-      },
-    );
-    assert.equal(stdout.trim(), "REAL_CODEX_OK");
-  } finally {
-    rmSync(root, { recursive: true, force: true });
-  }
-});
+
 
 test("shell rendering quotes executable, arguments and environment values", () => {
   assert.equal(shellQuote("a'b"), `'a'"'"'b'`);

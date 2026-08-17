@@ -93,9 +93,6 @@ export function buildImplementationLaunchSpec(
       ],
       env: {
         ...genericEnv,
-        PATH: `/data/workspace/plugins/development-cycle/bin:${process.env.PATH || ""}`,
-        DEVELOPMENT_CYCLE_CODEX_REAL_BIN: process.env.DEVELOPMENT_CYCLE_CODEX_REAL_BIN || "/data/npm-global/bin/codex",
-        DEVELOPMENT_CYCLE_CODEX_APP_SERVER_SANDBOX: "danger-full-access",
         OCTOPUS_CODEX_SANDBOX: config.octopusSandbox,
         LOOP_UNTIL_APPROVED: config.loopUntilApproved ? "true" : "false",
         // Gallivanter routing policy: the design-review ceremony must use the

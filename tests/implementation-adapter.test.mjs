@@ -72,11 +72,11 @@ test("Octopus adapter translates the generic request into orchestrate.sh", () =>
   assert.equal(spec.args.at(-1), "Implement the approved plan.");
   assert.equal(spec.env.OCTOPUS_CODEX_SANDBOX, "read-only");
   assert.equal(spec.env.LOOP_UNTIL_APPROVED, "true");
-  assert.equal(spec.env.OCTOPUS_DESIGN_REVIEW_CODEX_AGENT, "commandcode");
-  assert.equal(spec.env.OCTOPUS_DESIGN_REVIEW_AGY_AGENT, "commandcode-research");
-  assert.equal(spec.env.OCTOPUS_DESIGN_REVIEW_GEMINI_AGENT, "commandcode-research");
-  assert.equal(spec.env.OCTOPUS_DESIGN_REVIEW_CLAUDE_AGENT, "claude-sonnet");
-  assert.equal(spec.env.OCTOPUS_DESIGN_REVIEW_SYNTH_AGENT, "commandcode-research");
+  assert.equal(spec.env.OCTOPUS_DESIGN_REVIEW_CODEX_AGENT, undefined);
+  assert.equal(spec.env.OCTOPUS_DESIGN_REVIEW_AGY_AGENT, undefined);
+  assert.equal(spec.env.OCTOPUS_DESIGN_REVIEW_GEMINI_AGENT, undefined);
+  assert.equal(spec.env.OCTOPUS_DESIGN_REVIEW_CLAUDE_AGENT, undefined);
+  assert.equal(spec.env.OCTOPUS_DESIGN_REVIEW_SYNTH_AGENT, undefined);
   assert.equal(spec.env.OCTOPUS_AGENT_ROOT_SESSION_ID, "session-1");
   assert.equal(spec.env.CRABFLEET_ROOT_SESSION_ID, "session-1");
 });

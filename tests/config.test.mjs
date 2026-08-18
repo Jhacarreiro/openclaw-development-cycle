@@ -13,6 +13,7 @@ test("configuration uses portable, command-first defaults", () => {
   assert.equal(config.implementation.octopusRoot, "");
   assert.equal(config.implementation.octopusSandbox, "workspace-write");
   assert.equal(config.implementation.loopUntilApproved, true);
+  assert.equal(config.runner.defaultTimeoutSeconds, 0);
   assert.equal(config.notifications.enabled, false);
   assert.equal(config.notifications.channel, "");
   assert.equal(config.notifications.target, "");

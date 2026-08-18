@@ -11,7 +11,7 @@ import { parseFinalDecision } from "./core/decisions.js";
 import { cleanId, newRunId as createRunId } from "./core/ids.js";
 import { loadDevelopmentCycleConfig } from "./config.js";
 import { createFilesystemStore } from "./storage/filesystem.js";
-import { buildImplementationLaunchSpec, renderShellCommand, renderShellEnvironment } from "./adapters/implementation.js";
+import { buildImplementationLaunchSpec, jsonShellQuote, renderShellCommand, renderShellEnvironment, shellQuote } from "./adapters/implementation.js";
 
 const developmentCycleConfig = loadDevelopmentCycleConfig();
 const secretPath = developmentCycleConfig.externalGate.secretPath;
@@ -267,10 +267,10 @@ trap finalize EXIT
 trap 'exit 143' TERM
 trap 'exit 130' INT
 trap 'exit 129' HUP
-(while :; do printf '{"at":"%s","pid":%s,"observerSessionId":"%s"}\n' "$(date -Is)" "$$" "${observerRootSessionId}" > "$HEARTBEAT_FILE"; sleep ${runnerHeartbeatIntervalSeconds}; done) &
+(while :; do printf '{"at":"%s","pid":%s,"observerSessionId":%s}\n' "$(date -Is)" "$$" ${jsonShellQuote(observerRootSessionId)} > "$HEARTBEAT_FILE"; sleep ${runnerHeartbeatIntervalSeconds}; done) &
 heartbeat_pid=$!
-cd ${JSON.stringify(projectRoot)}
-${commandLine} > ${JSON.stringify(stdoutPath)} 2> ${JSON.stringify(stderrPath)}
+cd ${shellQuote(projectRoot)}
+${commandLine} > ${shellQuote(stdoutPath)} 2> ${shellQuote(stderrPath)}
 `;
   await writeFile(runnerPath, runnerScript, { mode: 0o755 } as any);
 

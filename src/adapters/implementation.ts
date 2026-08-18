@@ -117,6 +117,11 @@ export function shellQuote(value: string): string {
   return `'${String(value).replace(/'/g, `'"'"'`)}'`;
 }
 
+/** JSON-encode a value, then single-quote it for a generated /bin/sh script. */
+export function jsonShellQuote(value: string): string {
+  return shellQuote(JSON.stringify(value));
+}
+
 export function renderShellCommand(spec: ImplementationLaunchSpec): string {
   return [spec.executable, ...spec.args].map(shellQuote).join(" ");
 }

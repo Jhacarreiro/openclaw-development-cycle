@@ -142,7 +142,9 @@ async function createImplementationRunnerSession(dir: string, params: any) {
   const command = String(params.command || "implement");
   const mode = String(params.kind || "delivery") === "corrections" ? "corrections" : "delivery";
   const timeoutSeconds = Number(params.timeoutSeconds ?? 0);
-  const effectiveTimeoutSeconds = timeoutSeconds > 0 ? timeoutSeconds : runnerDefaultTimeoutSeconds;
+  const effectiveTimeoutSeconds = timeoutSeconds > 0
+    ? timeoutSeconds
+    : (runnerDefaultTimeoutSeconds > 0 ? runnerDefaultTimeoutSeconds : undefined);
   const observerRootSessionId = String(params.observerObservationId || "");
   if (developmentCycleConfig.observer.enabled && !observerRootSessionId) {
     return { ok: false, error: "observer_root_session_missing" };

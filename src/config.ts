@@ -12,6 +12,7 @@ export interface DevelopmentCycleConfig {
     args: string[];
     octopusRoot: string;
     octopusSandbox: string;
+    loopUntilApproved: boolean;
   };
   retentionDays: number;
   notifications: {
@@ -99,6 +100,7 @@ export function loadDevelopmentCycleConfig(env: NodeJS.ProcessEnv = process.env)
       args: stringArray(env, "DEVELOPMENT_CYCLE_IMPLEMENTATION_ARGS_JSON"),
       octopusRoot: text(env, "DEVELOPMENT_CYCLE_OCTOPUS_ROOT"),
       octopusSandbox: text(env, "DEVELOPMENT_CYCLE_OCTOPUS_SANDBOX", "workspace-write"),
+      loopUntilApproved: boolean(env, "DEVELOPMENT_CYCLE_LOOP_UNTIL_APPROVED", true),
     },
     retentionDays: positiveInteger(env, "DEVELOPMENT_CYCLE_RETENTION_DAYS", 30),
     notifications: {
@@ -132,7 +134,7 @@ export function loadDevelopmentCycleConfig(env: NodeJS.ProcessEnv = process.env)
       defaultTimeoutSeconds: positiveInteger(
         env,
         "DEVELOPMENT_CYCLE_DEFAULT_TIMEOUT_SECONDS",
-        7200,
+        0,
       ),
     },
     observer: {

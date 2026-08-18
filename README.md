@@ -3,7 +3,7 @@
 [![CI](https://github.com/Jhacarreiro/openclaw-development-cycle/actions/workflows/ci.yml/badge.svg)](https://github.com/Jhacarreiro/openclaw-development-cycle/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-An experimental OpenClaw control plane for supervised software-development cycles. It keeps durable state, enforces workflow transitions, supervises implementation processes, gathers evidence, supports correction loops, and requires an explicit final decision.
+An experimental OpenClaw control plane for durable software-development cycles. It keeps durable state, enforces workflow transitions, supervises implementation processes, gathers evidence, and supports correction loops. The architecture is intended to support both human-supervised and policy-driven automatic cycles.
 
 The control plane is implementation-runner agnostic. A generic command adapter is the default. Octopus is available as an optional adapter.
 
@@ -16,11 +16,20 @@ The plugin registers one OpenClaw tool, `development_cycle`:
 3. start a configured implementation adapter;
 4. monitor or reconcile the supervised process;
 5. collect delivery and validation evidence;
-6. record `go`, `revise`, or `stop`;
+6. record `go`, `revise`, or `stop` according to the supervising human or automation policy;
 7. run targeted corrections when required;
 8. close the cycle.
 
 State is persisted under `$HOME/.openclaw/development-cycle` by default, so runs survive OpenClaw turns and process restarts.
+
+### Supervision modes
+
+The state machine is designed to support two operating styles:
+
+- **Human-supervised** — an operator or supervising agent explicitly records the final `go`, `revise`, or `stop` decision.
+- **Policy-driven automatic** — automation may derive and record the same state-machine decision when an external policy allows a fully automatic cycle.
+
+The current `v0.1.x` public tool API still represents the final decision explicitly through `record_final_validation`; automation should use that same action rather than bypassing the state machine.
 
 ## Status
 
@@ -102,7 +111,7 @@ development_cycle action=record_final_validation project=my-project runId=<run-i
 development_cycle action=close project=my-project runId=<run-id>
 ```
 
-Final validation must begin with exactly one token:
+Final validation records exactly one state-machine decision token, whether supplied by a human supervisor or by approved automation:
 
 ```text
 go
@@ -175,7 +184,7 @@ Any channel supported by `openclaw message send` can be used.
 - JSON state writes are atomic;
 - adapter arguments and environment values are shell-quoted;
 - child work is supervised as a process group;
-- final validation is explicit;
+- final validation remains explicit in durable state even when the decision is produced automatically;
 - no credentials, private addresses, or operator-specific paths are embedded.
 
 ## Development

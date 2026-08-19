@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdir, mkdtemp, readFile, readdir, rm, stat, utimes, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, readdir, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -108,6 +108,24 @@ test("a live holder is not evicted when the lock mtime is stale", async (t) => {
   await utimes(lockDir, past, past);
   await assert.rejects(() => acquireLock(lockDir, 80), /timed out acquiring status lock/);
   assert.equal(await held.isHeld(), true);
+});
+
+test("persistent stale-lock recovery errors respect the acquisition timeout", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "development-cycle-stale-error-"));
+  t.after(async () => {
+    await chmod(root, 0o700).catch(() => undefined);
+    await rm(root, { recursive: true, force: true });
+  });
+  const lockDir = join(root, ".status.lock");
+  await mkdir(lockDir);
+  await writeFile(join(lockDir, "owner"), `${unusedPid()}:deadtoken`);
+  const past = new Date(Date.now() - 10_000);
+  await utimes(lockDir, past, past);
+  await chmod(root, 0o500);
+
+  const started = Date.now();
+  await assert.rejects(() => acquireLock(lockDir, 80), /timed out acquiring status lock/);
+  assert.ok(Date.now() - started < 1000, "lock acquisition should fail within a bounded interval");
 });
 
 test("delayed release does not remove a replacement lock", async (t) => {

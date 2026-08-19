@@ -51,14 +51,13 @@ export async function acquireLock(lockDir: string, timeoutMs = 5000): Promise<St
             } catch {
               await rm(trash, { recursive: true, force: true }).catch(() => undefined);
             }
-            continue;
           }
         }
-        if (Date.now() >= deadline) {
-          throw new Error(`timed out acquiring status lock ${lockDir}`);
-        }
-        await new Promise((r) => setTimeout(r, 25 + Math.floor(Math.random() * 50)));
       }
+      if (Date.now() >= deadline) {
+        throw new Error(`timed out acquiring status lock ${lockDir}`);
+      }
+      await new Promise((r) => setTimeout(r, 25 + Math.floor(Math.random() * 50)));
     }
   }
   const isHeld = async () => (await readFile(ownerPath, "utf8").catch(() => null)) === ownerId;

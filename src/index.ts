@@ -100,8 +100,17 @@ async function ensureRunnerSupervisor() {
     detached: true,
     stdio: "ignore",
   });
-  supervisor.unref();
   const supervisorPid = Number(supervisor.pid);
+  try {
+    await new Promise((resolve, reject) => {
+      supervisor.once("spawn", resolve);
+      supervisor.once("error", reject);
+    });
+  } catch {
+    try { await rm(runnerSupervisorSocket, { force: true }); } catch {}
+    throw new Error("runner_supervisor_start_failed");
+  }
+  supervisor.unref();
   for (let i = 0; i < 30; i++) {
     await sleep(100);
     try { return await ping(); } catch {}
@@ -111,7 +120,7 @@ async function ensureRunnerSupervisor() {
     const terminateGroup = async (signal: NodeJS.Signals) => {
       try { process.kill(-supervisorPid, signal); } catch {}
       for (let i = 0; i < 20; i++) {
-        try { process.kill(supervisorPid, 0); } catch { return true; }
+        try { process.kill(-supervisorPid, 0); } catch { return true; }
         await sleep(50);
       }
       return false;

@@ -3,9 +3,10 @@ import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 
-const alive = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } };
+const alive = (pid) => { try { process.kill(pid, 0); const status = readFileSync("/proc/" + pid + "/status", "utf8"); return !/^State:\s+Z/m.test(status); } catch { return false; } };
 async function waitDead(pid) {
   for (let i = 0; i < 120; i++) {
     if (!alive(pid)) return;
@@ -16,7 +17,14 @@ async function waitDead(pid) {
 
 test("failed supervisor startup is cleaned up and retry succeeds", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "dc-supervisor-startup-"));
-  t.after(() => rm(root, { recursive: true, force: true }));
+  let healthySupervisorPid = 0;
+  t.after(async () => {
+    if (healthySupervisorPid > 1) {
+      try { process.kill(-healthySupervisorPid, "SIGTERM"); } catch {}
+      await waitDead(healthySupervisorPid);
+    }
+    await rm(root, { recursive: true, force: true });
+  });
   const state = join(root, "state"), docs = join(root, "docs"), project = join(root, "project");
   const sock = join(root, "supervisor.sock"), marker = join(root, "healthy"), pidFile = join(root, "broken.pid");
   const fixture = join(root, "fixture.py");
@@ -70,5 +78,7 @@ raise SystemExit(1)
   assert.equal(retry.details.ok, true);
   const livePing = spawnSync("python3", [real, "--socket", sock, "ping"], { encoding: "utf8", timeout: 2000 });
   assert.equal(livePing.status, 0, livePing.stderr || livePing.stdout);
-  assert.equal(JSON.parse(livePing.stdout).ok, true);
+  const live = JSON.parse(livePing.stdout);
+  assert.equal(live.ok, true);
+  healthySupervisorPid = Number(live.pid);
 });

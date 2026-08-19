@@ -78,8 +78,9 @@ export async function acquireLock(lockDir: string, timeoutMs = 5000, renameLock 
             const stillMatch = /^(\d+):(.+)$/.exec(still);
             const stillPid = stillMatch ? Number.parseInt(stillMatch[1] ?? "", 10) : Number.NaN;
             const currentLockStat = await stat(lockDir).catch(() => null);
-            const stillOwnerlessStale = !stillMatch && currentLockStat && Date.now() - currentLockStat.mtimeMs > timeoutMs;
-            const stillOwnedStale = still === observed && stillMatch && !isProcessAlive(stillPid);
+            const sameLockInstance = Boolean(lockStat && currentLockStat && lockStat.dev === currentLockStat.dev && lockStat.ino === currentLockStat.ino);
+            const stillOwnerlessStale = !stillMatch && sameLockInstance && Boolean(lockStat && Date.now() - lockStat.mtimeMs > timeoutMs);
+            const stillOwnedStale = still === observed && stillMatch && sameLockInstance && !isProcessAlive(stillPid);
             if (stillOwnerlessStale || stillOwnedStale) {
               await renameLock(lockDir, trash);
               await rm(trash, { recursive: true, force: true }).catch(() => undefined);

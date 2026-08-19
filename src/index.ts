@@ -563,7 +563,8 @@ async function packageScriptsBrief(projectRoot: string) {
   return Object.entries(pkg.scripts).map(([k, v]) => `- ${k}: ${v}`).join("\n");
 }
 async function writePlanningPack(dir: string, params: any) {
-  const projectRoot = params.projectRoot || "";
+  const rawProjectRoot = String(params.projectRoot || "").trim();
+  const projectRoot = rawProjectRoot ? (await trustedProjectRoot(rawProjectRoot)) || "" : "";
   // Resolve through symlinks so a wiki dir under projectsWikiRoot cannot redirect recon reads.
   const trustedWiki = params.projectWikiPath
     ? await resolveContainedWikiDir(String(params.project || "default"), String(params.projectWikiPath))
@@ -629,6 +630,14 @@ async function trustedProjectRoot(value: string): Promise<string> {
     if (!st.isDirectory()) return "";
     const real = await realpath(abs);
     if (real === resolve("/")) return "";
+    // Explicitly reject broad system locations — an arbitrary existing
+    // directory like /etc must not become an allowlist root.
+    const blocked = ["/etc", "/var", "/usr", "/home", "/root", "/opt", "/bin", "/sbin", "/lib", "/lib64", "/srv"];
+    for (const b of blocked) {
+      const br = resolve(b);
+      if (real === br || real.startsWith(br + "/")) return "";
+    }
+    if (real === resolve("/tmp") || real === resolve("/var/tmp")) return "";
     for (const owned of [cycleRoot, projectsWikiRoot, wikiRoot]) {
       if (!owned) continue;
       try {
@@ -724,6 +733,8 @@ async function persistApprovedPlan(project: string, runId: string, projectWikiPa
     const realFile = await realpath(path);
     const fileRel = relative(realRoot, realFile).replace(/\\/g, "/");
     if (!(fileRel && fileRel !== ".." && !fileRel.startsWith("../") && !fileRel.startsWith("/"))) {
+      await rm(realFile, { force: true }).catch(() => null);
+      await rm(path, { force: true }).catch(() => null);
       return "";
     }
   } catch {
@@ -1433,9 +1444,45 @@ async function writeCouncilOnePager(dir: string, status: any, council: any, para
   }
   const reportsDir = join(projectWikiPath, "reports");
   await mkdir(reportsDir, { recursive: true });
+  // Contain reportsDir against symlink redirection (pre-existing symlink under wiki).
+  try {
+    const realReportsDir = await realpath(reportsDir);
+    let realRoot = resolve(projectsWikiRoot);
+    try { realRoot = await realpath(projectsWikiRoot); } catch {}
+    const reportsRel = relative(realRoot, realReportsDir).replace(/\\/g, "/");
+    if (!(reportsRel && reportsRel !== ".." && !reportsRel.startsWith("../") && !reportsRel.startsWith("/"))) {
+      const fallbackDir = join(dir, "reports");
+      await mkdir(fallbackDir, { recursive: true });
+      const stamp2 = new Date().toISOString().slice(0, 19).replace(/[-:T]/g, "");
+      const out2 = join(fallbackDir, `${stamp2}-${runId}-code-review-one-pager.md`);
+      const fallbackContent = `${content}(wiki reports dir untrusted; wrote under cycle dir)\n`;
+      await writeFile(out2, fallbackContent);
+      const next2 = await cycleStatus(dir, { councilOnePagerWikiPath: out2, councilOnePagerGeneratedAt: new Date().toISOString() });
+      return { path: out2, content: fallbackContent, status: next2 };
+    }
+  } catch {}
   const stamp = new Date().toISOString().slice(0, 19).replace(/[-:T]/g, "");
   const out = join(reportsDir, `${stamp}-${runId}-code-review-one-pager.md`);
+  // Write via O_EXCL-like: if out is a symlink, realpath will escape; detect after write.
   await writeFile(out, content);
+  try {
+    const realOut = await realpath(out);
+    let realRoot = resolve(projectsWikiRoot);
+    try { realRoot = await realpath(projectsWikiRoot); } catch {}
+    const outRel = relative(realRoot, realOut).replace(/\\/g, "/");
+    if (!(outRel && outRel !== ".." && !outRel.startsWith("../") && !outRel.startsWith("/"))) {
+      await rm(realOut, { force: true }).catch(() => null);
+      await rm(out, { force: true }).catch(() => null);
+      const fallbackDir = join(dir, "reports");
+      await mkdir(fallbackDir, { recursive: true });
+      const stamp3 = new Date().toISOString().slice(0, 19).replace(/[-:T]/g, "");
+      const out3 = join(fallbackDir, `${stamp3}-${runId}-code-review-one-pager.md`);
+      const fallbackContent = `${content}(wiki report file was a symlink; rewrote under cycle dir)\n`;
+      await writeFile(out3, fallbackContent);
+      const next3 = await cycleStatus(dir, { councilOnePagerWikiPath: out3, councilOnePagerGeneratedAt: new Date().toISOString() });
+      return { path: out3, content: fallbackContent, status: next3 };
+    }
+  } catch {}
   const next = await cycleStatus(dir, { councilOnePagerWikiPath: out, councilOnePagerGeneratedAt: new Date().toISOString() });
   return { path: out, content, status: next };
 }
@@ -1752,7 +1799,7 @@ Create or validate the implementation plan only. Do not implement. The plan must
     let planText = params.planText || "";
     if (!String(planText).trim() && params.planPath) {
       const projectRootEarly = await trustedProjectRoot(String(params.projectRoot || status.projectRoot || ""));
-      const projectWikiPathEarly = resolveTrustedProjectWikiPath(project, params.projectWikiPath, status.projectWikiPath);
+      const projectWikiPathEarly = await resolveContainedWikiDir(project, String(params.projectWikiPath || "") || String(status.projectWikiPath || ""));
       const loaded = await readAllowedTextFile(String(params.planPath), [dir, cycleRoot, projectsWikiRoot, wikiRoot, projectRootEarly, projectWikiPathEarly], "plan_path_outside_allowed_roots");
       if (!loaded.ok) return { ok: false, error: loaded.error, project, runId, dir, path: (loaded as any).path };
       planText = loaded.text;
@@ -1817,7 +1864,9 @@ Create or validate the implementation plan only. Do not implement. The plan must
   if (action === "record_delivery") {
     let deliveryText = params.deliveryText || "";
     if (!String(deliveryText).trim() && params.deliveryPath) {
-      const loaded = await readAllowedTextFile(String(params.deliveryPath), [dir, cycleRoot, projectsWikiRoot, wikiRoot, await trustedProjectRoot(status?.projectRoot), status?.projectWikiPath && pathWithin(projectsWikiRoot, String(status.projectWikiPath)) ? status.projectWikiPath : null, await trustedProjectRoot(params.projectRoot), params.projectWikiPath && pathWithin(projectsWikiRoot, String(params.projectWikiPath)) ? params.projectWikiPath : null], "delivery_path_outside_allowed_roots");
+      const wikiRootA = await resolveContainedWikiDir(project, String(status?.projectWikiPath || ""));
+      const wikiRootB = await resolveContainedWikiDir(project, String(params.projectWikiPath || ""));
+      const loaded = await readAllowedTextFile(String(params.deliveryPath), [dir, cycleRoot, projectsWikiRoot, wikiRoot, await trustedProjectRoot(status?.projectRoot), wikiRootA || null, await trustedProjectRoot(params.projectRoot), wikiRootB || null], "delivery_path_outside_allowed_roots");
       if (!loaded.ok) return { ok: false, error: loaded.error, project, runId, dir, path: (loaded as any).path };
       deliveryText = loaded.text;
     }
@@ -1847,7 +1896,9 @@ Create or validate the implementation plan only. Do not implement. The plan must
     let validationText = params.validationText || params.feedbackText || "";
     if (!String(validationText).trim() && (params.validationPath || params.feedbackPath)) {
       const pathValue = String(params.validationPath || params.feedbackPath);
-      const loaded = await readAllowedTextFile(pathValue, [dir, cycleRoot, projectsWikiRoot, wikiRoot, await trustedProjectRoot(status?.projectRoot), status?.projectWikiPath && pathWithin(projectsWikiRoot, String(status.projectWikiPath)) ? status.projectWikiPath : null, await trustedProjectRoot(params.projectRoot), params.projectWikiPath && pathWithin(projectsWikiRoot, String(params.projectWikiPath)) ? params.projectWikiPath : null], "validation_path_outside_allowed_roots");
+      const wikiRootA = await resolveContainedWikiDir(project, String(status?.projectWikiPath || ""));
+      const wikiRootB = await resolveContainedWikiDir(project, String(params.projectWikiPath || ""));
+      const loaded = await readAllowedTextFile(pathValue, [dir, cycleRoot, projectsWikiRoot, wikiRoot, await trustedProjectRoot(status?.projectRoot), wikiRootA || null, await trustedProjectRoot(params.projectRoot), wikiRootB || null], "validation_path_outside_allowed_roots");
       if (!loaded.ok) return { ok: false, error: loaded.error, project, runId, dir, path: (loaded as any).path };
       validationText = loaded.text;
     }
@@ -1868,7 +1919,9 @@ Create or validate the implementation plan only. Do not implement. The plan must
     const plan = await readTextIfExists(join(dir, "implementation_plan.md"));
     let validation = params.feedbackText || params.validationText || "";
     if (!String(validation).trim() && params.feedbackPath) {
-      const loaded = await readAllowedTextFile(String(params.feedbackPath), [dir, cycleRoot, projectsWikiRoot, wikiRoot, await trustedProjectRoot(projectRoot), status?.projectWikiPath && pathWithin(projectsWikiRoot, String(status.projectWikiPath)) ? status.projectWikiPath : null, params.projectWikiPath && pathWithin(projectsWikiRoot, String(params.projectWikiPath)) ? params.projectWikiPath : null], "feedback_path_outside_allowed_roots");
+      const wikiRootA = await resolveContainedWikiDir(project, String(status?.projectWikiPath || ""));
+      const wikiRootB = await resolveContainedWikiDir(project, String(params.projectWikiPath || ""));
+      const loaded = await readAllowedTextFile(String(params.feedbackPath), [dir, cycleRoot, projectsWikiRoot, wikiRoot, await trustedProjectRoot(projectRoot), wikiRootA || null, params.projectWikiPath ? wikiRootB : null], "feedback_path_outside_allowed_roots");
       if (!loaded.ok) return { ok: false, error: loaded.error, project, runId, dir, path: (loaded as any).path };
       validation = loaded.text;
     }

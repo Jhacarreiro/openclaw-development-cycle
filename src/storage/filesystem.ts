@@ -39,15 +39,25 @@ export async function acquireLock(lockDir: string, timeoutMs = 5000): Promise<St
           const observed = await readFile(ownerPath, "utf8").catch(() => "");
           const ownerPid = Number.parseInt(observed.split(":")[0] ?? "", 10);
           if (!isProcessAlive(ownerPid)) {
-            const trash = `${lockDir}.stale-${process.pid}-${Date.now().toString(16)}-${Math.random().toString(16).slice(2)}`;
+            const recoveryDir = join(lockDir, ".recovery");
+            let recoveryClaimed = false;
             try {
-              const still = await readFile(ownerPath, "utf8").catch(() => "");
-              if (still === observed) {
-                await rename(lockDir, trash);
+              await mkdir(recoveryDir);
+              recoveryClaimed = true;
+            } catch {}
+            if (recoveryClaimed) {
+              const trash = `${lockDir}.stale-${process.pid}-${Date.now().toString(16)}-${Math.random().toString(16).slice(2)}`;
+              try {
+                const still = await readFile(ownerPath, "utf8").catch(() => "");
+                const stillPid = Number.parseInt(still.split(":")[0] ?? "", 10);
+                if (still === observed && !isProcessAlive(stillPid)) {
+                  await rename(lockDir, trash);
+                  await rm(trash, { recursive: true, force: true }).catch(() => undefined);
+                }
+              } catch {} finally {
+                await rm(recoveryDir, { recursive: true, force: true }).catch(() => undefined);
                 await rm(trash, { recursive: true, force: true }).catch(() => undefined);
               }
-            } catch {
-              await rm(trash, { recursive: true, force: true }).catch(() => undefined);
             }
           }
         }

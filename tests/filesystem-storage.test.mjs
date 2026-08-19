@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdir, mkdtemp, readFile, readdir, rm, stat, utimes, writeFile } from "node:fs/promises";
+import { access, chmod, mkdir, mkdtemp, readFile, readdir, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -17,10 +17,18 @@ function unusedPid() {
   throw new Error("could not find an unused pid");
 }
 
-function runStatusWorker({ storeHref, root, dir, key, n }) {
+function runStatusWorker({ storeHref, root, dir, key, n, readyPath, gatePath }) {
   const source = `
+    import { access, writeFile } from "node:fs/promises";
+    import { setTimeout as sleep } from "node:timers/promises";
     import { createFilesystemStore } from ${JSON.stringify(storeHref)};
     const store = createFilesystemStore(${JSON.stringify(root)});
+    await writeFile(${JSON.stringify(readyPath)}, "ready");
+    process.stdout.write(JSON.stringify({ event: "ready", pid: process.pid, key: ${JSON.stringify(key)} }) + "\\n");
+    for (;;) {
+      try { await access(${JSON.stringify(gatePath)}); break; } catch {}
+      await sleep(5);
+    }
     process.stdout.write(JSON.stringify({ event: "start", pid: process.pid, key: ${JSON.stringify(key)} }) + "\\n");
     for (let i = 0; i < ${Number(n)}; i++) {
       await store.updateStatus(${JSON.stringify(dir)}, { [${JSON.stringify(key)}]: i + 1 });
@@ -47,6 +55,15 @@ function runStatusWorker({ storeHref, root, dir, key, n }) {
   });
 }
 
+async function waitForPath(path, timeoutMs = 5000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try { await access(path); return; } catch {}
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  throw new Error(`timed out waiting for ${path}`);
+}
+
 test("filesystem storage uses safe run paths and atomic status updates", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "development-cycle-"));
   t.after(() => rm(root, { recursive: true, force: true }));
@@ -68,10 +85,16 @@ test("updateStatus serializes two processes onto one status file", async (t) => 
   const runDir = store.runDir("Lock", "Two-Process");
   await mkdir(runDir, { recursive: true });
   const storeHref = new URL("../dist/storage/filesystem.js", import.meta.url).href;
-  const [outA, outB] = await Promise.all([
-    runStatusWorker({ storeHref, root, dir: runDir, key: "a", n: 60 }),
-    runStatusWorker({ storeHref, root, dir: runDir, key: "b", n: 60 }),
-  ]);
+  const readyA = join(root, "ready-a");
+  const readyB = join(root, "ready-b");
+  const gatePath = join(root, "release-workers");
+  const workerA = runStatusWorker({ storeHref, root, dir: runDir, key: "a", n: 60, readyPath: readyA, gatePath });
+  const workerB = runStatusWorker({ storeHref, root, dir: runDir, key: "b", n: 60, readyPath: readyB, gatePath });
+  await Promise.all([waitForPath(readyA), waitForPath(readyB)]);
+  await writeFile(gatePath, "go");
+  const [outA, outB] = await Promise.all([workerA, workerB]);
+  assert.match(outA, /"event":"ready"/);
+  assert.match(outB, /"event":"ready"/);
   assert.match(outA, /"event":"start"/);
   assert.match(outB, /"event":"start"/);
   assert.match(outA, /"event":"done"/);
@@ -116,6 +139,24 @@ test("persistent lock setup errors respect the acquisition timeout", async (t) =
   const parentFile = join(root, "not-a-directory");
   await writeFile(parentFile, "file");
   const lockDir = join(parentFile, ".status.lock");
+  const started = Date.now();
+  await assert.rejects(() => acquireLock(lockDir, 80), /timed out acquiring status lock/);
+  assert.ok(Date.now() - started < 1000);
+});
+
+test("stale-lock rename failure remains bounded", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "development-cycle-stale-rename-error-"));
+  t.after(async () => {
+    await chmod(root, 0o700).catch(() => undefined);
+    await rm(root, { recursive: true, force: true });
+  });
+  const lockDir = join(root, ".status.lock");
+  await mkdir(lockDir);
+  await writeFile(join(lockDir, "owner"), String(unusedPid()) + ":deadtoken");
+  const past = new Date(Date.now() - 10_000);
+  await utimes(lockDir, past, past);
+  await chmod(root, 0o500);
+
   const started = Date.now();
   await assert.rejects(() => acquireLock(lockDir, 80), /timed out acquiring status lock/);
   assert.ok(Date.now() - started < 1000);

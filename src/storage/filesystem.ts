@@ -24,78 +24,78 @@ type StatusLock = {
 export async function acquireLock(lockDir: string, timeoutMs = 5000, renameLock = rename): Promise<StatusLock> {
   const ownerId = `${process.pid}:${Date.now().toString(16)}-${Math.random().toString(16).slice(2)}`;
   const ownerPath = join(lockDir, "owner");
+  const acquireDir = `${lockDir}.acquire-${ownerId.replace(/[^a-zA-Z0-9_.-]/g, "-")}`;
+  const acquireOwnerPath = join(acquireDir, "owner");
   const deadline = Date.now() + timeoutMs;
   for (;;) {
-    let created = false;
-    let createdStat: Awaited<ReturnType<typeof stat>> | null = null;
     try {
-      await mkdir(lockDir);
-      created = true;
-      createdStat = await stat(lockDir);
-      await writeFile(ownerPath, ownerId);
-      const published = await readFile(ownerPath, "utf8").catch(() => "");
-      const currentStat = await stat(lockDir).catch(() => null);
-      if (!currentStat || !createdStat || currentStat.dev !== createdStat.dev || currentStat.ino !== createdStat.ino || published !== ownerId) {
-        throw new Error("status_lock_owner_publication_failed");
-      }
+      await mkdir(acquireDir);
+      await writeFile(acquireOwnerPath, ownerId);
+      const published = await readFile(acquireOwnerPath, "utf8").catch(() => "");
+      if (published !== ownerId) throw new Error("status_lock_owner_publication_failed");
+      await rename(acquireDir, lockDir);
       break;
     } catch {
-      if (created && createdStat) {
-        const currentStat = await stat(lockDir).catch(() => null);
-        if (currentStat && currentStat.dev === createdStat.dev && currentStat.ino === createdStat.ino) {
-          await rm(lockDir, { recursive: true, force: true }).catch(() => undefined);
-        }
-      } else {
-        const observed = await readFile(ownerPath, "utf8").catch(() => "");
-        const ownerMatch = /^(\d+):(.+)$/.exec(observed);
-        const ownerStat = ownerMatch ? await stat(ownerPath).catch(() => null) : null;
-        const ownerPid = ownerMatch ? Number.parseInt(ownerMatch[1] ?? "", 10) : Number.NaN;
-        if (ownerMatch && ownerStat && Date.now() - ownerStat.mtimeMs > timeoutMs && !isProcessAlive(ownerPid)) {
-            const recoveryDir = join(lockDir, ".recovery");
-            const recoveryOwnerPath = join(recoveryDir, "owner");
-            const recoveryOwnerId = `${process.pid}:${Date.now().toString(16)}-${Math.random().toString(16).slice(2)}`;
-            let recoveryClaimed = false;
+      await rm(acquireDir, { recursive: true, force: true }).catch(() => undefined);
+
+      const observed = await readFile(ownerPath, "utf8").catch(() => "");
+      const ownerMatch = /^(\d+):(.+)$/.exec(observed);
+      const ownerStat = ownerMatch ? await stat(ownerPath).catch(() => null) : null;
+      const lockStat = await stat(lockDir).catch(() => null);
+      const ownerPid = ownerMatch ? Number.parseInt(ownerMatch[1] ?? "", 10) : Number.NaN;
+      const ownerlessStale = !ownerMatch && lockStat && Date.now() - lockStat.mtimeMs > timeoutMs;
+      const ownedStale = ownerMatch && ownerStat && Date.now() - ownerStat.mtimeMs > timeoutMs && !isProcessAlive(ownerPid);
+
+      if (ownerlessStale || ownedStale) {
+        const recoveryDir = join(lockDir, ".recovery");
+        const recoveryOwnerPath = join(recoveryDir, "owner");
+        const recoveryOwnerId = `${process.pid}:${Date.now().toString(16)}-${Math.random().toString(16).slice(2)}`;
+        let recoveryClaimed = false;
+        try {
+          await mkdir(recoveryDir);
+          await writeFile(recoveryOwnerPath, recoveryOwnerId);
+          recoveryClaimed = (await readFile(recoveryOwnerPath, "utf8").catch(() => "")) === recoveryOwnerId;
+        } catch {
+          const recoveryStat = await stat(recoveryDir).catch(() => null);
+          const recoveryOwner = await readFile(recoveryOwnerPath, "utf8").catch(() => "");
+          const recoveryMatch = /^(\d+):(.+)$/.exec(recoveryOwner);
+          const recoveryPid = recoveryMatch ? Number.parseInt(recoveryMatch[1] ?? "", 10) : Number.NaN;
+          const recoveryAgeMs = recoveryStat ? Date.now() - recoveryStat.mtimeMs : 0;
+          const recoveryGraceMs = Math.min(250, Math.max(25, Math.floor(timeoutMs / 4)));
+          const recoveryExpired = recoveryAgeMs > Math.max(recoveryGraceMs, timeoutMs);
+          if (recoveryStat && ((!recoveryMatch && recoveryAgeMs > recoveryGraceMs) || (recoveryMatch && (!isProcessAlive(recoveryPid) || recoveryExpired)))) {
+            const abandoned = join(lockDir, `.recovery-abandoned-${process.pid}-${Date.now().toString(16)}-${Math.random().toString(16).slice(2)}`);
             try {
-              await mkdir(recoveryDir);
-              await writeFile(recoveryOwnerPath, recoveryOwnerId);
-              recoveryClaimed = (await readFile(recoveryOwnerPath, "utf8").catch(() => "")) === recoveryOwnerId;
-            } catch {
-              const recoveryStat = await stat(recoveryDir).catch(() => null);
-              const recoveryOwner = await readFile(recoveryOwnerPath, "utf8").catch(() => "");
-              const recoveryMatch = /^(\d+):(.+)$/.exec(recoveryOwner);
-              const recoveryPid = recoveryMatch ? Number.parseInt(recoveryMatch[1] ?? "", 10) : Number.NaN;
-              const recoveryAgeMs = recoveryStat ? Date.now() - recoveryStat.mtimeMs : 0;
-              const recoveryGraceMs = Math.min(250, Math.max(25, Math.floor(timeoutMs / 4)));
-              if (recoveryStat && ((!recoveryMatch && recoveryAgeMs > recoveryGraceMs) || (recoveryMatch && !isProcessAlive(recoveryPid)))) {
-                const abandoned = join(lockDir, `.recovery-abandoned-${process.pid}-${Date.now().toString(16)}-${Math.random().toString(16).slice(2)}`);
-                try {
-                  await renameLock(recoveryDir, abandoned);
-                  await rm(abandoned, { recursive: true, force: true }).catch(() => undefined);
-                } catch {}
-              }
-            }
-            if (recoveryClaimed) {
-              const trash = `${lockDir}.stale-${process.pid}-${Date.now().toString(16)}-${Math.random().toString(16).slice(2)}`;
-              try {
-                const still = await readFile(ownerPath, "utf8").catch(() => "");
-                const stillPid = Number.parseInt(still.split(":")[0] ?? "", 10);
-                if (still === observed && !isProcessAlive(stillPid)) {
-                  await renameLock(lockDir, trash);
-                  await rm(trash, { recursive: true, force: true }).catch(() => undefined);
-                }
-              } catch {} finally {
-                const currentRecoveryOwner = await readFile(recoveryOwnerPath, "utf8").catch(() => "");
-                if (currentRecoveryOwner === recoveryOwnerId) {
-                  const released = join(lockDir, `.recovery-released-${process.pid}-${Date.now().toString(16)}-${Math.random().toString(16).slice(2)}`);
-                  try {
-                    await renameLock(recoveryDir, released);
-                    await rm(released, { recursive: true, force: true }).catch(() => undefined);
-                  } catch {}
-                }
-                await rm(trash, { recursive: true, force: true }).catch(() => undefined);
-              }
-            }
+              await renameLock(recoveryDir, abandoned);
+              await rm(abandoned, { recursive: true, force: true }).catch(() => undefined);
+            } catch {}
           }
+        }
+        if (recoveryClaimed) {
+          const trash = `${lockDir}.stale-${process.pid}-${Date.now().toString(16)}-${Math.random().toString(16).slice(2)}`;
+          try {
+            const still = await readFile(ownerPath, "utf8").catch(() => "");
+            const stillMatch = /^(\d+):(.+)$/.exec(still);
+            const stillPid = stillMatch ? Number.parseInt(stillMatch[1] ?? "", 10) : Number.NaN;
+            const currentLockStat = await stat(lockDir).catch(() => null);
+            const stillOwnerlessStale = !stillMatch && currentLockStat && Date.now() - currentLockStat.mtimeMs > timeoutMs;
+            const stillOwnedStale = still === observed && stillMatch && !isProcessAlive(stillPid);
+            if (stillOwnerlessStale || stillOwnedStale) {
+              await renameLock(lockDir, trash);
+              await rm(trash, { recursive: true, force: true }).catch(() => undefined);
+            }
+          } catch {} finally {
+            const currentRecoveryOwner = await readFile(recoveryOwnerPath, "utf8").catch(() => "");
+            if (currentRecoveryOwner === recoveryOwnerId) {
+              const released = join(lockDir, `.recovery-released-${process.pid}-${Date.now().toString(16)}-${Math.random().toString(16).slice(2)}`);
+              try {
+                await renameLock(recoveryDir, released);
+                await rm(released, { recursive: true, force: true }).catch(() => undefined);
+              } catch {}
+            }
+            await rm(trash, { recursive: true, force: true }).catch(() => undefined);
+          }
+        }
       }
       if (Date.now() >= deadline) {
         throw new Error(`timed out acquiring status lock ${lockDir}`);

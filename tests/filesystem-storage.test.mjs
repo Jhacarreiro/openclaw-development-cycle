@@ -165,7 +165,7 @@ test("persistent lock setup errors respect the acquisition timeout", async (t) =
   assert.ok(Date.now() - started < 1000);
 });
 
-test("stale-lock rename failure remains bounded", async (t) => {
+test("stale-lock rename failure remains bounded and later acquire recovers", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "development-cycle-stale-rename-error-"));
   t.after(() => rm(root, { recursive: true, force: true }));
   const lockDir = join(root, ".status.lock");
@@ -179,17 +179,34 @@ test("stale-lock rename failure remains bounded", async (t) => {
   const started = Date.now();
   await assert.rejects(() => acquireLock(lockDir, 80, failRename), /timed out acquiring status lock/);
   assert.ok(Date.now() - started < 1000);
+
+  await new Promise((resolve) => setTimeout(resolve, 90));
+  const recovered = await acquireLock(lockDir, 300);
+  t.after(() => recovered.release());
+  assert.equal(await recovered.isHeld(), true);
 });
 
-test("missing owner metadata fails closed and is not recovered", async (t) => {
+test("stale ownerless lock from interrupted legacy publication is recoverable", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "development-cycle-ownerless-lock-"));
   t.after(() => rm(root, { recursive: true, force: true }));
   const lockDir = join(root, ".status.lock");
   await mkdir(lockDir);
   const past = new Date(Date.now() - 10_000);
   await utimes(lockDir, past, past);
-  await assert.rejects(() => acquireLock(lockDir, 80), /timed out acquiring status lock/);
-  assert.ok(await stat(lockDir));
+  const recovered = await acquireLock(lockDir, 300);
+  t.after(() => recovered.release());
+  assert.equal(await recovered.isHeld(), true);
+});
+
+test("crash before owner publication leaves only a nonblocking candidate directory", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "development-cycle-owner-publication-crash-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const lockDir = join(root, ".status.lock");
+  await mkdir(`${lockDir}.acquire-dead-publisher`);
+
+  const held = await acquireLock(lockDir, 80);
+  t.after(() => held.release());
+  assert.equal(await held.isHeld(), true);
 });
 
 test("concurrent release calls cannot remove a replacement lock", async (t) => {

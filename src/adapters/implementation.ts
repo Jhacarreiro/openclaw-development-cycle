@@ -9,6 +9,7 @@ export interface ImplementationAdapterConfig {
   args: string[];
   octopusRoot: string;
   octopusSandbox: string;
+  loopUntilApproved: boolean;
 }
 
 export interface ImplementationLaunchInput {
@@ -20,7 +21,7 @@ export interface ImplementationLaunchInput {
   requestPath: string;
   promptPath: string;
   prompt: string;
-  timeoutSeconds: number;
+  timeoutSeconds?: number;
   command?: string;
   observer?: {
     sessionId?: string;
@@ -86,14 +87,14 @@ export function buildImplementationLaunchSpec(
       args: [
         "--dir",
         input.projectRoot,
-        "--timeout",
-        String(input.timeoutSeconds),
+        ...(Number(input.timeoutSeconds || 0) > 0 ? ["--timeout", String(input.timeoutSeconds)] : []),
         input.command || "tangle",
         input.prompt,
       ],
       env: {
         ...genericEnv,
         OCTOPUS_CODEX_SANDBOX: config.octopusSandbox,
+        LOOP_UNTIL_APPROVED: config.loopUntilApproved ? "true" : "false",
         OCTOPUS_AGENT_LIFECYCLE_HOOK: input.observer?.agentHookPath || "",
         OCTOPUS_AGENT_LIFECYCLE_HOOK_LOG: input.observer?.hookLogPath || "",
         OCTOPUS_AGENT_ROOT_SESSION_ID: sessionId,
@@ -114,6 +115,11 @@ export function buildImplementationLaunchSpec(
 
 export function shellQuote(value: string): string {
   return `'${String(value).replace(/'/g, `'"'"'`)}'`;
+}
+
+/** JSON-encode a value, then single-quote it for a generated /bin/sh script. */
+export function jsonShellQuote(value: string): string {
+  return shellQuote(JSON.stringify(value));
 }
 
 export function renderShellCommand(spec: ImplementationLaunchSpec): string {

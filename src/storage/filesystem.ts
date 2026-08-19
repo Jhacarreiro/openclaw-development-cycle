@@ -33,9 +33,7 @@ export async function acquireLock(lockDir: string, timeoutMs = 5000): Promise<St
       await writeFile(ownerPath, ownerId);
       break;
     } catch {
-      if (created) {
-        await rm(lockDir, { recursive: true, force: true }).catch(() => undefined);
-      } else {
+      if (!created) {
         const st = await stat(lockDir).catch(() => null);
         if (st && Date.now() - st.mtimeMs > timeoutMs) {
           const observed = await readFile(ownerPath, "utf8").catch(() => "");

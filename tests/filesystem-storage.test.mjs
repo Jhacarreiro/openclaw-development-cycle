@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { access, mkdir, mkdtemp, readFile, readdir, rm, stat, utimes, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, readdir, rename, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -168,6 +168,37 @@ test("missing owner metadata fails closed and is not recovered", async (t) => {
   await utimes(lockDir, past, past);
   await assert.rejects(() => acquireLock(lockDir, 80), /timed out acquiring status lock/);
   assert.ok(await stat(lockDir));
+});
+
+test("concurrent release calls cannot remove a replacement lock", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "development-cycle-release-race-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const lockDir = join(root, ".status.lock");
+  let signalMoved;
+  let releaseCleanup;
+  const moved = new Promise((resolve) => { signalMoved = resolve; });
+  const cleanupGate = new Promise((resolve) => { releaseCleanup = resolve; });
+  const gatedRename = async (src, dst) => {
+    await rename(src, dst);
+    if (src === lockDir && dst.includes(".release-")) {
+      signalMoved();
+      await cleanupGate;
+    }
+  };
+
+  const held = await acquireLock(lockDir, 80, gatedRename);
+  const releaseA = held.release();
+  const releaseB = held.release();
+  await moved;
+
+  const replacement = await acquireLock(lockDir, 80);
+  t.after(() => replacement.release());
+  assert.equal(await replacement.isHeld(), true);
+
+  releaseCleanup();
+  await Promise.all([releaseA, releaseB]);
+  assert.equal(await replacement.isHeld(), true);
+  assert.match(await readFile(join(lockDir, "owner"), "utf8"), new RegExp(`^${process.pid}:`));
 });
 
 test("delayed release does not remove a replacement lock", async (t) => {

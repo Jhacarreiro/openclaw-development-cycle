@@ -82,14 +82,22 @@ export async function acquireLock(lockDir: string, timeoutMs = 5000, renameLock 
     }
   }
   const isHeld = async () => (await readFile(ownerPath, "utf8").catch(() => null)) === ownerId;
-  return {
-    isHeld,
-    release: async () => {
-      if (await isHeld()) {
-        await rm(lockDir, { recursive: true, force: true }).catch(() => undefined);
+  let releasePromise: Promise<void> | null = null;
+  const release = async () => {
+    if (releasePromise) return releasePromise;
+    releasePromise = (async () => {
+      if (!(await isHeld())) return;
+      const trash = `${lockDir}.release-${ownerId.replace(/[^a-zA-Z0-9_.-]/g, "-")}`;
+      try {
+        await renameLock(lockDir, trash);
+      } catch {
+        return;
       }
-    },
+      await rm(trash, { recursive: true, force: true }).catch(() => undefined);
+    })();
+    return releasePromise;
   };
+  return { isHeld, release };
 }
 
 export interface FilesystemStore {

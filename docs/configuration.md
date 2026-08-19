@@ -25,7 +25,6 @@ The command adapter is the portable default.
 | `DEVELOPMENT_CYCLE_IMPLEMENTATION_ARGS_JSON` | `[]` | JSON array of fixed string arguments placed before the request path. |
 | `DEVELOPMENT_CYCLE_OCTOPUS_ROOT` | empty | Root of an optional Octopus checkout. |
 | `DEVELOPMENT_CYCLE_OCTOPUS_SANDBOX` | `workspace-write` | Sandbox value passed by the Octopus adapter. |
-| `DEVELOPMENT_CYCLE_LOOP_UNTIL_APPROVED` | `true` | Retry failed Octopus subtasks until the configured quality retry limit is reached. Set `false` only for deliberate one-shot runs. |
 
 Example command adapter:
 
@@ -53,7 +52,17 @@ See [Implementation adapters](adapters.md).
 | `DEVELOPMENT_CYCLE_RUNNER_SUPERVISOR_PATH` | packaged `runner-supervisor.py` | Persistent Python subreaper supervisor. |
 | `DEVELOPMENT_CYCLE_RUNNER_SUPERVISOR_SOCKET` | system temp directory | Unix socket used by the supervisor. |
 | `DEVELOPMENT_CYCLE_HEARTBEAT_INTERVAL_SECONDS` | `30` | Heartbeat interval for supervised runs. |
-| `DEVELOPMENT_CYCLE_DEFAULT_TIMEOUT_SECONDS` | `0` | Default implementation timeout. `0` delegates timeout policy to the implementation orchestrator. |
+| `DEVELOPMENT_CYCLE_DEFAULT_TIMEOUT_SECONDS` | `7200` | Default bounded timeout. |
+
+## Limits
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `DEVELOPMENT_CYCLE_MAX_PROMPT_BYTES` | `2 MiB` | Maximum prompt payload accepted by `start_implementation`. |
+| `DEVELOPMENT_CYCLE_MAX_RUNNER_TIMEOUT_SECONDS` | `86400` (24h) | Server-wide upper bound on runner duration. |
+| `DEVELOPMENT_CYCLE_MAX_TOOL_TEXT_BYTES` | `2 MiB` | Maximum plan, delivery, direction, or validation text accepted by the tool. |
+
+These values are read at plugin load. Unset, empty, non-numeric, zero, negative, fractional (truncated by integer parsing), or non-finite values fall back to the default. Every cap is clamped to a finite floor. Per-call `timeoutSeconds` must be finite; non-finite values (`Infinity`, `NaN`) are rejected with error `timeout_not_finite`. Requests that exceed the prompt or tool-text caps are rejected with the corresponding `*_too_large` errors.
 
 ## OpenClaw notifications
 

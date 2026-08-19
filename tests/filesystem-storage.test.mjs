@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { access, chmod, mkdir, mkdtemp, readFile, readdir, rm, stat, utimes, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, readdir, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -146,20 +146,28 @@ test("persistent lock setup errors respect the acquisition timeout", async (t) =
 
 test("stale-lock rename failure remains bounded", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "development-cycle-stale-rename-error-"));
-  t.after(async () => {
-    await chmod(root, 0o700).catch(() => undefined);
-    await rm(root, { recursive: true, force: true });
-  });
+  t.after(() => rm(root, { recursive: true, force: true }));
   const lockDir = join(root, ".status.lock");
   await mkdir(lockDir);
   await writeFile(join(lockDir, "owner"), String(unusedPid()) + ":deadtoken");
   const past = new Date(Date.now() - 10_000);
   await utimes(lockDir, past, past);
-  await chmod(root, 0o500);
+  const failRename = async () => { const error = new Error("injected rename failure"); error.code = "EACCES"; throw error; };
 
   const started = Date.now();
-  await assert.rejects(() => acquireLock(lockDir, 80), /timed out acquiring status lock/);
+  await assert.rejects(() => acquireLock(lockDir, 80, failRename), /timed out acquiring status lock/);
   assert.ok(Date.now() - started < 1000);
+});
+
+test("missing owner metadata fails closed and is not recovered", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "development-cycle-ownerless-lock-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const lockDir = join(root, ".status.lock");
+  await mkdir(lockDir);
+  const past = new Date(Date.now() - 10_000);
+  await utimes(lockDir, past, past);
+  await assert.rejects(() => acquireLock(lockDir, 80), /timed out acquiring status lock/);
+  assert.ok(await stat(lockDir));
 });
 
 test("delayed release does not remove a replacement lock", async (t) => {

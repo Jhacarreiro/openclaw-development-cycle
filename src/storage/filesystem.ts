@@ -21,24 +21,37 @@ type StatusLock = {
   release: () => Promise<void>;
 };
 
-export async function acquireLock(lockDir: string, timeoutMs = 5000): Promise<StatusLock> {
+export async function acquireLock(lockDir: string, timeoutMs = 5000, renameLock = rename): Promise<StatusLock> {
   const ownerId = `${process.pid}:${Date.now().toString(16)}-${Math.random().toString(16).slice(2)}`;
   const ownerPath = join(lockDir, "owner");
   const deadline = Date.now() + timeoutMs;
   for (;;) {
     let created = false;
+    let createdStat: Awaited<ReturnType<typeof stat>> | null = null;
     try {
       await mkdir(lockDir);
       created = true;
+      createdStat = await stat(lockDir);
       await writeFile(ownerPath, ownerId);
+      const published = await readFile(ownerPath, "utf8").catch(() => "");
+      const currentStat = await stat(lockDir).catch(() => null);
+      if (!currentStat || !createdStat || currentStat.dev !== createdStat.dev || currentStat.ino !== createdStat.ino || published !== ownerId) {
+        throw new Error("status_lock_owner_publication_failed");
+      }
       break;
     } catch {
-      if (!created) {
+      if (created && createdStat) {
+        const currentStat = await stat(lockDir).catch(() => null);
+        if (currentStat && currentStat.dev === createdStat.dev && currentStat.ino === createdStat.ino) {
+          await rm(lockDir, { recursive: true, force: true }).catch(() => undefined);
+        }
+      } else {
         const st = await stat(lockDir).catch(() => null);
         if (st && Date.now() - st.mtimeMs > timeoutMs) {
           const observed = await readFile(ownerPath, "utf8").catch(() => "");
-          const ownerPid = Number.parseInt(observed.split(":")[0] ?? "", 10);
-          if (!isProcessAlive(ownerPid)) {
+          const ownerMatch = /^(\d+):(.+)$/.exec(observed);
+          const ownerPid = ownerMatch ? Number.parseInt(ownerMatch[1] ?? "", 10) : Number.NaN;
+          if (ownerMatch && !isProcessAlive(ownerPid)) {
             const recoveryDir = join(lockDir, ".recovery");
             let recoveryClaimed = false;
             try {
@@ -51,7 +64,7 @@ export async function acquireLock(lockDir: string, timeoutMs = 5000): Promise<St
                 const still = await readFile(ownerPath, "utf8").catch(() => "");
                 const stillPid = Number.parseInt(still.split(":")[0] ?? "", 10);
                 if (still === observed && !isProcessAlive(stillPid)) {
-                  await rename(lockDir, trash);
+                  await renameLock(lockDir, trash);
                   await rm(trash, { recursive: true, force: true }).catch(() => undefined);
                 }
               } catch {} finally {

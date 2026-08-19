@@ -134,7 +134,12 @@ def serve(socket_path: str) -> None:
                         response = {'ok': False, 'error': 'unknown_action'}
                 except Exception as exc:
                     response = {'ok': False, 'error': f'{type(exc).__name__}:{exc}'}
-                conn.sendall((json.dumps(response) + '\n').encode('utf-8'))
+                try:
+                    conn.sendall((json.dumps(response) + '\n').encode('utf-8'))
+                except (BrokenPipeError, ConnectionResetError, OSError):
+                    # Client disconnected before reading; never let that take down
+                    # the supervisor (it is the subreaper for running sessions).
+                    pass
 
         for pid, _status in reap_all(runners):
             pgid = runners.pop(pid, pid)

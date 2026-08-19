@@ -114,11 +114,31 @@ test("updateStatus recovers a stale lock left by a dead holder", async (t) => {
   await mkdir(lockDir);
   await writeFile(join(lockDir, "owner"), `${unusedPid()}:deadtoken`);
   const past = new Date(Date.now() - 10_000);
+  await utimes(join(lockDir, "owner"), past, past);
   await utimes(lockDir, past, past);
 
   const status = await store.updateStatus(runDir, { phase: "recovered" });
   assert.equal(status.phase, "recovered");
   await assert.rejects(() => stat(lockDir), { code: "ENOENT" });
+});
+
+test("stale recovery claim abandoned before owner publication is recoverable", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "development-cycle-abandoned-recovery-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const lockDir = join(root, ".status.lock");
+  await mkdir(lockDir);
+  await writeFile(join(lockDir, "owner"), `${unusedPid()}:deadtoken`);
+  const recoveryDir = join(lockDir, ".recovery");
+  await mkdir(recoveryDir);
+  const past = new Date(Date.now() - 10_000);
+  await utimes(recoveryDir, past, past);
+  await utimes(join(lockDir, "owner"), past, past);
+  await utimes(lockDir, past, past);
+
+  const held = await acquireLock(lockDir, 300);
+  t.after(() => held.release());
+  assert.equal(await held.isHeld(), true);
+  assert.match(await readFile(join(lockDir, "owner"), "utf8"), new RegExp(`^${process.pid}:`));
 });
 
 test("a live holder is not evicted when the lock mtime is stale", async (t) => {
@@ -128,6 +148,7 @@ test("a live holder is not evicted when the lock mtime is stale", async (t) => {
   const held = await acquireLock(lockDir, 80);
   t.after(() => held.release());
   const past = new Date(Date.now() - 10_000);
+  await utimes(join(lockDir, "owner"), past, past);
   await utimes(lockDir, past, past);
   await assert.rejects(() => acquireLock(lockDir, 80), /timed out acquiring status lock/);
   assert.equal(await held.isHeld(), true);
@@ -151,6 +172,7 @@ test("stale-lock rename failure remains bounded", async (t) => {
   await mkdir(lockDir);
   await writeFile(join(lockDir, "owner"), String(unusedPid()) + ":deadtoken");
   const past = new Date(Date.now() - 10_000);
+  await utimes(join(lockDir, "owner"), past, past);
   await utimes(lockDir, past, past);
   const failRename = async () => { const error = new Error("injected rename failure"); error.code = "EACCES"; throw error; };
 

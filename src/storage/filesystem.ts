@@ -46,18 +46,34 @@ export async function acquireLock(lockDir: string, timeoutMs = 5000, renameLock 
           await rm(lockDir, { recursive: true, force: true }).catch(() => undefined);
         }
       } else {
-        const st = await stat(lockDir).catch(() => null);
-        if (st && Date.now() - st.mtimeMs > timeoutMs) {
-          const observed = await readFile(ownerPath, "utf8").catch(() => "");
-          const ownerMatch = /^(\d+):(.+)$/.exec(observed);
-          const ownerPid = ownerMatch ? Number.parseInt(ownerMatch[1] ?? "", 10) : Number.NaN;
-          if (ownerMatch && !isProcessAlive(ownerPid)) {
+        const observed = await readFile(ownerPath, "utf8").catch(() => "");
+        const ownerMatch = /^(\d+):(.+)$/.exec(observed);
+        const ownerStat = ownerMatch ? await stat(ownerPath).catch(() => null) : null;
+        const ownerPid = ownerMatch ? Number.parseInt(ownerMatch[1] ?? "", 10) : Number.NaN;
+        if (ownerMatch && ownerStat && Date.now() - ownerStat.mtimeMs > timeoutMs && !isProcessAlive(ownerPid)) {
             const recoveryDir = join(lockDir, ".recovery");
+            const recoveryOwnerPath = join(recoveryDir, "owner");
+            const recoveryOwnerId = `${process.pid}:${Date.now().toString(16)}-${Math.random().toString(16).slice(2)}`;
             let recoveryClaimed = false;
             try {
               await mkdir(recoveryDir);
-              recoveryClaimed = true;
-            } catch {}
+              await writeFile(recoveryOwnerPath, recoveryOwnerId);
+              recoveryClaimed = (await readFile(recoveryOwnerPath, "utf8").catch(() => "")) === recoveryOwnerId;
+            } catch {
+              const recoveryStat = await stat(recoveryDir).catch(() => null);
+              const recoveryOwner = await readFile(recoveryOwnerPath, "utf8").catch(() => "");
+              const recoveryMatch = /^(\d+):(.+)$/.exec(recoveryOwner);
+              const recoveryPid = recoveryMatch ? Number.parseInt(recoveryMatch[1] ?? "", 10) : Number.NaN;
+              const recoveryAgeMs = recoveryStat ? Date.now() - recoveryStat.mtimeMs : 0;
+              const recoveryGraceMs = Math.min(250, Math.max(25, Math.floor(timeoutMs / 4)));
+              if (recoveryStat && ((!recoveryMatch && recoveryAgeMs > recoveryGraceMs) || (recoveryMatch && !isProcessAlive(recoveryPid)))) {
+                const abandoned = join(lockDir, `.recovery-abandoned-${process.pid}-${Date.now().toString(16)}-${Math.random().toString(16).slice(2)}`);
+                try {
+                  await renameLock(recoveryDir, abandoned);
+                  await rm(abandoned, { recursive: true, force: true }).catch(() => undefined);
+                } catch {}
+              }
+            }
             if (recoveryClaimed) {
               const trash = `${lockDir}.stale-${process.pid}-${Date.now().toString(16)}-${Math.random().toString(16).slice(2)}`;
               try {
@@ -68,12 +84,18 @@ export async function acquireLock(lockDir: string, timeoutMs = 5000, renameLock 
                   await rm(trash, { recursive: true, force: true }).catch(() => undefined);
                 }
               } catch {} finally {
-                await rm(recoveryDir, { recursive: true, force: true }).catch(() => undefined);
+                const currentRecoveryOwner = await readFile(recoveryOwnerPath, "utf8").catch(() => "");
+                if (currentRecoveryOwner === recoveryOwnerId) {
+                  const released = join(lockDir, `.recovery-released-${process.pid}-${Date.now().toString(16)}-${Math.random().toString(16).slice(2)}`);
+                  try {
+                    await renameLock(recoveryDir, released);
+                    await rm(released, { recursive: true, force: true }).catch(() => undefined);
+                  } catch {}
+                }
                 await rm(trash, { recursive: true, force: true }).catch(() => undefined);
               }
             }
           }
-        }
       }
       if (Date.now() >= deadline) {
         throw new Error(`timed out acquiring status lock ${lockDir}`);

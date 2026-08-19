@@ -1,9 +1,9 @@
 // @ts-nocheck
 import { Type } from "typebox";
 import { defineToolPlugin } from "openclaw/plugin-sdk/tool-plugin";
-import { mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { join, relative, resolve } from "node:path";
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
 import { setTimeout as sleep } from "node:timers/promises";
 import { ACTIONS, checkActionTransition } from "./core/state-machine.js";
@@ -95,19 +95,30 @@ async function ensureRunnerSupervisor() {
     return parsed;
   };
   try { return await ping(); } catch {}
-  const launch = await execFileAsync("sh", ["-c", 'rm -f "$1"; setsid python3 "$2" --socket "$1" serve >/tmp/development-cycle-runner-supervisor.log 2>&1 < /dev/null & echo $!', "development-cycle-supervisor-launcher", runnerSupervisorSocket, runnerSupervisorPath], {
-    timeout: 5000,
-    maxBuffer: 64 * 1024,
+  await rm(runnerSupervisorSocket, { force: true }).catch(() => undefined);
+  const supervisor = spawn("python3", [runnerSupervisorPath, "--socket", runnerSupervisorSocket, "serve"], {
+    detached: true,
+    stdio: "ignore",
   });
-  const supervisorPid = Number.parseInt(String(launch.stdout || "").trim(), 10);
+  supervisor.unref();
+  const supervisorPid = Number(supervisor.pid);
   for (let i = 0; i < 30; i++) {
     await sleep(100);
     try { return await ping(); } catch {}
   }
-  // Startup failed — do not leave an orphaned supervisor reparented to init.
+  // Startup failed — terminate the detached supervisor session and do not leave descendants reparented to init.
   if (Number.isInteger(supervisorPid) && supervisorPid > 1) {
-    try { process.kill(supervisorPid, "SIGTERM"); } catch {}
+    const terminateGroup = async (signal: NodeJS.Signals) => {
+      try { process.kill(-supervisorPid, signal); } catch {}
+      for (let i = 0; i < 20; i++) {
+        try { process.kill(supervisorPid, 0); } catch { return true; }
+        await sleep(50);
+      }
+      return false;
+    };
+    if (!(await terminateGroup("SIGTERM"))) await terminateGroup("SIGKILL");
   }
+  try { await rm(runnerSupervisorSocket, { force: true }); } catch {}
   throw new Error("runner_supervisor_start_failed");
 }
 const cycleDir = filesystemStore.runDir;

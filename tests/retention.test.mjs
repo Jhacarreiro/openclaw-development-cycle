@@ -73,6 +73,44 @@ test("pruneExpiredRuns never follows a symlinked run directory", async () => {
   rmSync(outside, { recursive: true, force: true });
 });
 
+test("pruneExpiredRuns preserves stale run with fresh corrections heartbeat", async () => {
+  const staleRun = join(stateRoot, "runs", "proj", "proj-corrections-active");
+  mkdirSync(staleRun, { recursive: true });
+  writeFileSync(join(staleRun, "status.json"), "{}");
+  // Heartbeat in corrections_session is fresh (written in place, not dir-mtime)
+  const corrDir = join(staleRun, "corrections_session");
+  mkdirSync(corrDir, { recursive: true });
+  writeFileSync(join(corrDir, "heartbeat.json"), JSON.stringify({ phase: "running" }));
+  const twoDaysAgo = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000);
+  utimesSync(staleRun, twoDaysAgo, twoDaysAgo);
+  utimesSync(join(staleRun, "status.json"), twoDaysAgo, twoDaysAgo);
+  // corrections heartbeat stays fresh (now) — should prevent pruning
+
+  await pruneExpiredRuns();
+
+  assert.equal(existsSync(staleRun), true, "stale dir with fresh corrections heartbeat must be preserved");
+  // Now age the heartbeat too — should be pruned
+  utimesSync(join(corrDir, "heartbeat.json"), twoDaysAgo, twoDaysAgo);
+  utimesSync(corrDir, twoDaysAgo, twoDaysAgo);
+  await pruneExpiredRuns();
+  assert.equal(existsSync(staleRun), false, "stale dir with stale corrections heartbeat should be pruned");
+});
+
+test("pruneExpiredRuns preserves stale run with fresh implementation heartbeat", async () => {
+  const staleRun = join(stateRoot, "runs", "proj", "proj-impl-active");
+  mkdirSync(staleRun, { recursive: true });
+  writeFileSync(join(staleRun, "status.json"), "{}");
+  const implDir = join(staleRun, "implementation_session");
+  mkdirSync(implDir, { recursive: true });
+  writeFileSync(join(implDir, "heartbeat.json"), JSON.stringify({ phase: "running" }));
+  const twoDaysAgo = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000);
+  utimesSync(staleRun, twoDaysAgo, twoDaysAgo);
+  utimesSync(join(staleRun, "status.json"), twoDaysAgo, twoDaysAgo);
+
+  await pruneExpiredRuns();
+  assert.equal(existsSync(staleRun), true, "stale dir with fresh impl heartbeat must be preserved");
+});
+
 test.after(() => {
   rmSync(stateRoot, { recursive: true, force: true });
 });

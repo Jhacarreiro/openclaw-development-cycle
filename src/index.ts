@@ -171,7 +171,28 @@ export async function pruneExpiredRuns() {
         if (implHeartbeat?.isFile() && Date.now() - implHeartbeat.mtimeMs <= retentionMs) continue;
         const corrHeartbeat = await stat(join(runReal, "corrections_session", "heartbeat.json")).catch(() => null);
         if (corrHeartbeat?.isFile() && Date.now() - corrHeartbeat.mtimeMs <= retentionMs) continue;
-        await rm(runReal, { recursive: true, force: true }).catch(() => null);
+        // TOCTOU mitigation: re-validate containment before destructive rm.
+        // Between initial validation and rm(), a concurrent writer could replace
+        // projectDir with a symlink to an external tree; rm(runReal) would then
+        // traverse the new symlink. Re-lstat and re-realpath both levels and
+        // ensure the resolved path is unchanged and still inside runsRoot.
+        const projectInfo2 = await lstat(projectDir).catch(() => null);
+        if (!projectInfo2?.isDirectory()) continue;
+        const projectReal2 = await realpath(projectDir).catch(() => "");
+        if (!projectReal2.startsWith(runsRootReal + sep)) continue;
+        const runInfo2 = await lstat(runDir).catch(() => null);
+        if (!runInfo2?.isDirectory()) continue;
+        const runReal2 = await realpath(runDir).catch(() => "");
+        if (!runReal2.startsWith(runsRootReal + sep)) continue;
+        if (runReal2 !== runReal) continue;
+        const info2 = await stat(runReal2).catch(() => null);
+        if (!info2?.isDirectory()) continue;
+        if (Date.now() - info2.mtimeMs <= retentionMs) continue;
+        const implHeartbeat2 = await stat(join(runReal2, "implementation_session", "heartbeat.json")).catch(() => null);
+        if (implHeartbeat2?.isFile() && Date.now() - implHeartbeat2.mtimeMs <= retentionMs) continue;
+        const corrHeartbeat2 = await stat(join(runReal2, "corrections_session", "heartbeat.json")).catch(() => null);
+        if (corrHeartbeat2?.isFile() && Date.now() - corrHeartbeat2.mtimeMs <= retentionMs) continue;
+        await rm(runReal2, { recursive: true, force: true }).catch(() => null);
       }
     }
   } catch {

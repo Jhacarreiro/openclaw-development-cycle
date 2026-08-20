@@ -134,6 +134,26 @@ export function createFilesystemStore(stateRoot: string, now: () => Date = () =>
   const runDir = (project: unknown, runId: unknown) =>
     join(stateRoot, "runs", cleanId(project), cleanId(runId));
 
+  // Serialize read-modify-write per status path so concurrent updateStatus
+  // calls cannot drop each other's fields (last-writer-wins RMW race).
+  const statusChains = new Map<string, Promise<unknown>>();
+  const withStatusLock = async <T>(path: string, fn: () => Promise<T>): Promise<T> => {
+    const prev = statusChains.get(path) ?? Promise.resolve();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const tail = prev.then(() => gate, () => gate);
+    statusChains.set(path, tail);
+    await prev.catch(() => undefined);
+    try {
+      return await fn();
+    } finally {
+      release();
+      if (statusChains.get(path) === tail) statusChains.delete(path);
+    }
+  };
+
   const loadJson = async <T extends object = Record<string, unknown>>(path: string): Promise<T> => {
     try {
       return JSON.parse(await readFile(path, "utf8")) as T;
@@ -160,22 +180,24 @@ export function createFilesystemStore(stateRoot: string, now: () => Date = () =>
   ): Promise<T & { updatedAt: string }> => {
     await mkdir(dir, { recursive: true });
     const path = join(dir, "status.json");
-    // mkdir lock: two OpenClaw plugin instances sharing a stateRoot
-    // otherwise interleave load->merge->save and drop each other's
-    // updates (last-writer-wins).
-    const lockDir = join(dir, ".status.lock");
-    const lock = await acquireLock(lockDir);
-    try {
-      const current = await loadJson<Record<string, unknown>>(path);
-      const next = { ...current, ...patch, updatedAt: now().toISOString() } as T & { updatedAt: string };
-      if (!(await lock.isHeld())) {
-        throw new Error(`lost status lock ${lockDir} before write`);
+    return withStatusLock(path, async () => {
+      // mkdir lock: two OpenClaw plugin instances sharing a stateRoot
+      // otherwise interleave load->merge->save and drop each other's
+      // updates (last-writer-wins).
+      const lockDir = join(dir, ".status.lock");
+      const lock = await acquireLock(lockDir);
+      try {
+        const current = await loadJson<Record<string, unknown>>(path);
+        const next = { ...current, ...patch, updatedAt: now().toISOString() } as T & { updatedAt: string };
+        if (!(await lock.isHeld())) {
+          throw new Error(`lost status lock ${lockDir} before write`);
+        }
+        await saveJson(path, next);
+        return next;
+      } finally {
+        await lock.release();
       }
-      await saveJson(path, next);
-      return next;
-    } finally {
-      await lock.release();
-    }
+    });
   };
 
   const appendJsonl = async (path: string, data: unknown): Promise<void> => {

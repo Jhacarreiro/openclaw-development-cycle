@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, writeFile, rm, access, symlink } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, writeFile, rm, access, symlink, rename, readdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -501,3 +501,27 @@ test("start_implementation rejects external plan via symlinked wiki root", async
   assert.equal(started.details.ok, false, JSON.stringify(started.details));
   assert.equal(started.details.error, "plan_path_outside_allowed_roots");
 });
+
+test("fresh projects docs root is created before canonical plan persistence", async (t) => {
+  const root = join(tmpdir(), `ocl-pathguard-fresh-${process.pid}-${Date.now()}`);
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const code = join(root, "code");
+  await mkdir(join(code, ".git"), { recursive: true });
+  const tool = await registerPlugin(root);
+  await rm(join(root, "docs"), { recursive: true, force: true });
+  const req = await tool.execute("fresh-1", { action: "request_plan", project: "fixture-fresh", projectRoot: code }, undefined, undefined);
+  const rec = await tool.execute("fresh-2", {
+    action: "record_plan", project: "fixture-fresh", runId: req.details.runId, projectRoot: code,
+    planText: "# Implementation plan\n\n## Project paths\n- projectRoot\n- projectWikiPath\n\n## Tasks\n1. x\n\n## Validation checks\n- true\n\n## Stop conditions\n- none\n\n## Expected artifacts\n- file\n",
+    force: true,
+  }, undefined, undefined);
+  assert.equal(rec.details.ok, true, JSON.stringify(rec.details));
+  assert.ok(rec.details.canonicalPlan, JSON.stringify(rec.details));
+  await access(rec.details.canonicalPlan);
+});
+
+
+test("validation config in projectRoot is honored", async t=>{const r=join(tmpdir(),`ocl-pcfg-${process.pid}-${Date.now()}`);t.after(()=>rm(r,{recursive:true,force:true}));const c=join(r,"code");await mkdir(join(c,".git"),{recursive:true});const m=join(r,"ran"),v=join(c,"validation.json");await writeFile(v,JSON.stringify({commands:[`printf OK > ${m}`]}));const tool=await registerPlugin(r);const q=await tool.execute("q",{action:"request_plan",project:"pcfg",projectRoot:c});await tool.execute("r",{action:"record_plan",project:"pcfg",runId:q.details.runId,projectRoot:c,planText:"# Implementation plan\n\n## Project paths\n- x\n\n## Tasks\n1. x\n\n## Validation checks\n- true\n\n## Stop conditions\n- none\n\n## Expected artifacts\n- x\n",force:true});const sp=join(q.details.dir,"status.json"),st=JSON.parse(await readFile(sp,"utf8"));st.phase="implementation_delivered";await writeFile(sp,JSON.stringify(st));const z=await tool.execute("v",{action:"run_final_validation",project:"pcfg",runId:q.details.runId,projectRoot:c,validationConfigPath:v});await access(m);assert.equal(z.details.status?.validationConfigPath,v)});
+
+
+test("pinned write resists concurrent parent symlink swap",async t=>{const r=join(tmpdir(),`ocl-swap-${process.pid}-${Date.now()}`);t.after(()=>rm(r,{recursive:true,force:true}));t.after(()=>{delete process.env.DEVELOPMENT_CYCLE_TEST_PINNED_WRITE_READY_FILE;delete process.env.DEVELOPMENT_CYCLE_TEST_PINNED_WRITE_DELAY_MS});const c=join(r,"code"),w=join(r,"docs","swap"),m=join(r,"docs","swap-real"),o=join(r,"outside");await mkdir(join(c,".git"),{recursive:true});await mkdir(join(w,"plans"),{recursive:true});await mkdir(o,{recursive:true});const tool=await registerPlugin(r),q=await tool.execute("q",{action:"request_plan",project:"swap",projectRoot:c,projectWikiPath:w}),ready=join(r,"ready");process.env.DEVELOPMENT_CYCLE_TEST_PINNED_WRITE_READY_FILE=ready;process.env.DEVELOPMENT_CYCLE_TEST_PINNED_WRITE_DELAY_MS="300";const pending=tool.execute("r",{action:"record_plan",project:"swap",runId:q.details.runId,projectRoot:c,projectWikiPath:w,planText:"# Implementation plan\n\n## Project paths\n- x\n\n## Tasks\n1. x\n\n## Validation checks\n- true\n\n## Stop conditions\n- none\n\n## Expected artifacts\n- x\n",force:true});for(let i=0;i<100;i++){try{await access(ready);break}catch{}await new Promise(x=>setTimeout(x,10))}await access(ready);await rename(w,m);await symlink(o,w);const z=await pending;assert.equal(z.details.ok,true,JSON.stringify(z.details));assert.deepEqual(await readdir(o),[]);assert.ok(z.details.canonicalPlan?.startsWith(m+"/plans/"),JSON.stringify(z.details));await access(z.details.canonicalPlan)});

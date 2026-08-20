@@ -16,6 +16,13 @@ test("runner heartbeat interpolates a JSON-encoded observer session id", () => {
   assert.doesNotMatch(source, /observerSessionId":"%s"/);
 });
 
+test("generated runner verifies projectRoot inode identity before adapter execution", () => {
+  assert.match(source, /projectRootIdentity/);
+  assert.match(source, /stat -Lc '%d:%i' \./);
+  assert.match(source, /projectRoot identity changed before execution/);
+  assert.match(source, /exit 72/);
+});
+
 test("generated runner stays shell-safe and emits parseable heartbeat JSON", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "development-cycle-generated-runner-"));
   t.after(() => rm(root, { recursive: true, force: true }));

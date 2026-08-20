@@ -1,7 +1,7 @@
 // @ts-nocheck
 import { Type } from "typebox";
 import { defineToolPlugin } from "openclaw/plugin-sdk/tool-plugin";
-import { lstat, mkdir, readFile, readdir, realpath, rm, stat, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readFile, readdir, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
 import { join, relative, resolve, sep } from "node:path";
 import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
@@ -632,8 +632,12 @@ async function trustedProjectRoot(value: string): Promise<string> {
     if (real === resolve("/")) return "";
     // Explicitly reject broad system locations — an arbitrary existing
     // directory like /etc must not become an allowlist root.
-    const blocked = ["/etc", "/var", "/usr", "/home", "/root", "/opt", "/bin", "/sbin", "/lib", "/lib64", "/srv", "/proc", "/sys", "/dev", "/run"];
-    for (const b of blocked) {
+    const blockedExact = ["/etc", "/var", "/usr", "/home", "/root", "/opt", "/bin", "/sbin", "/lib", "/lib64", "/srv"];
+    for (const b of blockedExact) {
+      if (real === resolve(b)) return "";
+    }
+    const blockedTrees = ["/proc", "/sys", "/dev", "/run"];
+    for (const b of blockedTrees) {
       const br = resolve(b);
       if (real === br || real.startsWith(br + "/")) return "";
     }
@@ -687,23 +691,30 @@ async function readAllowedTextFile(pathValue: string, roots: Array<string | null
 
 async function resolveContainedWikiDir(project: string, projectWikiPath: string): Promise<string> {
   const trusted = resolveTrustedProjectWikiPath(project, projectWikiPath);
-  // Resolve through symlinks when the wiki dir already exists so a symlink under
-  // projectsWikiRoot cannot redirect writes outside the root.
-  let normalized = trusted;
-  try {
-    normalized = await realpath(trusted);
-  } catch {
-    normalized = trusted;
-  }
   let realRoot = resolve(projectsWikiRoot);
   try {
     realRoot = await realpath(projectsWikiRoot);
   } catch {
     /* root may not exist yet */
   }
-  const rel = relative(realRoot, normalized).replace(/\\/g, "/");
-  if (!(rel && rel !== ".." && !rel.startsWith("../") && !rel.startsWith("/"))) return "";
-  return normalized;
+
+  // Validate the nearest existing ancestor before any mkdir. This catches
+  // dangling symlinks below the wiki root before they can redirect creation.
+  let cursor = trusted;
+  const missing: string[] = [];
+  for (;;) {
+    try {
+      const existingReal = await realpath(cursor);
+      const rel = relative(realRoot, existingReal).replace(/\\/g, "/");
+      if (!(rel === "" || (rel && rel !== ".." && !rel.startsWith("../") && !rel.startsWith("/")))) return "";
+      return missing.length ? trusted : existingReal;
+    } catch {
+      const parent = resolve(cursor, "..");
+      if (parent === cursor) return "";
+      missing.push(cursor);
+      cursor = parent;
+    }
+  }
 }
 
 async function persistApprovedPlan(project: string, runId: string, projectWikiPath: string, planText: string) {
@@ -727,22 +738,21 @@ async function persistApprovedPlan(project: string, runId: string, projectWikiPa
     return "";
   }
   const path = join(plansDir, `${new Date().toISOString().slice(0, 10)}-${cleanId(runId)}-implementation-plan.md`);
+  const tmp = join(plansDir, `.${cleanId(runId)}-${process.pid}-${Date.now().toString(16)}.tmp`);
   try {
-    await writeFile(path, String(planText).trim() + "\n", { flag: "wx" });
-  } catch {
-    return "";
-  }
-  // Final containment check on the written path (handles TOCTOU / nested links).
-  try {
-    const realFile = await realpath(path);
-    const fileRel = relative(realRoot, realFile).replace(/\\/g, "/");
-    if (!(fileRel && fileRel !== ".." && !fileRel.startsWith("../") && !fileRel.startsWith("/"))) {
-      await rm(path, { force: true }).catch(() => null);
+    await writeFile(tmp, String(planText).trim() + "\n", { flag: "wx" });
+    const realTmp = await realpath(tmp);
+    const tmpRel = relative(realRoot, realTmp).replace(/\\/g, "/");
+    if (!(tmpRel && tmpRel !== ".." && !tmpRel.startsWith("../") && !tmpRel.startsWith("/"))) {
+      await rm(tmp, { force: true }).catch(() => null);
       return "";
     }
+    await rename(tmp, path);
   } catch {
-    /* file just written should exist */
+    await rm(tmp, { force: true }).catch(() => null);
+    return "";
   }
+
   return path;
 }
 
@@ -1114,7 +1124,17 @@ async function loadProjectValidationConfig(project: string, status: any, params:
     }
     candidates.push(realRequested);
   }
-  if (projectWikiPath) candidates.push(join(projectWikiPath, "validation.json"));
+  if (projectWikiPath) {
+    const defaultCandidate = join(projectWikiPath, "validation.json");
+    try {
+      const realCandidate = await realpath(defaultCandidate);
+      const realWiki = await realpath(projectWikiPath);
+      const rel = relative(realWiki, realCandidate).replace(/\\/g, "/");
+      if (rel === "validation.json") candidates.push(realCandidate);
+    } catch {
+      /* absent default validation config */
+    }
+  }
   let config = defaultValidationConfig();
   let path = "default";
   for (const candidate of candidates) {

@@ -10,6 +10,7 @@ export const ACTIONS = [
   "request_final_validation",
   "record_final_validation",
   "start_corrections",
+  "finalize_delivery",
   "close",
 ] as const;
 
@@ -41,7 +42,18 @@ const ALLOWED_PHASES: Partial<Record<DevelopmentCycleAction, ReadonlySet<string>
   ]),
   record_final_validation: new Set(["waiting_final_validation"]),
   start_corrections: new Set(["needs_corrections"]),
-  close: new Set(["final_validated", "stopped"]),
+  finalize_delivery: new Set([
+    "final_validated",
+    "needs_corrections",
+    "implementation_failed",
+    "corrections_failed",
+    "council_review_needs_corrections",
+    "council_review_failed",
+    "external_validation_failed",
+    "stopped",
+    "repository_delivery_failed",
+  ]),
+  close: new Set(["merged", "closed_partial", "closed_invalid"]),
 };
 
 export type TransitionCheck =

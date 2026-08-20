@@ -120,6 +120,8 @@ def serve(socket_path: str) -> None:
                         if not chunk:
                             break
                         raw += chunk
+                        if len(raw) > 1024 * 1024:
+                            raise ValueError('request too large')
                     request = json.loads(raw.decode('utf-8'))
                     action = request.get('action')
                     if action == 'ping':

@@ -31,19 +31,15 @@ function ping(socketPath) {
   });
 }
 
-test("supervisor survives an oversized peer that disconnects mid-rejection", async (t) => {
+test("supervisor rejects an oversized request and remains healthy", async (t) => {
   const dir = mkdtempSync(join(tmpdir(), "development-cycle-supervisor-"));
   const socketPath = join(dir, "supervisor.sock");
   const child = spawn("python3", [SUPERVISOR_PATH, "--socket", socketPath, "serve"], {
     stdio: ["ignore", "pipe", "pipe"],
   });
   let supervisorLog = "";
-  child.stdout.on("data", (chunk) => {
-    supervisorLog += chunk;
-  });
-  child.stderr.on("data", (chunk) => {
-    supervisorLog += chunk;
-  });
+  child.stdout.on("data", (chunk) => { supervisorLog += chunk; });
+  child.stderr.on("data", (chunk) => { supervisorLog += chunk; });
   t.after(() => {
     child.kill("SIGKILL");
     rmSync(dir, { recursive: true, force: true });
@@ -53,26 +49,42 @@ test("supervisor survives an oversized peer that disconnects mid-rejection", asy
   while (!existsSync(socketPath) && Date.now() < deadline) await sleep(25);
   assert.ok(existsSync(socketPath), `supervisor socket appeared; log: ${supervisorLog}`);
 
-  // Oversized peer: send exactly the 1 MiB bound, then cross it and hard-close
-  // immediately so the rejection response lands on a closed socket.
+  const rejection = await new Promise((resolve, reject) => {
+    const sock = connect(socketPath);
+    const chunks = [];
+    sock.setTimeout(5000);
+    sock.on("connect", () => {
+      sock.write(Buffer.alloc(1024 * 1024, 0x61));
+      sock.write(Buffer.alloc(64, 0x61));
+    });
+    sock.on("data", (chunk) => {
+      chunks.push(chunk);
+      if (Buffer.concat(chunks).includes(0x0a)) sock.end();
+    });
+    sock.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
+    sock.on("error", reject);
+    sock.on("timeout", () => reject(new Error("oversized request timed out")));
+  });
+  const rejected = JSON.parse(rejection);
+  assert.equal(rejected.ok, false);
+  assert.match(rejected.error, /^ValueError:request too large$/);
+
+  // A peer may disappear while the supervisor is trying to send the same
+  // rejection. Expected teardown errors are client-side noise, not failures.
   await new Promise((resolve, reject) => {
     const sock = connect(socketPath);
     sock.on("connect", () => {
-      sock.write(Buffer.alloc(1024 * 1024, 0x61));
-      setTimeout(() => {
-        sock.write(Buffer.alloc(64, 0x61));
-        sock.end();
-        sock.destroy();
-      }, 250);
+      sock.write(Buffer.alloc(1024 * 1024, 0x62));
+      sock.write(Buffer.alloc(64, 0x62));
+      sock.destroy();
     });
-    // Destroying the socket can surface a local EPIPE/ECONNRESET; the close
-    // event is what settles the step.
     sock.on("close", resolve);
-    sock.on("error", reject);
+    sock.on("error", (error) => {
+      if (error?.code === "EPIPE" || error?.code === "ECONNRESET") return;
+      reject(error);
+    });
   });
 
-  // Give the supervisor time to process the rejection, then it must still
-  // serve a normal request.
   await sleep(300);
   const reply = await ping(socketPath);
   const parsed = JSON.parse(reply);

@@ -632,7 +632,7 @@ async function trustedProjectRoot(value: string): Promise<string> {
     if (real === resolve("/")) return "";
     // Explicitly reject broad system locations — an arbitrary existing
     // directory like /etc must not become an allowlist root.
-    const blocked = ["/etc", "/var", "/usr", "/home", "/root", "/opt", "/bin", "/sbin", "/lib", "/lib64", "/srv"];
+    const blocked = ["/etc", "/var", "/usr", "/home", "/root", "/opt", "/bin", "/sbin", "/lib", "/lib64", "/srv", "/proc", "/sys", "/dev", "/run"];
     for (const b of blocked) {
       const br = resolve(b);
       if (real === br || real.startsWith(br + "/")) return "";
@@ -727,13 +727,16 @@ async function persistApprovedPlan(project: string, runId: string, projectWikiPa
     return "";
   }
   const path = join(plansDir, `${new Date().toISOString().slice(0, 10)}-${cleanId(runId)}-implementation-plan.md`);
-  await writeFile(path, String(planText).trim() + "\n");
+  try {
+    await writeFile(path, String(planText).trim() + "\n", { flag: "wx" });
+  } catch {
+    return "";
+  }
   // Final containment check on the written path (handles TOCTOU / nested links).
   try {
     const realFile = await realpath(path);
     const fileRel = relative(realRoot, realFile).replace(/\\/g, "/");
     if (!(fileRel && fileRel !== ".." && !fileRel.startsWith("../") && !fileRel.startsWith("/"))) {
-      await rm(realFile, { force: true }).catch(() => null);
       await rm(path, { force: true }).catch(() => null);
       return "";
     }
@@ -1070,7 +1073,8 @@ function mergeValidationConfig(base: any, extra: any) {
 }
 
 async function loadProjectValidationConfig(project: string, status: any, params: any = {}) {
-  const projectWikiPath = resolveTrustedProjectWikiPath(project, params.projectWikiPath, status?.projectWikiPath);
+  const lexicalProjectWikiPath = resolveTrustedProjectWikiPath(project, params.projectWikiPath, status?.projectWikiPath);
+  const projectWikiPath = await resolveContainedWikiDir(project, lexicalProjectWikiPath);
   const allowedRoots = [projectsWikiRoot, wikiRoot, projectWikiPath, cycleRoot];
   const candidates: string[] = [];
   if (params.validationConfigPath) {
@@ -1110,7 +1114,7 @@ async function loadProjectValidationConfig(project: string, status: any, params:
     }
     candidates.push(realRequested);
   }
-  candidates.push(join(projectWikiPath, "validation.json"));
+  if (projectWikiPath) candidates.push(join(projectWikiPath, "validation.json"));
   let config = defaultValidationConfig();
   let path = "default";
   for (const candidate of candidates) {
@@ -1464,14 +1468,24 @@ async function writeCouncilOnePager(dir: string, status: any, council: any, para
   const stamp = new Date().toISOString().slice(0, 19).replace(/[-:T]/g, "");
   const out = join(reportsDir, `${stamp}-${runId}-code-review-one-pager.md`);
   // Write via O_EXCL-like: if out is a symlink, realpath will escape; detect after write.
-  await writeFile(out, content);
+  try {
+    await writeFile(out, content, { flag: "wx" });
+  } catch {
+    const fallbackDir = join(dir, "reports");
+    await mkdir(fallbackDir, { recursive: true });
+    const stamp3 = new Date().toISOString().slice(0, 19).replace(/[-:T]/g, "");
+    const out3 = join(fallbackDir, `${stamp3}-${runId}-code-review-one-pager.md`);
+    const fallbackContent = `${content}(wiki report file already existed or was unsafe; rewrote under cycle dir)\n`;
+    await writeFile(out3, fallbackContent);
+    const next3 = await cycleStatus(dir, { councilOnePagerWikiPath: out3, councilOnePagerGeneratedAt: new Date().toISOString() });
+    return { path: out3, content: fallbackContent, status: next3 };
+  }
   try {
     const realOut = await realpath(out);
     let realRoot = resolve(projectsWikiRoot);
     try { realRoot = await realpath(projectsWikiRoot); } catch {}
     const outRel = relative(realRoot, realOut).replace(/\\/g, "/");
     if (!(outRel && outRel !== ".." && !outRel.startsWith("../") && !outRel.startsWith("/"))) {
-      await rm(realOut, { force: true }).catch(() => null);
       await rm(out, { force: true }).catch(() => null);
       const fallbackDir = join(dir, "reports");
       await mkdir(fallbackDir, { recursive: true });

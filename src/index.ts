@@ -644,6 +644,11 @@ function pathWithinAny(roots: Array<string | null | undefined>, candidate: strin
   return false;
 }
 
+export function isExactBroadProjectRoot(value: string): boolean {
+  const real = resolve(String(value || ""));
+  return ["/home", "/root", "/opt", "/srv"].map((p) => resolve(p)).includes(real);
+}
+
 /** Realpath of value when it is an existing directory; else ''. Reject roots that would swallow cycle/wiki trees. */
 async function trustedProjectRoot(value: string): Promise<string> {
   const raw = String(value || "").trim();
@@ -660,6 +665,7 @@ async function trustedProjectRoot(value: string): Promise<string> {
       if (real === br || real.startsWith(br + "/")) return "";
     }
     if (real === resolve("/tmp") || real === resolve("/var/tmp")) return "";
+    if (isExactBroadProjectRoot(real)) return "";
     const gitMarker = await lstat(join(real, ".git")).catch(() => null);
     if (!gitMarker || gitMarker.isSymbolicLink()) return "";
     for (const owned of [cycleRoot, projectsWikiRoot, wikiRoot]) {

@@ -644,3 +644,10 @@ test("planning pack reads stay pinned across concurrent wiki parent swap", async
   assert.match(pack, /SAFE_PINNED_WIKI/);
   assert.doesNotMatch(pack, /SECRET_SWAP_LEAK/);
 });
+
+
+test("exact broad project roots are rejected while ordinary descendants remain eligible", async () => {
+  const { isExactBroadProjectRoot } = await import(`../dist/index.js?broadroots=${Date.now()}-${Math.random()}`);
+  for (const root of ["/home", "/root", "/opt", "/srv"]) assert.equal(isExactBroadProjectRoot(root), true, root);
+  for (const child of ["/home/project", "/root/project", "/opt/openclaw/app", "/srv/project"]) assert.equal(isExactBroadProjectRoot(child), false, child);
+});

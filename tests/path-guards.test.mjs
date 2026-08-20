@@ -409,3 +409,57 @@ test("writePlanningPack recon does not follow wiki symlink outside the root", as
   assert.doesNotMatch(pack, /SECRET_RECON_LEAK/);
   assert.match(pack, /projectWikiPath missing or not supplied/);
 });
+
+test("nested system projectRoot does not authorize plan reads", async (t) => {
+  const root = join(tmpdir(), `ocl-pathguard-system-${process.pid}-${Date.now()}`);
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await mkdir(join(root, "code", ".git"), { recursive: true });
+  const tool = await registerPlugin(root);
+  const req = await tool.execute("sys-1", { action: "request_plan", project: "fixture-system", projectRoot: join(root, "code") }, undefined, undefined);
+  const blocked = await tool.execute("sys-2", { action: "record_plan", project: "fixture-system", runId: req.details.runId, projectRoot: "/etc/ssl", planPath: "/etc/ssl/openssl.cnf", force: true }, undefined, undefined);
+  assert.equal(blocked.details.ok, false, JSON.stringify(blocked.details));
+  assert.equal(blocked.details.error, "plan_path_outside_allowed_roots");
+});
+
+test("dangling wiki symlink is rejected before mkdir", async (t) => {
+  const root = join(tmpdir(), `ocl-pathguard-dangling-${process.pid}-${Date.now()}`);
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await mkdir(join(root, "code", ".git"), { recursive: true });
+  await mkdir(join(root, "docs", "fixture-dangling"), { recursive: true });
+  const outside = join(root, "outside-missing");
+  await symlink(outside, join(root, "docs", "fixture-dangling", "escape"));
+  const tool = await registerPlugin(root);
+  const req = await tool.execute("dang-1", { action: "request_plan", project: "fixture-dangling", projectRoot: join(root, "code") }, undefined, undefined);
+  const rec = await tool.execute("dang-2", { action: "record_plan", project: "fixture-dangling", runId: req.details.runId, projectRoot: join(root, "code"), projectWikiPath: join(root, "docs", "fixture-dangling", "escape", "child"), planText: "# Implementation plan\n\n## Project paths\n- projectRoot\n- projectWikiPath\n\n## Tasks\n1. x\n\n## Validation checks\n- true\n\n## Stop conditions\n- none\n\n## Expected artifacts\n- file\n", force: true }, undefined, undefined);
+  assert.equal(rec.details.canonicalPlan, null);
+  await assert.rejects(() => access(outside));
+});
+
+test("symlinked plans directory is rejected before write", async (t) => {
+  const root = join(tmpdir(), `ocl-pathguard-plans-${process.pid}-${Date.now()}`);
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await mkdir(join(root, "code", ".git"), { recursive: true });
+  const wiki = join(root, "docs", "fixture-plans");
+  const outside = join(root, "outside-plans");
+  await mkdir(wiki, { recursive: true });
+  await mkdir(outside, { recursive: true });
+  await symlink(outside, join(wiki, "plans"));
+  const tool = await registerPlugin(root);
+  const req = await tool.execute("plans-1", { action: "request_plan", project: "fixture-plans", projectRoot: join(root, "code") }, undefined, undefined);
+  const rec = await tool.execute("plans-2", { action: "record_plan", project: "fixture-plans", runId: req.details.runId, projectRoot: join(root, "code"), projectWikiPath: wiki, planText: "# Implementation plan\n\n## Project paths\n- projectRoot\n- projectWikiPath\n\n## Tasks\n1. x\n\n## Validation checks\n- true\n\n## Stop conditions\n- none\n\n## Expected artifacts\n- file\n", force: true }, undefined, undefined);
+  assert.equal(rec.details.canonicalPlan, null);
+  assert.deepEqual(await import("node:fs/promises").then((m) => m.readdir(outside)), []);
+});
+
+test("git checkout projectRoot authorizes contained plan read", async (t) => {
+  const root = join(tmpdir(), `ocl-pathguard-git-${process.pid}-${Date.now()}`);
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const code = join(root, "code");
+  await mkdir(join(code, ".git"), { recursive: true });
+  const planPath = join(code, "plan.md");
+  await writeFile(planPath, "# Implementation plan\n\n## Project paths\n- projectRoot\n- projectWikiPath\n\n## Tasks\n1. x\n\n## Validation checks\n- true\n\n## Stop conditions\n- none\n\n## Expected artifacts\n- file\n");
+  const tool = await registerPlugin(root);
+  const req = await tool.execute("git-1", { action: "request_plan", project: "fixture-git", projectRoot: code }, undefined, undefined);
+  const rec = await tool.execute("git-2", { action: "record_plan", project: "fixture-git", runId: req.details.runId, projectRoot: code, planPath, force: true }, undefined, undefined);
+  assert.equal(rec.details.ok, true, JSON.stringify(rec.details));
+});

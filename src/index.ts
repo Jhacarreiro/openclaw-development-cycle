@@ -8,7 +8,7 @@ import { promisify } from "node:util";
 import { setTimeout as sleep } from "node:timers/promises";
 import { ACTIONS, checkActionTransition } from "./core/state-machine.js";
 import { parseFinalDecision } from "./core/decisions.js";
-import { cleanId, newRunId as createRunId } from "./core/ids.js";
+import { cleanId, idPathCandidates, newRunId as createRunId } from "./core/ids.js";
 import { loadDevelopmentCycleConfig } from "./config.js";
 import { createFilesystemStore } from "./storage/filesystem.js";
 import { buildImplementationLaunchSpec, jsonShellQuote, renderShellCommand, renderShellEnvironment, shellQuote } from "./adapters/implementation.js";
@@ -1429,10 +1429,11 @@ async function stopLaunchedImplementation(dir: string, status: any, reason: stri
 }
 
 async function latestRunId(project: string) {
-  try {
-    const names = await readdir(join(cycleRoot, "runs", cleanId(project)));
-    return names.filter((x) => x.startsWith(`${cleanId(project)}-`)).sort().at(-1) || "";
-  } catch { return ""; }
+  const names = [];
+  for (const dirName of idPathCandidates(project)) {
+    try { names.push(...await readdir(join(cycleRoot, "runs", dirName))); } catch {}
+  }
+  return names.filter((x) => x && !x.startsWith(".")).sort().at(-1) || "";
 }
 
 async function projectCycle(params: any) {
@@ -1440,11 +1441,13 @@ async function projectCycle(params: any) {
   const action = params.action || "status";
   if (!supported.includes(action)) return { ok: false, error: "unknown_action", action, supported };
 
-  const project = cleanId(params.project || "default");
+  const rawProject = params.project || "default";
+  const project = cleanId(rawProject);
   const createRun = action === "request_plan" || action === "record_plan";
-  const runId = cleanId(params.runId || (createRun ? newRunId(project) : await latestRunId(project)));
+  const requestedRunId = params.runId || (createRun ? newRunId(rawProject) : await latestRunId(rawProject));
+  const runId = requestedRunId ? cleanId(requestedRunId) : "";
   if (!runId) return { ok: true, project, runId: null, dir: null, status: null, files: [], nextAction: "request_plan or record_plan" };
-  const dir = cycleDir(project, runId);
+  const dir = cycleDir(rawProject, requestedRunId);
   const status = await loadJson(join(dir, "status.json"));
 
   if (action === "status") {

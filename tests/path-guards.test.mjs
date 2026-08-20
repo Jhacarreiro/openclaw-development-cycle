@@ -698,3 +698,133 @@ test("allowed read roots stay pinned across concurrent projectRoot replacement",
   assert.match(stored, /SAFE_PINNED_PLAN/);
   assert.doesNotMatch(stored, /SECRET_SWAP_PLAN/);
 });
+
+test("stable root open fails closed when projectRoot is swapped before open", async (t) => {
+  const root = join(tmpdir(), `ocl-stable-root-swap-${process.pid}-${Date.now()}`);
+  t.after(() => rm(root, { recursive: true, force: true }));
+  t.after(() => {
+    delete process.env.DEVELOPMENT_CYCLE_TEST_STABLE_ROOT_READY_FILE;
+    delete process.env.DEVELOPMENT_CYCLE_TEST_STABLE_ROOT_DELAY_MS;
+  });
+  const code = join(root, "code");
+  const moved = join(root, "code-real");
+  const outside = join(root, "outside");
+  const ready = join(root, "stable-root-ready");
+  await mkdir(join(code, ".git"), { recursive: true });
+  await mkdir(join(outside, ".git"), { recursive: true });
+  await writeFile(join(code, "plan.md"), "SAFE_STABLE_ROOT\n");
+  await writeFile(join(outside, "plan.md"), "SECRET_STABLE_ROOT_SWAP\n");
+  const tool = await registerPlugin(root);
+  const req = await tool.execute("stable-root-1", { action: "request_plan", project: "stable-root", projectRoot: code });
+  assert.equal(req.details.ok, true, JSON.stringify(req.details));
+
+  process.env.DEVELOPMENT_CYCLE_TEST_STABLE_ROOT_READY_FILE = ready;
+  process.env.DEVELOPMENT_CYCLE_TEST_STABLE_ROOT_DELAY_MS = "300";
+  const pending = tool.execute("stable-root-2", {
+    action: "record_plan",
+    project: "stable-root",
+    runId: req.details.runId,
+    projectRoot: code,
+    planPath: join(code, "plan.md"),
+    force: true,
+  });
+  let signaled = false;
+  for (let i = 0; i < 100; i++) {
+    try { await access(ready); signaled = true; break; } catch { await new Promise((r) => setTimeout(r, 10)); }
+  }
+  assert.equal(signaled, true, "stable-root hook did not fire");
+  await rename(code, moved);
+  await symlink(outside, code);
+  const rec = await pending;
+  assert.equal(rec.details.ok, false, JSON.stringify(rec.details));
+  assert.equal(rec.details.error, "plan_path_outside_allowed_roots");
+  const cyclePlan = join(req.details.dir, "implementation_plan.md");
+  const stored = await readFile(cyclePlan, "utf8").catch(() => "");
+  assert.doesNotMatch(stored, /SECRET_STABLE_ROOT_SWAP/);
+});
+
+test("fresh docs root creation stays on pinned parent across concurrent swap", async (t) => {
+  const root = join(tmpdir(), `ocl-create-root-swap-${process.pid}-${Date.now()}`);
+  t.after(() => rm(root, { recursive: true, force: true }));
+  t.after(() => {
+    delete process.env.DEVELOPMENT_CYCLE_TEST_PINNED_CREATE_READY_FILE;
+    delete process.env.DEVELOPMENT_CYCLE_TEST_PINNED_CREATE_DELAY_MS;
+  });
+  const parent = join(root, "parent");
+  const moved = join(root, "parent-real");
+  const outside = join(root, "outside");
+  const code = join(root, "code");
+  const docs = join(parent, "docs");
+  const ready = join(root, "create-ready");
+  await mkdir(parent, { recursive: true });
+  await mkdir(outside, { recursive: true });
+  await mkdir(join(code, ".git"), { recursive: true });
+
+  process.env.DEVELOPMENT_CYCLE_STATE_ROOT = join(root, "state");
+  process.env.DEVELOPMENT_CYCLE_PROJECT_DOCS_ROOT = docs;
+  process.env.DEVELOPMENT_CYCLE_NOTIFICATIONS_ENABLED = "false";
+  process.env.DEVELOPMENT_CYCLE_OBSERVER_ENABLED = "false";
+  const { default: plugin } = await import(`../dist/index.js?create-root=${Date.now()}-${Math.random()}`);
+  let tool;
+  plugin.register({ pluginConfig: {}, registerTool(t) { tool = t; } });
+
+  process.env.DEVELOPMENT_CYCLE_TEST_PINNED_CREATE_READY_FILE = ready;
+  process.env.DEVELOPMENT_CYCLE_TEST_PINNED_CREATE_DELAY_MS = "300";
+  const pending = tool.execute("create-root-1", { action: "request_plan", project: "create-root", projectRoot: code, projectWikiPath: join(docs, "create-root") });
+  let signaled = false;
+  for (let i = 0; i < 100; i++) {
+    try { await access(ready); signaled = true; break; } catch { await new Promise((r) => setTimeout(r, 10)); }
+  }
+  assert.equal(signaled, true, "pinned-create hook did not fire");
+  await rename(parent, moved);
+  await symlink(outside, parent);
+  const req = await pending;
+  assert.equal(req.details.ok, true, JSON.stringify(req.details));
+  assert.deepEqual(await readdir(outside), []);
+  await access(join(moved, "docs", "create-root"));
+});
+
+test("stable root open fails closed when a projectRoot parent is swapped before open", async (t) => {
+  const root = join(tmpdir(), `ocl-stable-parent-swap-${process.pid}-${Date.now()}`);
+  t.after(() => rm(root, { recursive: true, force: true }));
+  t.after(() => {
+    delete process.env.DEVELOPMENT_CYCLE_TEST_STABLE_ROOT_READY_FILE;
+    delete process.env.DEVELOPMENT_CYCLE_TEST_STABLE_ROOT_DELAY_MS;
+  });
+  const parent = join(root, "parent");
+  const moved = join(root, "parent-real");
+  const code = join(parent, "code");
+  const outsideParent = join(root, "outside-parent");
+  const outsideCode = join(outsideParent, "code");
+  const ready = join(root, "stable-parent-ready");
+  await mkdir(join(code, ".git"), { recursive: true });
+  await mkdir(join(outsideCode, ".git"), { recursive: true });
+  await writeFile(join(code, "plan.md"), "SAFE_PARENT_PIN\n");
+  await writeFile(join(outsideCode, "plan.md"), "SECRET_PARENT_SWAP\n");
+  const tool = await registerPlugin(root);
+  const req = await tool.execute("stable-parent-1", { action: "request_plan", project: "stable-parent", projectRoot: code });
+  assert.equal(req.details.ok, true, JSON.stringify(req.details));
+
+  process.env.DEVELOPMENT_CYCLE_TEST_STABLE_ROOT_READY_FILE = ready;
+  process.env.DEVELOPMENT_CYCLE_TEST_STABLE_ROOT_DELAY_MS = "300";
+  const pending = tool.execute("stable-parent-2", {
+    action: "record_plan",
+    project: "stable-parent",
+    runId: req.details.runId,
+    projectRoot: code,
+    planPath: join(code, "plan.md"),
+    force: true,
+  });
+  let signaled = false;
+  for (let i = 0; i < 100; i++) {
+    try { await access(ready); signaled = true; break; } catch { await new Promise((r) => setTimeout(r, 10)); }
+  }
+  assert.equal(signaled, true, "stable-root hook did not fire");
+  await rename(parent, moved);
+  await symlink(outsideParent, parent);
+  const rec = await pending;
+  assert.equal(rec.details.ok, false, JSON.stringify(rec.details));
+  assert.equal(rec.details.error, "plan_path_outside_allowed_roots");
+  const stored = await readFile(join(req.details.dir, "implementation_plan.md"), "utf8").catch(() => "");
+  assert.doesNotMatch(stored, /SECRET_PARENT_SWAP/);
+});

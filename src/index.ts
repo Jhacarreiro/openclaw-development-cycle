@@ -164,7 +164,13 @@ function dcMainText(project: string, runId: string, dir: string, status: any, ev
 async function dcNotifyMain(dir: string, project: string, runId: string, status: any, params: any, ev: any) { if (params.notifyMain===false || params.emitMainUpdates===false) return {ok:true,skipped:true,reason:"notifyMain_disabled"}; if (!ev?.shouldNotifyMain) return {ok:true,skipped:true,reason:"not_notifiable"}; const statePath=join(dir,"main_update_state.json"), eventsPath=join(dir,"main_update_events.jsonl"), sig=dcSig(project,runId,status,ev), state=await loadJson(statePath); if (state?.lastSignature===sig) return {ok:true,skipped:true,reason:"duplicate_signature",statePath,eventsPath}; const event={eventType:"development_cycle.update",createdAt:new Date().toISOString(),project,runId,dir,phase:status?.phase||ev?.phase||"",classification:ev?.classification||null,alertCodes:ev?.alertCodes||[],recommendedAction:ev?.classification?.recommendedAction||status?.nextAction||"",evidencePaths:ev?.evidencePaths||[],signature:sig}; await appendJsonl(eventsPath,event); await saveJson(statePath,{lastSignature:sig,lastEvent:event,updatedAt:event.createdAt}); const text=dcMainText(project,runId,dir,status,ev); if (params.dryRunMainUpdate===true) return {ok:true,skipped:true,reason:"dry_run",event,statePath,eventsPath,text}; try { const r=await execFileAsync("openclaw",["system","event","--mode","now","--timeout",String(params.mainUpdateTimeoutMs||15000),"--text",text,"--json"],{timeout:Number(params.mainUpdateExecTimeoutMs||20000),maxBuffer:512*1024,env:{...process.env,HOME: runtimeHome}}); let parsed:any=null; try{parsed=JSON.parse(String(r.stdout||"{}"));}catch{} return {ok:true,event,statePath,eventsPath,systemEvent:parsed||{stdout:dcShort(r.stdout,2000),stderr:dcShort(r.stderr,2000)}}; } catch(e:any) { return {ok:false,event,statePath,eventsPath,error:String(e?.message||e),stdout:dcShort(e?.stdout||"",2000),stderr:dcShort(e?.stderr||"",2000)}; } }
 
 async function createImplementationRunnerSession(dir: string, params: any) {
-  const projectRoot = String(params.projectRoot || "");
+  const requestedProjectRoot = String(params.projectRoot || "");
+  const pinnedProjectRoot = await pinTrustedProjectRoot(requestedProjectRoot);
+  if (!pinnedProjectRoot) return { ok: false, error: "projectRoot_missing_or_not_trusted_git_checkout", projectRoot: requestedProjectRoot };
+  const projectRoot = pinnedProjectRoot.realPath;
+  const projectRootStat = await pinnedProjectRoot.handle.stat();
+  const projectRootIdentity = `${projectRootStat.dev}:${projectRootStat.ino}`;
+  await pinnedProjectRoot.handle.close().catch(() => null);
   const prompt = String(params.prompt || "");
   const command = String(params.command || "implement");
   const mode = String(params.kind || "delivery") === "corrections" ? "corrections" : "delivery";
@@ -190,11 +196,6 @@ async function createImplementationRunnerSession(dir: string, params: any) {
   const stdoutPath = join(logsDir, "stdout.log");
   const stderrPath = join(logsDir, "stderr.log");
 
-  const rootStat = await stat(projectRoot).catch(() => null);
-  if (!rootStat?.isDirectory()) {
-    return { ok: false, error: "projectRoot_missing_or_not_directory", projectRoot };
-  }
-
   await mkdir(logsDir, { recursive: true });
   await writeFile(promptPath, prompt);
   const request = {
@@ -203,6 +204,7 @@ async function createImplementationRunnerSession(dir: string, params: any) {
     runId: String(params.runId || ""),
     mode,
     projectRoot,
+    projectRootIdentity,
     promptPath,
     planPath: String(params.planPath || ""),
     validationPath: String(params.validationPath || ""),
@@ -296,7 +298,12 @@ trap 'exit 130' INT
 trap 'exit 129' HUP
 (while :; do printf '{"at":"%s","pid":%s,"observerSessionId":%s}\n' "$(date -Is)" "$$" ${jsonShellQuote(observerRootSessionId)} > "$HEARTBEAT_FILE"; sleep ${runnerHeartbeatIntervalSeconds}; done) &
 heartbeat_pid=$!
-cd ${shellQuote(projectRoot)}
+cd ${shellQuote(projectRoot)} || exit 72
+actual_project_root_identity=$(stat -Lc '%d:%i' . 2>/dev/null || true)
+if [ "$actual_project_root_identity" != ${shellQuote(projectRootIdentity)} ]; then
+  printf '%s\n' "projectRoot identity changed before execution" >&2
+  exit 72
+fi
 ${commandLine} > ${shellQuote(stdoutPath)} 2> ${shellQuote(stderrPath)}
 `;
   await writeFile(runnerPath, runnerScript, { mode: 0o755 } as any);
@@ -318,6 +325,7 @@ ${commandLine} > ${shellQuote(stdoutPath)} 2> ${shellQuote(stderrPath)}
     createdAt: now,
     updatedAt: now,
     projectRoot,
+    projectRootIdentity,
     executable: launchSpec.executable,
     runnerPath,
     requestPath,
@@ -335,6 +343,7 @@ ${commandLine} > ${shellQuote(stdoutPath)} 2> ${shellQuote(stderrPath)}
     mode,
     adapter: launchSpec.adapter,
     projectRoot,
+    projectRootIdentity,
     executable: launchSpec.executable,
     requestPath,
     promptPath,
@@ -571,13 +580,14 @@ async function packageScriptsBrief(projectRoot: string) {
 }
 async function writePlanningPack(dir: string, params: any) {
   const rawProjectRoot = String(params.projectRoot || "").trim();
-  const projectRoot = rawProjectRoot ? (await trustedProjectRoot(rawProjectRoot)) || "" : "";
+  const pinnedProjectRoot = rawProjectRoot ? await pinTrustedProjectRoot(rawProjectRoot) : null;
+  const projectRoot = pinnedProjectRoot?.realPath || "";
   // Resolve through symlinks so a wiki dir under projectsWikiRoot cannot redirect recon reads.
   const trustedWiki = params.projectWikiPath
     ? await resolveContainedWikiDir(String(params.project || "default"), String(params.projectWikiPath))
     : "";
   const pinnedWiki = trustedWiki ? await openPinnedContainedDir(trustedWiki, projectsWikiRoot, false) : null;
-  const rootStat = projectRoot ? await stat(projectRoot).catch(() => null) : null;
+  const rootStat = pinnedProjectRoot ? await pinnedProjectRoot.handle.stat().catch(() => null) : null;
   let projectWikiPath = "";
   let wikiStat: any = null;
   let wikiEntries = "projectWikiPath missing or not supplied";
@@ -598,11 +608,13 @@ async function writePlanningPack(dir: string, params: any) {
       await pinnedWiki.handle.close().catch(() => null);
     }
   }
-  const gitStatus = rootStat?.isDirectory() ? await execSummary("git", ["status", "--short", "--branch"], projectRoot) : "projectRoot missing or not supplied";
-  const gitRemote = rootStat?.isDirectory() ? await execSummary("git", ["remote", "-v"], projectRoot) : "projectRoot missing or not supplied";
-  const gitDiffStat = rootStat?.isDirectory() ? await execSummary("git", ["diff", "--stat"], projectRoot) : "projectRoot missing or not supplied";
-  const rootEntries = rootStat?.isDirectory() ? (await safeDirEntries(projectRoot)).join("\n") : "projectRoot missing or not supplied";
-  const packageScripts = rootStat?.isDirectory() ? await packageScriptsBrief(projectRoot) : "projectRoot missing or not supplied";
+  const pinnedProjectPath = pinnedProjectRoot?.procPath || "";
+  const gitStatus = rootStat?.isDirectory() ? await execSummary("git", ["status", "--short", "--branch"], pinnedProjectPath) : "projectRoot missing or not supplied";
+  const gitRemote = rootStat?.isDirectory() ? await execSummary("git", ["remote", "-v"], pinnedProjectPath) : "projectRoot missing or not supplied";
+  const gitDiffStat = rootStat?.isDirectory() ? await execSummary("git", ["diff", "--stat"], pinnedProjectPath) : "projectRoot missing or not supplied";
+  const rootEntries = rootStat?.isDirectory() ? (await safeDirEntries(pinnedProjectPath)).join("\n") : "projectRoot missing or not supplied";
+  const packageScripts = rootStat?.isDirectory() ? await packageScriptsBrief(pinnedProjectPath) : "projectRoot missing or not supplied";
+  await pinnedProjectRoot?.handle.close().catch(() => null);
   const contextPack = join(dir, "context_pack.md");
   await writeFile(contextPack, `# Development cycle context pack\n\nProject: ${params.project}\nRun: ${params.runId}\nGenerated: ${new Date().toISOString()}\n\n## User direction\n\n${params.direction || "not supplied"}\n\n## Paths\n\n- projectWikiPath: ${projectWikiPath || "not supplied"}\n- projectWikiPath exists: ${Boolean(wikiStat?.isDirectory())}\n- projectRoot: ${projectRoot || "not supplied"}\n- projectRoot exists: ${Boolean(rootStat?.isDirectory())}\n- existingPlanPath: ${params.existingPlanPath || "not supplied"}\n\n## Project wiki directory\n\n${wikiEntries}\n\n## Project root directory\n\n${rootEntries}\n\n## Git status\n\n\`\`\`text\n${excerpt(gitStatus, 6000)}\n\`\`\`\n\n## Git remotes\n\n\`\`\`text\n${excerpt(gitRemote, 3000)}\n\`\`\`\n\n## Git diff stat\n\n\`\`\`text\n${excerpt(gitDiffStat, 3000)}\n\`\`\`\n\n## Package scripts / validation commands detected\n\n${packageScripts}\n\n## Project wiki brief\n\n${wikiBrief}\n`);
   const operatorConstraints = join(dir, "operator_constraints.md");
@@ -649,63 +661,113 @@ export function isExactBroadProjectRoot(value: string): boolean {
   return ["/home", "/root", "/opt", "/srv"].map((p) => resolve(p)).includes(real);
 }
 
-/** Realpath of value when it is an existing directory; else ''. Reject roots that would swallow cycle/wiki trees. */
-async function trustedProjectRoot(value: string): Promise<string> {
-  const raw = String(value || "").trim();
-  if (!raw) return "";
+async function openStableDirectory(pathValue: string) {
+  const abs = resolve(String(pathValue || ""));
+  let expectedReal = "";
+  let expected: any = null;
+  let handle: any = null;
   try {
-    const abs = resolve(raw);
-    const st = await stat(abs);
-    if (!st.isDirectory()) return "";
-    const real = await realpath(abs);
-    if (real === resolve("/")) return "";
-    const blockedTrees = ["/etc", "/var", "/usr", "/bin", "/sbin", "/lib", "/lib64", "/proc", "/sys", "/dev", "/run", "/boot"];
-    for (const b of blockedTrees) {
-      const br = resolve(b);
-      if (real === br || real.startsWith(br + "/")) return "";
+    expectedReal = await realpath(abs);
+    expected = await stat(expectedReal);
+    if (!expected.isDirectory()) return null;
+    const readyFile = String(process.env.DEVELOPMENT_CYCLE_TEST_STABLE_ROOT_READY_FILE || "").trim();
+    if (readyFile) await writeFile(readyFile, "ready\n");
+    const delayMs = Number(process.env.DEVELOPMENT_CYCLE_TEST_STABLE_ROOT_DELAY_MS || 0);
+    if (Number.isFinite(delayMs) && delayMs > 0) await sleep(delayMs);
+    handle = await open(expectedReal, fsConstants.O_RDONLY | fsConstants.O_DIRECTORY | fsConstants.O_NOFOLLOW);
+    const opened = await handle.stat();
+    const openedReal = await realpath(`/proc/self/fd/${handle.fd}`);
+    if (opened.dev !== expected.dev || opened.ino !== expected.ino || openedReal !== expectedReal) {
+      await handle.close();
+      return null;
     }
-    if (real === resolve("/tmp") || real === resolve("/var/tmp")) return "";
-    if (isExactBroadProjectRoot(real)) return "";
-    const gitMarker = await lstat(join(real, ".git")).catch(() => null);
-    if (!gitMarker || gitMarker.isSymbolicLink()) return "";
-    for (const owned of [cycleRoot, projectsWikiRoot, wikiRoot]) {
-      if (!owned) continue;
-      try {
-        const ownedReal = await realpath(resolve(String(owned)));
-        const rel = relative(real, ownedReal).replace(/\\/g, "/");
-        if (rel === "" || (rel && rel !== ".." && !rel.startsWith("../") && !rel.startsWith("/"))) return "";
-      } catch {}
-    }
-    return real;
+    return { handle, realPath: openedReal, procPath: `/proc/self/fd/${handle.fd}` };
   } catch {
-    return "";
+    await handle?.close().catch(() => null);
+    return null;
   }
 }
 
-async function validateContainedCreationPath(target: string, root: string): Promise<string> {
-  const absRoot = resolve(root);
-  const absTarget = resolve(target);
-  await mkdir(absRoot, { recursive: true });
-  const lexicalRel = relative(absRoot, absTarget).replace(/\\/g, "/");
-  if (!(lexicalRel === "" || (lexicalRel && lexicalRel !== ".." && !lexicalRel.startsWith("../") && !lexicalRel.startsWith("/")))) return "";
-  let realRoot: string;
+async function openOrCreateStableDirectory(pathValue: string) {
+  const abs = resolve(String(pathValue || ""));
+  const existing = await openStableDirectory(abs);
+  if (existing) return existing;
+  const parts = abs.split("/").filter(Boolean);
+  let current: any = null;
   try {
-    realRoot = await realpath(absRoot);
+    current = await open("/", fsConstants.O_RDONLY | fsConstants.O_DIRECTORY | fsConstants.O_NOFOLLOW);
+    for (const segment of parts) {
+      const child = `/proc/self/fd/${current.fd}/${segment}`;
+      let next: any = null;
+      try {
+        next = await open(child, fsConstants.O_RDONLY | fsConstants.O_DIRECTORY | fsConstants.O_NOFOLLOW);
+      } catch (e: any) {
+        if (e?.code !== "ENOENT") throw e;
+        const readyFile = String(process.env.DEVELOPMENT_CYCLE_TEST_PINNED_CREATE_READY_FILE || "").trim();
+        if (readyFile) await writeFile(readyFile, "ready\n");
+        const delayMs = Number(process.env.DEVELOPMENT_CYCLE_TEST_PINNED_CREATE_DELAY_MS || 0);
+        if (Number.isFinite(delayMs) && delayMs > 0) await sleep(delayMs);
+        try {
+          await mkdir(child);
+        } catch (mkdirError: any) {
+          if (mkdirError?.code !== "EEXIST") throw mkdirError;
+        }
+        next = await open(child, fsConstants.O_RDONLY | fsConstants.O_DIRECTORY | fsConstants.O_NOFOLLOW);
+      }
+      await current.close();
+      current = next;
+    }
+    const realPath = await realpath(`/proc/self/fd/${current.fd}`);
+    return { handle: current, realPath, procPath: `/proc/self/fd/${current.fd}` };
   } catch {
-    return "";
+    await current?.close().catch(() => null);
+    return null;
   }
-  let cursor = absRoot;
-  for (const segment of lexicalRel.split("/").filter(Boolean)) {
-    cursor = join(cursor, segment);
-    const lst = await lstat(cursor).catch(() => null);
-    if (!lst) continue;
-    if (lst.isSymbolicLink()) return "";
-    const currentReal = await realpath(cursor).catch(() => "");
-    if (!currentReal) return "";
-    const rel = relative(realRoot, currentReal).replace(/\\/g, "/");
-    if (!(rel === "" || (rel && rel !== ".." && !rel.startsWith("../") && !rel.startsWith("/")))) return "";
+}
+
+/** Pin an existing trusted Git checkout; else null. */
+async function pinTrustedProjectRoot(value: string) {
+  const raw = String(value || "").trim();
+  if (!raw) return null;
+  const pinned = await openStableDirectory(raw);
+  if (!pinned) return null;
+  let keep = false;
+  try {
+    const real = pinned.realPath;
+    if (real === resolve("/")) return null;
+    const blockedTrees = ["/etc", "/var", "/usr", "/bin", "/sbin", "/lib", "/lib64", "/proc", "/sys", "/dev", "/run", "/boot"];
+    for (const b of blockedTrees) {
+      const br = resolve(b);
+      if (real === br || real.startsWith(br + "/")) return null;
+    }
+    if (real === resolve("/tmp") || real === resolve("/var/tmp")) return null;
+    if (isExactBroadProjectRoot(real)) return null;
+    const gitMarker = await lstat(`${pinned.procPath}/.git`).catch(() => null);
+    if (!gitMarker || gitMarker.isSymbolicLink()) return null;
+    for (const owned of [cycleRoot, projectsWikiRoot, wikiRoot]) {
+      if (!owned) continue;
+      const ownedPinned = await openStableDirectory(String(owned));
+      if (!ownedPinned) continue;
+      try {
+        const rel = relative(real, ownedPinned.realPath).replace(/\\/g, "/");
+        if (rel === "" || (rel && rel !== ".." && !rel.startsWith("../") && !rel.startsWith("/"))) return null;
+      } finally {
+        await ownedPinned.handle.close().catch(() => null);
+      }
+    }
+    keep = true;
+    return pinned;
+  } finally {
+    if (!keep) await pinned.handle.close().catch(() => null);
   }
-  return absTarget;
+}
+
+/** Realpath of value when it is an existing trusted Git checkout; else ''. */
+async function trustedProjectRoot(value: string): Promise<string> {
+  const pinned = await pinTrustedProjectRoot(value);
+  if (!pinned) return "";
+  try { return pinned.realPath; }
+  finally { await pinned.handle.close().catch(() => null); }
 }
 
 async function readAllowedTextFile(pathValue: string, roots: Array<string | null | undefined>, errorCode: string) {
@@ -718,11 +780,11 @@ async function readAllowedTextFile(pathValue: string, roots: Array<string | null
     let rootHandle: any = null;
     let current: any = null;
     try {
-      // The configured root itself may legitimately be a symlink. Opening it pins
-      // whichever directory the configuration names for the duration of this read.
-      rootHandle = await open(absRoot, fsConstants.O_RDONLY | fsConstants.O_DIRECTORY);
+      const pinnedRoot = await openStableDirectory(absRoot);
+      if (!pinnedRoot) continue;
+      rootHandle = pinnedRoot.handle;
       current = rootHandle;
-      const pinnedRealRoot = await realpath(`/proc/self/fd/${rootHandle.fd}`);
+      const pinnedRealRoot = pinnedRoot.realPath;
       let rel = "";
       if (pathWithin(absRoot, abs)) rel = relative(absRoot, abs).replace(/\\/g, "/");
       else if (pathWithin(pinnedRealRoot, abs)) rel = relative(pinnedRealRoot, abs).replace(/\\/g, "/");
@@ -760,19 +822,19 @@ async function readAllowedTextFile(pathValue: string, roots: Array<string | null
 async function openPinnedContainedDir(target: string, root: string, create = false) {
   const absRoot = resolve(root);
   const absTarget = resolve(target);
-  const lexicalRel = relative(absRoot, absTarget).replace(/\\/g, "/");
-  if (!(lexicalRel === "" || (lexicalRel && lexicalRel !== ".." && !lexicalRel.startsWith("../") && !lexicalRel.startsWith("/")))) return null;
-  if (create) await mkdir(absRoot, { recursive: true });
-  let realRoot: string;
-  try {
-    realRoot = await realpath(absRoot);
-  } catch {
+  const pinnedRoot = create ? await openOrCreateStableDirectory(absRoot) : await openStableDirectory(absRoot);
+  if (!pinnedRoot) return null;
+  const realRoot = pinnedRoot.realPath;
+  let targetRel = "";
+  if (absTarget === absRoot || pathWithin(absRoot, absTarget)) targetRel = relative(absRoot, absTarget).replace(/\\/g, "/");
+  else if (absTarget === realRoot || pathWithin(realRoot, absTarget)) targetRel = relative(realRoot, absTarget).replace(/\\/g, "/");
+  else {
+    await pinnedRoot.handle.close().catch(() => null);
     return null;
   }
-  let current: any = null;
+  let current: any = pinnedRoot.handle;
   try {
-    current = await open(realRoot, fsConstants.O_RDONLY | fsConstants.O_DIRECTORY | fsConstants.O_NOFOLLOW);
-    for (const segment of lexicalRel.split("/").filter(Boolean)) {
+    for (const segment of targetRel.split("/").filter(Boolean)) {
       const child = `/proc/self/fd/${current.fd}/${segment}`;
       let next: any = null;
       try {
@@ -835,8 +897,15 @@ async function writePinnedFile(dir: string, root: string, name: string, content:
 }
 
 async function resolveContainedWikiDir(project: string, projectWikiPath: string): Promise<string> {
-  const trusted = resolveTrustedProjectWikiPath(project, projectWikiPath);
-  return await validateContainedCreationPath(trusted, projectsWikiRoot);
+  const raw = String(projectWikiPath || "").trim();
+  const target = raw ? resolve(raw) : resolveTrustedProjectWikiPath(project, "");
+  const pinned = await openPinnedContainedDir(target, projectsWikiRoot, true);
+  if (!pinned) return "";
+  try {
+    return await realpath(pinned.procPath);
+  } finally {
+    await pinned.handle.close().catch(() => null);
+  }
 }
 
 async function persistApprovedPlan(project: string, runId: string, projectWikiPath: string, planText: string) {
@@ -847,17 +916,24 @@ async function persistApprovedPlan(project: string, runId: string, projectWikiPa
   return await writePinnedFile(plansDir, projectsWikiRoot, name, String(planText).trim() + "\n", true);
 }
 
-async function allowedCanonicalPlanPath(path: string) {
+async function pinAllowedCanonicalPlan(path: string) {
+  const pinnedWiki = await openStableDirectory(wikiRoot);
+  if (!pinnedWiki) return null;
+  let pinnedProjects: any = null;
+  let keepWiki = false;
   try {
-    const realWikiRoot = await realpath(wikiRoot);
-    const realProjectsRoot = await realpath(projectsWikiRoot);
+    pinnedProjects = await openStableDirectory(projectsWikiRoot);
+    if (!pinnedProjects) return null;
     const realPlan = await realpath(path);
-    if (!pathWithin(realProjectsRoot, realPlan) || !pathWithin(realWikiRoot, realPlan)) return "";
-    const rel = relative(realWikiRoot, realPlan).replace(/\\/g, "/");
-    if (!rel || rel === ".." || rel.startsWith("../") || rel.startsWith("/")) return "";
-    return /(?:^|\/)plans\/[^/]+\.md$/.test(rel) ? rel : "";
-  } catch {
-    return "";
+    if (!pathWithin(pinnedProjects.realPath, realPlan) || !pathWithin(pinnedWiki.realPath, realPlan)) return null;
+    const rel = relative(pinnedWiki.realPath, realPlan).replace(/\\/g, "/");
+    if (!rel || rel === ".." || rel.startsWith("../") || rel.startsWith("/")) return null;
+    if (!/(?:^|\/)plans\/[^/]+\.md$/.test(rel)) return null;
+    keepWiki = true;
+    return { rel, wiki: pinnedWiki };
+  } finally {
+    await pinnedProjects?.handle.close().catch(() => null);
+    if (!keepWiki) await pinnedWiki.handle.close().catch(() => null);
   }
 }
 
@@ -1005,37 +1081,49 @@ async function reconcileRepositoryDeliveryState(dir: string, status: any, params
 }
 
 async function autoCommitCanonicalPlan(project: string, runId: string, canonicalPlan: string) {
-  const rel = await allowedCanonicalPlanPath(canonicalPlan);
-  if (!rel) return { ok: false, skipped: true, reason: "canonical_plan_path_not_allowlisted", canonicalPlan };
-  const fileStat = await stat(canonicalPlan).catch(() => null);
-  if (!fileStat?.isFile()) return { ok: false, skipped: true, reason: "canonical_plan_missing", canonicalPlan };
+  const pinned = await pinAllowedCanonicalPlan(canonicalPlan);
+  if (!pinned) return { ok: false, skipped: true, reason: "canonical_plan_path_not_allowlisted", canonicalPlan };
+  const { rel, wiki } = pinned;
+  try {
+    const fileHandle = await open(`${wiki.procPath}/${rel}`, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW).catch(() => null);
+    if (!fileHandle) return { ok: false, skipped: true, reason: "canonical_plan_missing", canonicalPlan };
+    try {
+      const st = await fileHandle.stat();
+      if (!st.isFile()) return { ok: false, skipped: true, reason: "canonical_plan_missing", canonicalPlan };
+    } finally {
+      await fileHandle.close().catch(() => null);
+    }
 
-  const stagedBefore = await execGit(["diff", "--cached", "--name-only"]);
-  if (!stagedBefore.ok) return { ok: false, skipped: true, reason: "git_staged_check_failed", detail: excerpt(`${stagedBefore.error || ""}\n${stagedBefore.stderr || ""}`, 2000) };
-  const staged = stagedBefore.stdout.split(/\r?\n/).map((x) => x.trim()).filter(Boolean);
-  const foreignStaged = staged.filter((x) => x !== rel);
-  if (foreignStaged.length) return { ok: false, skipped: true, reason: "foreign_staged_changes_present", staged: foreignStaged.slice(0, 20) };
+    const stagedBefore = await execGit(["diff", "--cached", "--name-only"], wiki.procPath);
+    if (!stagedBefore.ok) return { ok: false, skipped: true, reason: "git_staged_check_failed", detail: excerpt(`${stagedBefore.error || ""}\n${stagedBefore.stderr || ""}`, 2000) };
+    const staged = stagedBefore.stdout.split(/\r?\n/).map((x) => x.trim()).filter(Boolean);
+    const foreignStaged = staged.filter((x) => x !== rel);
+    if (foreignStaged.length) return { ok: false, skipped: true, reason: "foreign_staged_changes_present", staged: foreignStaged.slice(0, 20) };
 
-  const add = await execGit(["add", "--", rel]);
-  if (!add.ok) return { ok: false, skipped: true, reason: "git_add_failed", detail: excerpt(`${add.error || ""}\n${add.stderr || ""}`, 2000), canonicalPlan };
+    const add = await execGit(["add", "--", rel], wiki.procPath);
+    if (!add.ok) return { ok: false, skipped: true, reason: "git_add_failed", detail: excerpt(`${add.error || ""}\n${add.stderr || ""}`, 2000), canonicalPlan };
 
-  const status = await execGit(["status", "--short", "--", rel]);
-  if (!status.ok) return { ok: false, skipped: true, reason: "git_status_failed", detail: excerpt(`${status.error || ""}\n${status.stderr || ""}`, 2000), canonicalPlan };
-  if (!status.stdout.trim()) return { ok: true, skipped: true, reason: "no_plan_changes_to_commit", canonicalPlan, relativePath: rel };
+    const status = await execGit(["status", "--short", "--", rel], wiki.procPath);
+    if (!status.ok) return { ok: false, skipped: true, reason: "git_status_failed", detail: excerpt(`${status.error || ""}\n${status.stderr || ""}`, 2000), canonicalPlan };
+    if (!status.stdout.trim()) return { ok: true, skipped: true, reason: "no_plan_changes_to_commit", canonicalPlan, relativePath: rel };
 
-  const stagedAfter = await execGit(["diff", "--cached", "--name-only"]);
-  if (!stagedAfter.ok) return { ok: false, skipped: true, reason: "git_staged_after_check_failed", detail: excerpt(`${stagedAfter.error || ""}\n${stagedAfter.stderr || ""}`, 2000), canonicalPlan };
-  const stagedAfterFiles = stagedAfter.stdout.split(/\r?\n/).map((x) => x.trim()).filter(Boolean);
-  const unexpected = stagedAfterFiles.filter((x) => x !== rel);
-  if (unexpected.length) return { ok: false, skipped: true, reason: "unexpected_staged_changes_present", staged: unexpected.slice(0, 20), canonicalPlan };
+    const stagedAfter = await execGit(["diff", "--cached", "--name-only"], wiki.procPath);
+    if (!stagedAfter.ok) return { ok: false, skipped: true, reason: "git_staged_after_check_failed", detail: excerpt(`${stagedAfter.error || ""}\n${stagedAfter.stderr || ""}`, 2000), canonicalPlan };
+    const stagedAfterFiles = stagedAfter.stdout.split(/\r?\n/).map((x) => x.trim()).filter(Boolean);
+    const unexpected = stagedAfterFiles.filter((x) => x !== rel);
+    if (unexpected.length) return { ok: false, skipped: true, reason: "unexpected_staged_changes_present", staged: unexpected.slice(0, 20), canonicalPlan };
 
-  const message = `development-cycle: track approved plan for ${cleanId(project)} ${cleanId(runId)}`;
-  const commit = await execGit(["commit", "-m", message, "--", rel], wikiRoot, 20000);
-  if (!commit.ok) return { ok: false, skipped: true, reason: "git_commit_failed", detail: excerpt(`${commit.error || ""}\n${commit.stdout || ""}\n${commit.stderr || ""}`, 3000), canonicalPlan, relativePath: rel };
+    const message = `development-cycle: track approved plan for ${cleanId(project)} ${cleanId(runId)}`;
+    const commit = await execGit(["commit", "-m", message, "--", rel], wiki.procPath, 20000);
+    if (!commit.ok) return { ok: false, skipped: true, reason: "git_commit_failed", detail: excerpt(`${commit.error || ""}\n${commit.stdout || ""}\n${commit.stderr || ""}`, 3000), canonicalPlan, relativePath: rel };
 
-  const rev = await execGit(["rev-parse", "--short", "HEAD"]);
-  return { ok: true, skipped: false, commit: rev.ok ? rev.stdout.trim() : "", message, canonicalPlan, relativePath: rel };
+    const rev = await execGit(["rev-parse", "--short", "HEAD"], wiki.procPath);
+    return { ok: true, skipped: false, commit: rev.ok ? rev.stdout.trim() : "", message, canonicalPlan, relativePath: rel };
+  } finally {
+    await wiki.handle.close().catch(() => null);
+  }
 }
+
 async function collectObserverSessions(status: any) {
   if (!developmentCycleConfig.observer.enabled || !adapterSessionsRoot) return [];
   const roots = [status?.observerSessionId, status?.observerCorrectionsSessionId, status?.observerObservationId, status?.observerCorrectionsObservationId].filter(Boolean).map(String);
@@ -2034,12 +2122,12 @@ Create or validate the implementation plan only. Do not implement. The plan must
   }
 
   if (action === "start_implementation") {
-    const projectRoot = String(params.projectRoot || status.projectRoot || "");
+    const requestedProjectRoot = String(params.projectRoot || status.projectRoot || "");
     const projectWikiPath = resolveTrustedProjectWikiPath(project, params.projectWikiPath, status.projectWikiPath);
     const containedProjectWikiPath = await resolveContainedWikiDir(project, projectWikiPath);
-    if (!projectRoot) return { ok: false, error: "projectRoot_required", project, runId, dir, wikiRoot, projectWikiPath: containedProjectWikiPath || projectWikiPath, hint: "projectRoot must be the real code checkout; projectWikiPath is only docs/state." };
-    const rootStat = await stat(projectRoot).catch(() => null);
-    if (!rootStat?.isDirectory()) return { ok: false, error: "projectRoot_missing_or_not_directory", project, runId, dir, projectRoot, wikiRoot, projectWikiPath: containedProjectWikiPath || projectWikiPath, hint: "Pass the configured project documentation directory separately from the real code checkout." };
+    if (!requestedProjectRoot) return { ok: false, error: "projectRoot_required", project, runId, dir, wikiRoot, projectWikiPath: containedProjectWikiPath || projectWikiPath, hint: "projectRoot must be the real code checkout; projectWikiPath is only docs/state." };
+    const projectRoot = await trustedProjectRoot(requestedProjectRoot);
+    if (!projectRoot) return { ok: false, error: "projectRoot_missing_or_not_trusted_git_checkout", project, runId, dir, projectRoot: requestedProjectRoot, wikiRoot, projectWikiPath: containedProjectWikiPath || projectWikiPath, hint: "Pass an existing Git checkout, not a broad/system/docs root." };
     let plan = params.planText || "";
     let containedPlanPath = "";
     const requestedPlanPath = String(params.planPath || status.plan || "").trim();

@@ -34,7 +34,8 @@ async function loadConfig() {
 function redactRemoteCredentials(text: string) {
   // Strip userinfo (user:token@) from remote URLs before they reach context packs / external gates.
   // Consume ALL userinfo segments (userinfo may itself contain '@') so no credential material leaks past the last '@' before the host.
-  return String(text || "").replace(/([a-zA-Z][a-zA-Z0-9+.-]*:\/\/)(?:[^@\s]+@)+/g, "$1***@");
+  // Bound to URL authority (stop at first '/' / whitespace) so a repository path like /org/repo@branch.git is not treated as userinfo.
+  return String(text || "").replace(/([a-zA-Z][a-zA-Z0-9+.-]*:\/\/)[^\/\s]*@/g, "$1***@");
 }
 
 async function request(path: string, options: any = {}) {
@@ -1639,7 +1640,7 @@ Create or validate the implementation plan only. Do not implement. The plan must
     const projectRoot = String(params.projectRoot || status.projectRoot || "");
     if (!projectRoot) return { ok: false, error: "projectRoot_required", project, runId, dir };
     const plan = await readTextIfExists(join(dir, "implementation_plan.md"));
-    const validation = params.feedbackText || params.validationText || (params.feedbackPath ? await readFile(String(params.feedbackPath), "utf8") : (await readTextIfExists(join(dir, "final_validation_response.md"))) || (await readTextIfExists(join(dir, "validation_summary.md"))));
+    const validation = params.feedbackText || params.validationText || (params.feedbackPath ? await readFile(String(params.feedbackPath), "utf8") : (await readTextIfExists(join(dir, "validation_summary.md"))) || (await readTextIfExists(join(dir, "final_validation_response.md"))));
     if (!String(validation).trim()) return { ok: false, error: "missing_final_validation_feedback", project, runId, dir };
     const adapter = String(params.implementationAdapter || status.implementationAdapter || implementationConfig.adapter);
     const command = String(params.implementationCommand || (adapter === "octopus" ? "tangle" : "correct"));
@@ -1654,7 +1655,14 @@ Create or validate the implementation plan only. Do not implement. The plan must
       const next = await cycleStatus(dir, { phase: "corrections_failed", owner: "main", ok: false, error: "observer_root_session_creation_failed", projectRoot, implementationCorrectionsRequest: requestPath });
       return { ok: false, project, runId, dir, phase: next.phase, error: next.error };
     }
-    const launch = await createImplementationRunnerSession(dir, { project, runId: `${runId}-corrections`, projectRoot, command, prompt, kind: "corrections", implementationAdapter: adapter, planPath: String(status.plan || join(dir, "implementation_plan.md")), validationPath: String(status.finalValidation || join(dir, "final_validation_response.md")), timeoutSeconds: Number(params.timeoutSeconds ?? params.timeout_ms ?? 0), observerObservationId, purpose: `development_cycle corrections ${project}` });
+    // Align validationPath with the effective feedback: params.feedbackPath > validation_summary.md > finalValidation
+    let effectiveValidationPath = String(params.feedbackPath || "");
+    if (!effectiveValidationPath) {
+      const mech = await readTextIfExists(join(dir, "validation_summary.md"));
+      if (String(mech).trim()) effectiveValidationPath = join(dir, "validation_summary.md");
+      else effectiveValidationPath = String(status.finalValidation || join(dir, "final_validation_response.md"));
+    }
+    const launch = await createImplementationRunnerSession(dir, { project, runId: `${runId}-corrections`, projectRoot, command, prompt, kind: "corrections", implementationAdapter: adapter, planPath: String(status.plan || join(dir, "implementation_plan.md")), validationPath: effectiveValidationPath, timeoutSeconds: Number(params.timeoutSeconds ?? params.timeout_ms ?? 0), observerObservationId, purpose: `development_cycle corrections ${project}` });
     if (!launch.ok) {
       const next = await cycleStatus(dir, { phase: "corrections_failed", owner: "main", ok: false, error: launch.error || "direct_runner_launch_failed", projectRoot, codexSandbox: defaultCodexSandbox, observerCorrectionsObservationId: observerObservationId, implementationCorrectionsRequest: requestPath });
       return { ok: false, project, runId, dir, phase: next.phase, error: next.error, observerObservationId };

@@ -23,6 +23,10 @@ test("redactRemoteCredentials scrubs userinfo through the LAST @ before the host
   assert.equal(redact("ssh://git@github.com/org/repo.git"), "ssh://***@github.com/org/repo.git");
   // URLs without userinfo are untouched
   assert.equal(redact("https://host/repo.git"), "https://host/repo.git");
+  // Repository path containing @ must not be treated as userinfo
+  assert.equal(redact("https://host/org/repo@branch.git"), "https://host/org/repo@branch.git");
+  assert.equal(redact("https://user:token@host/org/repo@branch.git"), "https://***@host/org/repo@branch.git");
+  assert.equal(redact("https://user:token@host/repo@branch.git"), "https://***@host/repo@branch.git");
   assert.equal(redact(""), "");
   assert.equal(redact(null), "");
 });

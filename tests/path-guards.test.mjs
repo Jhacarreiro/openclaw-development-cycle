@@ -525,3 +525,39 @@ test("validation config in projectRoot is honored", async t=>{const r=join(tmpdi
 
 
 test("pinned write resists concurrent parent symlink swap",async t=>{const r=join(tmpdir(),`ocl-swap-${process.pid}-${Date.now()}`);t.after(()=>rm(r,{recursive:true,force:true}));t.after(()=>{delete process.env.DEVELOPMENT_CYCLE_TEST_PINNED_WRITE_READY_FILE;delete process.env.DEVELOPMENT_CYCLE_TEST_PINNED_WRITE_DELAY_MS});const c=join(r,"code"),w=join(r,"docs","swap"),m=join(r,"docs","swap-real"),o=join(r,"outside");await mkdir(join(c,".git"),{recursive:true});await mkdir(join(w,"plans"),{recursive:true});await mkdir(o,{recursive:true});const tool=await registerPlugin(r),q=await tool.execute("q",{action:"request_plan",project:"swap",projectRoot:c,projectWikiPath:w}),ready=join(r,"ready");process.env.DEVELOPMENT_CYCLE_TEST_PINNED_WRITE_READY_FILE=ready;process.env.DEVELOPMENT_CYCLE_TEST_PINNED_WRITE_DELAY_MS="300";const pending=tool.execute("r",{action:"record_plan",project:"swap",runId:q.details.runId,projectRoot:c,projectWikiPath:w,planText:"# Implementation plan\n\n## Project paths\n- x\n\n## Tasks\n1. x\n\n## Validation checks\n- true\n\n## Stop conditions\n- none\n\n## Expected artifacts\n- x\n",force:true});for(let i=0;i<100;i++){try{await access(ready);break}catch{}await new Promise(x=>setTimeout(x,10))}await access(ready);await rename(w,m);await symlink(o,w);const z=await pending;assert.equal(z.details.ok,true,JSON.stringify(z.details));assert.deepEqual(await readdir(o),[]);assert.ok(z.details.canonicalPlan?.startsWith(m+"/plans/"),JSON.stringify(z.details));await access(z.details.canonicalPlan)});
+
+test("configured projectsWikiRoot may be a symlink", async (t) => {
+  const root = join(tmpdir(), `ocl-rootlink-${process.pid}-${Date.now()}`);
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const realDocs = join(root, "real-docs");
+  await mkdir(realDocs, { recursive: true });
+  await symlink(realDocs, join(root, "docs"));
+  const code = join(root, "code");
+  await mkdir(join(code, ".git"), { recursive: true });
+  const tool = await registerPlugin(root);
+  const req = await tool.execute("rl-1", { action: "request_plan", project: "rootlink", projectRoot: code });
+  const rec = await tool.execute("rl-2", { action: "record_plan", project: "rootlink", runId: req.details.runId, projectRoot: code, planText: "# Implementation plan\n\n## Project paths\n- x\n\n## Tasks\n1. x\n\n## Validation checks\n- true\n\n## Stop conditions\n- none\n\n## Expected artifacts\n- x\n", force: true });
+  assert.equal(rec.details.ok, true, JSON.stringify(rec.details));
+  assert.ok(rec.details.canonicalPlan?.startsWith(realDocs + "/"), JSON.stringify(rec.details));
+  await access(rec.details.canonicalPlan);
+});
+
+test("concurrent writers tolerate EEXIST while creating plans directory", async (t) => {
+  const root = join(tmpdir(), `ocl-eexist-${process.pid}-${Date.now()}`);
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const code = join(root, "code");
+  await mkdir(join(code, ".git"), { recursive: true });
+  const shared = join(root, "docs", "shared");
+  const tool = await registerPlugin(root);
+  const q1 = await tool.execute("e-1", { action: "request_plan", project: "e1", projectRoot: code });
+  const q2 = await tool.execute("e-2", { action: "request_plan", project: "e2", projectRoot: code });
+  const body = "# Implementation plan\n\n## Project paths\n- x\n\n## Tasks\n1. x\n\n## Validation checks\n- true\n\n## Stop conditions\n- none\n\n## Expected artifacts\n- x\n";
+  const [a, b] = await Promise.all([
+    tool.execute("e-3", { action: "record_plan", project: "e1", runId: q1.details.runId, projectRoot: code, projectWikiPath: shared, planText: body, force: true }),
+    tool.execute("e-4", { action: "record_plan", project: "e2", runId: q2.details.runId, projectRoot: code, projectWikiPath: shared, planText: body, force: true }),
+  ]);
+  assert.equal(a.details.ok, true, JSON.stringify(a.details));
+  assert.equal(b.details.ok, true, JSON.stringify(b.details));
+  await access(a.details.canonicalPlan);
+  await access(b.details.canonicalPlan);
+});

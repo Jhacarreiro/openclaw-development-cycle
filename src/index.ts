@@ -712,10 +712,15 @@ async function openPinnedContainedDir(target: string, root: string, create = fal
   const lexicalRel = relative(absRoot, absTarget).replace(/\\/g, "/");
   if (!(lexicalRel === "" || (lexicalRel && lexicalRel !== ".." && !lexicalRel.startsWith("../") && !lexicalRel.startsWith("/")))) return null;
   if (create) await mkdir(absRoot, { recursive: true });
+  let realRoot: string;
+  try {
+    realRoot = await realpath(absRoot);
+  } catch {
+    return null;
+  }
   let current: any = null;
   try {
-    current = await open(absRoot, fsConstants.O_RDONLY | fsConstants.O_DIRECTORY | fsConstants.O_NOFOLLOW);
-    const realRoot = await realpath(`/proc/self/fd/${current.fd}`);
+    current = await open(realRoot, fsConstants.O_RDONLY | fsConstants.O_DIRECTORY | fsConstants.O_NOFOLLOW);
     for (const segment of lexicalRel.split("/").filter(Boolean)) {
       const child = `/proc/self/fd/${current.fd}/${segment}`;
       let next: any = null;
@@ -723,7 +728,11 @@ async function openPinnedContainedDir(target: string, root: string, create = fal
         next = await open(child, fsConstants.O_RDONLY | fsConstants.O_DIRECTORY | fsConstants.O_NOFOLLOW);
       } catch (e: any) {
         if (!create || e?.code !== "ENOENT") throw e;
-        await mkdir(child);
+        try {
+          await mkdir(child);
+        } catch (mkdirError: any) {
+          if (mkdirError?.code !== "EEXIST") throw mkdirError;
+        }
         next = await open(child, fsConstants.O_RDONLY | fsConstants.O_DIRECTORY | fsConstants.O_NOFOLLOW);
       }
       const realNext = await realpath(`/proc/self/fd/${next.fd}`);

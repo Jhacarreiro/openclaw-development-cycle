@@ -76,7 +76,12 @@ def terminate_group(pgid: int, runners: dict[int, int]) -> None:
 
 def launch_runner(runner_path: str, cwd: str) -> int:
     ready_r, ready_w = os.pipe()
-    pid = os.fork()
+    try:
+        pid = os.fork()
+    except BaseException:
+        os.close(ready_r)
+        os.close(ready_w)
+        raise
     if pid == 0:
         os.close(ready_r)
         try:

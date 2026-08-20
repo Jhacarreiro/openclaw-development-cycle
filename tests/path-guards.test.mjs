@@ -651,3 +651,50 @@ test("exact broad project roots are rejected while ordinary descendants remain e
   for (const root of ["/home", "/root", "/opt", "/srv"]) assert.equal(isExactBroadProjectRoot(root), true, root);
   for (const child of ["/home/project", "/root/project", "/opt/openclaw/app", "/srv/project"]) assert.equal(isExactBroadProjectRoot(child), false, child);
 });
+
+test("allowed read roots stay pinned across concurrent projectRoot replacement", async (t) => {
+  const root = join(tmpdir(), `ocl-allowed-read-swap-${process.pid}-${Date.now()}`);
+  t.after(() => rm(root, { recursive: true, force: true }));
+  t.after(() => {
+    delete process.env.DEVELOPMENT_CYCLE_TEST_PINNED_ALLOWED_READ_READY_FILE;
+    delete process.env.DEVELOPMENT_CYCLE_TEST_PINNED_ALLOWED_READ_DELAY_MS;
+  });
+  const code = join(root, "code");
+  const moved = join(root, "code-real");
+  const outside = join(root, "outside");
+  const ready = join(root, "allowed-read-ready");
+  const planName = "approved-plan.md";
+  const safePlan = "# SAFE_PINNED_PLAN\n\n## Project paths\n- code\n\n## Tasks\n1. safe\n\n## Validation checks\n- true\n\n## Stop conditions\n- none\n\n## Expected artifacts\n- safe\n";
+  const evilPlan = "# SECRET_SWAP_PLAN\n\n## Project paths\n- outside\n\n## Tasks\n1. evil\n\n## Validation checks\n- false\n\n## Stop conditions\n- none\n\n## Expected artifacts\n- evil\n";
+  await mkdir(join(code, ".git"), { recursive: true });
+  await mkdir(outside, { recursive: true });
+  await writeFile(join(code, planName), safePlan);
+  await writeFile(join(outside, planName), evilPlan);
+
+  const tool = await registerPlugin(root);
+  const req = await tool.execute("allowed-read-1", { action: "request_plan", project: "allowed-read", projectRoot: code });
+  assert.equal(req.details.ok, true, JSON.stringify(req.details));
+
+  process.env.DEVELOPMENT_CYCLE_TEST_PINNED_ALLOWED_READ_READY_FILE = ready;
+  process.env.DEVELOPMENT_CYCLE_TEST_PINNED_ALLOWED_READ_DELAY_MS = "300";
+  const pending = tool.execute("allowed-read-2", {
+    action: "record_plan",
+    project: "allowed-read",
+    runId: req.details.runId,
+    projectRoot: code,
+    planPath: join(code, planName),
+    force: true,
+  });
+  let signaled = false;
+  for (let i = 0; i < 100; i++) {
+    try { await access(ready); signaled = true; break; } catch { await new Promise((r) => setTimeout(r, 10)); }
+  }
+  assert.equal(signaled, true, "allowed read did not reach pinned-root hook");
+  await rename(code, moved);
+  await symlink(outside, code);
+  const rec = await pending;
+  assert.equal(rec.details.ok, true, JSON.stringify(rec.details));
+  const stored = await readFile(rec.details.plan, "utf8");
+  assert.match(stored, /SAFE_PINNED_PLAN/);
+  assert.doesNotMatch(stored, /SECRET_SWAP_PLAN/);
+});

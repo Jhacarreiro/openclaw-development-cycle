@@ -712,27 +712,49 @@ async function readAllowedTextFile(pathValue: string, roots: Array<string | null
   const raw = String(pathValue || "").trim();
   if (!raw) return { ok: false as const, error: errorCode };
   const abs = resolve(raw);
-  const realRoots: string[] = [];
-  for (const root of roots) {
-    if (!root) continue;
-    try { realRoots.push(await realpath(resolve(String(root)))); } catch {}
+  for (const rootValue of roots) {
+    if (!rootValue) continue;
+    const absRoot = resolve(String(rootValue));
+    let rootHandle: any = null;
+    let current: any = null;
+    try {
+      // The configured root itself may legitimately be a symlink. Opening it pins
+      // whichever directory the configuration names for the duration of this read.
+      rootHandle = await open(absRoot, fsConstants.O_RDONLY | fsConstants.O_DIRECTORY);
+      current = rootHandle;
+      const pinnedRealRoot = await realpath(`/proc/self/fd/${rootHandle.fd}`);
+      let rel = "";
+      if (pathWithin(absRoot, abs)) rel = relative(absRoot, abs).replace(/\\/g, "/");
+      else if (pathWithin(pinnedRealRoot, abs)) rel = relative(pinnedRealRoot, abs).replace(/\\/g, "/");
+      else continue;
+      if (!rel || rel === ".." || rel.startsWith("../") || rel.startsWith("/")) continue;
+
+      const parts = rel.split("/").filter(Boolean);
+      const readyFile = String(process.env.DEVELOPMENT_CYCLE_TEST_PINNED_ALLOWED_READ_READY_FILE || "").trim();
+      if (readyFile) await writeFile(readyFile, "ready\n");
+      const delayMs = Number(process.env.DEVELOPMENT_CYCLE_TEST_PINNED_ALLOWED_READ_DELAY_MS || 0);
+      if (Number.isFinite(delayMs) && delayMs > 0) await new Promise((resolveDelay) => setTimeout(resolveDelay, delayMs));
+
+      for (const segment of parts.slice(0, -1)) {
+        const next = await open(`/proc/self/fd/${current.fd}/${segment}`, fsConstants.O_RDONLY | fsConstants.O_DIRECTORY | fsConstants.O_NOFOLLOW);
+        if (current !== rootHandle) await current.close();
+        current = next;
+      }
+      const fileHandle = await open(`/proc/self/fd/${current.fd}/${parts.at(-1)}`, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+      try {
+        const realCandidate = await realpath(`/proc/self/fd/${fileHandle.fd}`);
+        const text = await fileHandle.readFile({ encoding: "utf8" });
+        return { ok: true as const, path: realCandidate, text: String(text) };
+      } finally {
+        await fileHandle.close().catch(() => null);
+      }
+    } catch {}
+    finally {
+      if (current && current !== rootHandle) await current.close().catch(() => null);
+      await rootHandle?.close().catch(() => null);
+    }
   }
-  let handle: any = null;
-  try {
-    handle = await open(abs, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
-    const realCandidate = await realpath(`/proc/self/fd/${handle.fd}`);
-    const allowed = realRoots.some((realRoot) => {
-      const rel = relative(realRoot, realCandidate).replace(/\\/g, "/");
-      return rel === "" || (Boolean(rel) && rel !== ".." && !rel.startsWith("../") && !rel.startsWith("/"));
-    });
-    if (!allowed) return { ok: false as const, error: errorCode, path: abs };
-    const text = await handle.readFile({ encoding: "utf8" });
-    return { ok: true as const, path: realCandidate, text: String(text) };
-  } catch (e: any) {
-    return { ok: false as const, error: errorCode, path: abs, detail: String(e?.message || e) };
-  } finally {
-    await handle?.close().catch(() => null);
-  }
+  return { ok: false as const, error: errorCode, path: abs };
 }
 
 async function openPinnedContainedDir(target: string, root: string, create = false) {

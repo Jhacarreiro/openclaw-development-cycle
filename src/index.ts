@@ -718,8 +718,14 @@ async function openPinnedContainedDir(target: string, root: string, create = fal
     const realRoot = await realpath(`/proc/self/fd/${current.fd}`);
     for (const segment of lexicalRel.split("/").filter(Boolean)) {
       const child = `/proc/self/fd/${current.fd}/${segment}`;
-      if (create) await mkdir(child).catch((e: any) => { if (e?.code !== "EEXIST") throw e; });
-      const next = await open(child, fsConstants.O_RDONLY | fsConstants.O_DIRECTORY | fsConstants.O_NOFOLLOW);
+      let next: any = null;
+      try {
+        next = await open(child, fsConstants.O_RDONLY | fsConstants.O_DIRECTORY | fsConstants.O_NOFOLLOW);
+      } catch (e: any) {
+        if (!create || e?.code !== "ENOENT") throw e;
+        await mkdir(child);
+        next = await open(child, fsConstants.O_RDONLY | fsConstants.O_DIRECTORY | fsConstants.O_NOFOLLOW);
+      }
       const realNext = await realpath(`/proc/self/fd/${next.fd}`);
       const rel = relative(realRoot, realNext).replace(/\\/g, "/");
       if (!(rel === "" || (rel && rel !== ".." && !rel.startsWith("../") && !rel.startsWith("/")))) {

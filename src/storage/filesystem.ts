@@ -62,11 +62,10 @@ export async function acquireLock(lockDir: string, timeoutMs = 5000, renameLock 
           const recoveryPid = recoveryMatch ? Number.parseInt(recoveryMatch[1] ?? "", 10) : Number.NaN;
           const recoveryAgeMs = recoveryStat ? Date.now() - recoveryStat.mtimeMs : 0;
           const recoveryGraceMs = Math.min(250, Math.max(25, Math.floor(timeoutMs / 4)));
-          const recoveryExpired = recoveryAgeMs > Math.max(recoveryGraceMs, timeoutMs);
-          if (recoveryStat && ((!recoveryMatch && recoveryAgeMs > recoveryGraceMs) || (recoveryMatch && (!isProcessAlive(recoveryPid) || recoveryExpired)))) {
+          if (recoveryStat && ((!recoveryMatch && recoveryAgeMs > recoveryGraceMs) || (recoveryMatch && !isProcessAlive(recoveryPid)))) {
             const abandoned = join(lockDir, `.recovery-abandoned-${process.pid}-${Date.now().toString(16)}-${Math.random().toString(16).slice(2)}`);
             try {
-              await renameLock(recoveryDir, abandoned);
+              await rename(recoveryDir, abandoned);
               await rm(abandoned, { recursive: true, force: true }).catch(() => undefined);
             } catch {}
           }
@@ -90,7 +89,7 @@ export async function acquireLock(lockDir: string, timeoutMs = 5000, renameLock 
             if (currentRecoveryOwner === recoveryOwnerId) {
               const released = join(lockDir, `.recovery-released-${process.pid}-${Date.now().toString(16)}-${Math.random().toString(16).slice(2)}`);
               try {
-                await renameLock(recoveryDir, released);
+                await rename(recoveryDir, released);
                 await rm(released, { recursive: true, force: true }).catch(() => undefined);
               } catch {}
             }

@@ -561,3 +561,73 @@ test("concurrent writers tolerate EEXIST while creating plans directory", async 
   await access(a.details.canonicalPlan);
   await access(b.details.canonicalPlan);
 });
+
+test("start_implementation rejects outside planPath even with inline planText", async (t) => {
+  const root = join(tmpdir(), `ocl-inline-plan-${process.pid}-${Date.now()}`);
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const code = join(root, "code");
+  const outside = join(root, "outside");
+  await mkdir(join(code, ".git"), { recursive: true });
+  await mkdir(outside, { recursive: true });
+  const externalPlan = join(outside, "external.md");
+  await writeFile(externalPlan, "# external\n");
+  const tool = await registerPlugin(root);
+  const req = await tool.execute("inline-1", { action: "request_plan", project: "inline", projectRoot: code });
+  const rec = await tool.execute("inline-2", { action: "record_plan", project: "inline", runId: req.details.runId, projectRoot: code, planText: "# Implementation plan\n\n## Project paths\n- x\n\n## Tasks\n1. x\n\n## Validation checks\n- true\n\n## Stop conditions\n- none\n\n## Expected artifacts\n- x\n", force: true });
+  assert.equal(rec.details.ok, true, JSON.stringify(rec.details));
+  const started = await tool.execute("inline-3", { action: "start_implementation", project: "inline", runId: req.details.runId, projectRoot: code, planText: "approved inline", planPath: externalPlan });
+  assert.equal(started.details.ok, false, JSON.stringify(started.details));
+  assert.equal(started.details.error, "plan_path_outside_allowed_roots");
+});
+
+test("start_implementation rejects symlinked wiki handoff with inline planText", async (t) => {
+  const root = join(tmpdir(), `ocl-inline-wiki-${process.pid}-${Date.now()}`);
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const code = join(root, "code");
+  const wiki = join(root, "docs", "inline-wiki");
+  const outside = join(root, "outside");
+  await mkdir(join(code, ".git"), { recursive: true });
+  await mkdir(wiki, { recursive: true });
+  await mkdir(outside, { recursive: true });
+  const link = join(wiki, "escape");
+  await symlink(outside, link);
+  const tool = await registerPlugin(root);
+  const req = await tool.execute("wiki-1", { action: "request_plan", project: "inline-wiki", projectRoot: code, projectWikiPath: wiki });
+  const rec = await tool.execute("wiki-2", { action: "record_plan", project: "inline-wiki", runId: req.details.runId, projectRoot: code, projectWikiPath: wiki, planText: "# Implementation plan\n\n## Project paths\n- x\n\n## Tasks\n1. x\n\n## Validation checks\n- true\n\n## Stop conditions\n- none\n\n## Expected artifacts\n- x\n", force: true });
+  assert.equal(rec.details.ok, true, JSON.stringify(rec.details));
+  const started = await tool.execute("wiki-3", { action: "start_implementation", project: "inline-wiki", runId: req.details.runId, projectRoot: code, projectWikiPath: link, planText: "approved inline" });
+  assert.equal(started.details.ok, false, JSON.stringify(started.details));
+  assert.equal(started.details.error, "project_wiki_path_outside_allowed_root");
+});
+
+test("planning pack reads stay pinned across concurrent wiki parent swap", async (t) => {
+  const root = join(tmpdir(), `ocl-read-swap-${process.pid}-${Date.now()}`);
+  t.after(() => rm(root, { recursive: true, force: true }));
+  t.after(() => { delete process.env.DEVELOPMENT_CYCLE_TEST_PINNED_READ_READY_FILE; delete process.env.DEVELOPMENT_CYCLE_TEST_PINNED_READ_DELAY_MS; });
+  const code = join(root, "code");
+  const wiki = join(root, "docs", "read-swap");
+  const moved = join(root, "docs", "read-swap-real");
+  const outside = join(root, "outside");
+  const ready = join(root, "read-ready");
+  await mkdir(join(code, ".git"), { recursive: true });
+  await mkdir(wiki, { recursive: true });
+  await mkdir(outside, { recursive: true });
+  await writeFile(join(wiki, "README.md"), "SAFE_PINNED_WIKI\n");
+  await writeFile(join(outside, "README.md"), "SECRET_SWAP_LEAK\n");
+  const tool = await registerPlugin(root);
+  process.env.DEVELOPMENT_CYCLE_TEST_PINNED_READ_READY_FILE = ready;
+  process.env.DEVELOPMENT_CYCLE_TEST_PINNED_READ_DELAY_MS = "300";
+  const pending = tool.execute("swap-read-1", { action: "request_plan", project: "read-swap", projectRoot: code, projectWikiPath: wiki });
+  let signaled = false;
+  for (let i = 0; i < 100; i++) {
+    try { await access(ready); signaled = true; break; } catch { await new Promise((r) => setTimeout(r, 10)); }
+  }
+  assert.equal(signaled, true, "planning-pack read did not reach pinned hook");
+  await rename(wiki, moved);
+  await symlink(outside, wiki);
+  const req = await pending;
+  assert.equal(req.details.ok, true, JSON.stringify(req.details));
+  const pack = await readFile(join(req.details.dir, "context_pack.md"), "utf8");
+  assert.match(pack, /SAFE_PINNED_WIKI/);
+  assert.doesNotMatch(pack, /SECRET_SWAP_LEAK/);
+});

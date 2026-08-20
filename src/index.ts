@@ -553,8 +553,13 @@ async function projectWikiBrief(projectWikiPath: string) {
   const wanted = ["README.md", "status.md", "ROADMAP.md", "RUNS.md", "architecture.md", "runbook.md"];
   const parts: string[] = [];
   for (const name of wanted) {
-    const text = await readTextIfExists(join(projectWikiPath, name));
-    if (text.trim()) parts.push(`### ${name}\n\n${excerpt(text, 2500)}`);
+    let handle: any = null;
+    try {
+      handle = await open(join(projectWikiPath, name), fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+      const text = String(await handle.readFile({ encoding: "utf8" }));
+      if (text.trim()) parts.push(`### ${name}\n\n${excerpt(text, 2500)}`);
+    } catch {}
+    finally { await handle?.close().catch(() => null); }
   }
   return parts.length ? parts.join("\n\n") : "No standard project wiki files found.";
 }
@@ -570,15 +575,32 @@ async function writePlanningPack(dir: string, params: any) {
   const trustedWiki = params.projectWikiPath
     ? await resolveContainedWikiDir(String(params.project || "default"), String(params.projectWikiPath))
     : "";
-  const projectWikiPath = trustedWiki;
+  const pinnedWiki = trustedWiki ? await openPinnedContainedDir(trustedWiki, projectsWikiRoot, false) : null;
   const rootStat = projectRoot ? await stat(projectRoot).catch(() => null) : null;
-  const wikiStat = trustedWiki ? await stat(trustedWiki).catch(() => null) : null;
+  let projectWikiPath = "";
+  let wikiStat: any = null;
+  let wikiEntries = "projectWikiPath missing or not supplied";
+  let wikiBrief = "projectWikiPath missing or not supplied";
+  if (pinnedWiki) {
+    try {
+      projectWikiPath = await realpath(pinnedWiki.procPath);
+      wikiStat = await pinnedWiki.handle.stat();
+      const readyFile = String(process.env.DEVELOPMENT_CYCLE_TEST_PINNED_READ_READY_FILE || "").trim();
+      if (readyFile) await writeFile(readyFile, "ready\n");
+      const delayMs = Number(process.env.DEVELOPMENT_CYCLE_TEST_PINNED_READ_DELAY_MS || 0);
+      if (Number.isFinite(delayMs) && delayMs > 0) await new Promise((resolveDelay) => setTimeout(resolveDelay, delayMs));
+      if (wikiStat?.isDirectory()) {
+        wikiEntries = (await safeDirEntries(pinnedWiki.procPath)).join("\n");
+        wikiBrief = await projectWikiBrief(pinnedWiki.procPath);
+      }
+    } finally {
+      await pinnedWiki.handle.close().catch(() => null);
+    }
+  }
   const gitStatus = rootStat?.isDirectory() ? await execSummary("git", ["status", "--short", "--branch"], projectRoot) : "projectRoot missing or not supplied";
   const gitRemote = rootStat?.isDirectory() ? await execSummary("git", ["remote", "-v"], projectRoot) : "projectRoot missing or not supplied";
   const gitDiffStat = rootStat?.isDirectory() ? await execSummary("git", ["diff", "--stat"], projectRoot) : "projectRoot missing or not supplied";
   const rootEntries = rootStat?.isDirectory() ? (await safeDirEntries(projectRoot)).join("\n") : "projectRoot missing or not supplied";
-  const wikiEntries = wikiStat?.isDirectory() ? (await safeDirEntries(trustedWiki)).join("\n") : "projectWikiPath missing or not supplied";
-  const wikiBrief = wikiStat?.isDirectory() ? await projectWikiBrief(trustedWiki) : "projectWikiPath missing or not supplied";
   const packageScripts = rootStat?.isDirectory() ? await packageScriptsBrief(projectRoot) : "projectRoot missing or not supplied";
   const contextPack = join(dir, "context_pack.md");
   await writeFile(contextPack, `# Development cycle context pack\n\nProject: ${params.project}\nRun: ${params.runId}\nGenerated: ${new Date().toISOString()}\n\n## User direction\n\n${params.direction || "not supplied"}\n\n## Paths\n\n- projectWikiPath: ${projectWikiPath || "not supplied"}\n- projectWikiPath exists: ${Boolean(wikiStat?.isDirectory())}\n- projectRoot: ${projectRoot || "not supplied"}\n- projectRoot exists: ${Boolean(rootStat?.isDirectory())}\n- existingPlanPath: ${params.existingPlanPath || "not supplied"}\n\n## Project wiki directory\n\n${wikiEntries}\n\n## Project root directory\n\n${rootEntries}\n\n## Git status\n\n\`\`\`text\n${excerpt(gitStatus, 6000)}\n\`\`\`\n\n## Git remotes\n\n\`\`\`text\n${excerpt(gitRemote, 3000)}\n\`\`\`\n\n## Git diff stat\n\n\`\`\`text\n${excerpt(gitDiffStat, 3000)}\n\`\`\`\n\n## Package scripts / validation commands detected\n\n${packageScripts}\n\n## Project wiki brief\n\n${wikiBrief}\n`);
@@ -1843,39 +1865,49 @@ Create or validate the implementation plan only. Do not implement. The plan must
     const projectRoot = String(params.projectRoot || status.projectRoot || "");
     const projectWikiPath = resolveTrustedProjectWikiPath(project, params.projectWikiPath, status.projectWikiPath);
     const containedProjectWikiPath = await resolveContainedWikiDir(project, projectWikiPath);
-    if (!projectRoot) return { ok: false, error: "projectRoot_required", project, runId, dir, wikiRoot, projectWikiPath, hint: "projectRoot must be the real code checkout; projectWikiPath is only docs/state." };
+    if (!projectRoot) return { ok: false, error: "projectRoot_required", project, runId, dir, wikiRoot, projectWikiPath: containedProjectWikiPath || projectWikiPath, hint: "projectRoot must be the real code checkout; projectWikiPath is only docs/state." };
     const rootStat = await stat(projectRoot).catch(() => null);
-    if (!rootStat?.isDirectory()) return { ok: false, error: "projectRoot_missing_or_not_directory", project, runId, dir, projectRoot, wikiRoot, projectWikiPath, hint: "Pass the configured project documentation directory separately from the real code checkout." };
+    if (!rootStat?.isDirectory()) return { ok: false, error: "projectRoot_missing_or_not_directory", project, runId, dir, projectRoot, wikiRoot, projectWikiPath: containedProjectWikiPath || projectWikiPath, hint: "Pass the configured project documentation directory separately from the real code checkout." };
     let plan = params.planText || "";
-    if (!String(plan).trim() && params.planPath) {
-      const loaded = await readAllowedTextFile(String(params.planPath), [dir, cycleRoot, projectsWikiRoot, wikiRoot, await trustedProjectRoot(projectRoot), containedProjectWikiPath], "plan_path_outside_allowed_roots");
+    let containedPlanPath = "";
+    const requestedPlanPath = String(params.planPath || status.plan || "").trim();
+    if (requestedPlanPath) {
+      const loaded = await readAllowedTextFile(requestedPlanPath, [dir, cycleRoot, projectsWikiRoot, wikiRoot, await trustedProjectRoot(projectRoot), containedProjectWikiPath], "plan_path_outside_allowed_roots");
       if (!loaded.ok) return { ok: false, error: loaded.error, project, runId, dir, path: (loaded as any).path };
-      plan = loaded.text;
+      containedPlanPath = loaded.path;
+      if (!String(plan).trim()) plan = loaded.text;
     }
-    if (!String(plan).trim()) plan = await readTextIfExists(join(dir, "implementation_plan.md"));
+    if (!containedProjectWikiPath) return { ok: false, error: "project_wiki_path_outside_allowed_root", project, runId, dir, projectWikiPath };
+    if (!String(plan).trim()) {
+      const fallback = await readAllowedTextFile(join(dir, "implementation_plan.md"), [dir], "plan_path_outside_allowed_roots");
+      if (fallback.ok) {
+        containedPlanPath = fallback.path;
+        plan = fallback.text;
+      }
+    }
     if (!String(plan).trim()) return { ok: false, error: "missing_implementation_plan", project, runId, dir, expected: join(dir, "implementation_plan.md") };
     const adapter = String(params.implementationAdapter || status.implementationAdapter || implementationConfig.adapter);
     const command = String(params.implementationCommand || (adapter === "octopus" ? "tangle" : "implement"));
     if (adapter === "octopus" && command !== "tangle") return { ok: false, error: "unsupported_octopus_command", supported: ["tangle"] };
-    const prompt = `Run the approved development plan. Stay within the agreed scope. Stop and report before risky, destructive, or protected changes that need human approval.\n\nPROJECT_DOCUMENTATION_PATH:\n${projectWikiPath}\n\nPROJECT_ROOT_CODE_CHECKOUT:\n${projectRoot}\n\nIMPLEMENTATION_ADAPTER:\n${adapter}\n\nAPPROVED_PLAN:\n${plan}`;
+    const prompt = `Run the approved development plan. Stay within the agreed scope. Stop and report before risky, destructive, or protected changes that need human approval.\n\nPROJECT_DOCUMENTATION_PATH:\n${containedProjectWikiPath}\n\nPROJECT_ROOT_CODE_CHECKOUT:\n${projectRoot}\n\nIMPLEMENTATION_ADAPTER:\n${adapter}\n\nAPPROVED_PLAN:\n${plan}`;
     const handoffRequest = join(dir, "implementation_request.md");
     const stdoutPath = join(dir, "implementation_delivery_stdout.txt");
     const stderrPath = join(dir, "implementation_delivery_stderr.txt");
     await writeFile(handoffRequest, prompt);
-    const observerObservationId = await createImplementationObserverSession(dir, { project, runId, command, projectRoot, projectWikiPath, stdoutPath, stderrPath, status: "running", summary: `development_cycle ${command} ${project}`, message: "Development-cycle implementation run queued." });
+    const observerObservationId = await createImplementationObserverSession(dir, { project, runId, command, projectRoot, projectWikiPath: containedProjectWikiPath, stdoutPath, stderrPath, status: "running", summary: `development_cycle ${command} ${project}`, message: "Development-cycle implementation run queued." });
     if (developmentCycleConfig.observer.enabled && !observerObservationId) {
-      const next = await cycleStatus(dir, { phase: "implementation_failed", owner: "main", ok: false, error: "observer_root_session_creation_failed", projectRoot, projectWikiPath, implementationCommand: command, implementationHandoffRequest: handoffRequest });
+      const next = await cycleStatus(dir, { phase: "implementation_failed", owner: "main", ok: false, error: "observer_root_session_creation_failed", projectRoot, projectWikiPath: containedProjectWikiPath, implementationCommand: command, implementationHandoffRequest: handoffRequest });
       return { ok: false, project, runId, dir, phase: next.phase, error: next.error };
     }
-    const launch = await createImplementationRunnerSession(dir, { project, runId, projectRoot, command, prompt, kind: "delivery", implementationAdapter: adapter, planPath: String(params.planPath || status.plan || join(dir, "implementation_plan.md")), timeoutSeconds: Number(params.timeoutSeconds ?? params.timeout_ms ?? 0), observerObservationId, purpose: `development_cycle ${command} ${project}` });
+    const launch = await createImplementationRunnerSession(dir, { project, runId, projectRoot, command, prompt, kind: "delivery", implementationAdapter: adapter, planPath: containedPlanPath, timeoutSeconds: Number(params.timeoutSeconds ?? params.timeout_ms ?? 0), observerObservationId, purpose: `development_cycle ${command} ${project}` });
     if (!launch.ok) {
-      const next = await cycleStatus(dir, { phase: "implementation_failed", owner: "main", ok: false, nextAction: "Fix direct runner launch blocker, then launch a new clean handoff.", error: launch.error || "direct_runner_launch_failed", projectRoot, projectWikiPath, implementationCommand: command, codexSandbox: defaultCodexSandbox, observerObservationId, implementationHandoffRequest: handoffRequest });
+      const next = await cycleStatus(dir, { phase: "implementation_failed", owner: "main", ok: false, nextAction: "Fix direct runner launch blocker, then launch a new clean handoff.", error: launch.error || "direct_runner_launch_failed", projectRoot, projectWikiPath: containedProjectWikiPath, implementationCommand: command, codexSandbox: defaultCodexSandbox, observerObservationId, implementationHandoffRequest: handoffRequest });
       return { ok: false, project, runId, dir, phase: next.phase, error: next.error, observerObservationId };
     }
-    await updateImplementationObserverSession(dir, observerObservationId, { project, runId, command, projectRoot, projectWikiPath, stdoutPath: launch.stdoutPath, stderrPath: launch.stderrPath, status: "running", summary: `development_cycle ${command} ${project} running`, message: "Implementation runner launched; observer integration is optional." });
+    await updateImplementationObserverSession(dir, observerObservationId, { project, runId, command, projectRoot, projectWikiPath: containedProjectWikiPath, stdoutPath: launch.stdoutPath, stderrPath: launch.stderrPath, status: "running", summary: `development_cycle ${command} ${project} running`, message: "Implementation runner launched; observer integration is optional." });
     const launchRecord = join(dir, "implementation_launch.json");
     await writeFile(launchRecord, JSON.stringify(launch, null, 2) + "\n");
-    const next = await cycleStatus(dir, { phase: "implementation_launched", owner: "implementation", nextAction: "Use development_cycle status to watch the supervised implementation runner.", projectRoot, projectWikiPath, implementationAdapter: launch.adapter, implementationCommand: command, codexSandbox: defaultCodexSandbox, implementationSessionId: launch.sessionId, directImplementationStatus: launch.statusPath, directImplementationStdout: launch.stdoutPath, directImplementationStderr: launch.stderrPath, observerObservationId, implementationHandoffRequest: handoffRequest, implementationLaunch: launchRecord, implementationStdout: launch.stdoutPath, implementationStderr: launch.stderrPath });
+    const next = await cycleStatus(dir, { phase: "implementation_launched", owner: "implementation", nextAction: "Use development_cycle status to watch the supervised implementation runner.", projectRoot, projectWikiPath: containedProjectWikiPath, implementationAdapter: launch.adapter, implementationCommand: command, codexSandbox: defaultCodexSandbox, implementationSessionId: launch.sessionId, directImplementationStatus: launch.statusPath, directImplementationStdout: launch.stdoutPath, directImplementationStderr: launch.stderrPath, observerObservationId, implementationHandoffRequest: handoffRequest, implementationLaunch: launchRecord, implementationStdout: launch.stdoutPath, implementationStderr: launch.stderrPath });
     return { ok: true, project, runId, dir, phase: next.phase, implementationAdapter: launch.adapter, implementationSessionId: launch.sessionId, observerObservationId, launchState: launch.status?.launchState || null, directImplementationStatus: launch.statusPath };
 
   }

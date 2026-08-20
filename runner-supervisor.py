@@ -75,14 +75,33 @@ def terminate_group(pgid: int, runners: dict[int, int]) -> None:
 
 
 def launch_runner(runner_path: str, cwd: str) -> int:
+    ready_r, ready_w = os.pipe()
     pid = os.fork()
     if pid == 0:
+        os.close(ready_r)
         try:
             os.setsid()
+            os.write(ready_w, b'1')
+            os.close(ready_w)
             os.chdir(cwd)
             os.execv('/bin/sh', ['sh', runner_path])
         except BaseException:
+            try:
+                os.close(ready_w)
+            except OSError:
+                pass
             os._exit(127)
+    os.close(ready_w)
+    try:
+        ready = os.read(ready_r, 1)
+    finally:
+        os.close(ready_r)
+    if ready != b'1':
+        try:
+            os.waitpid(pid, 0)
+        except ChildProcessError:
+            pass
+        raise RuntimeError('runner failed before process-group readiness')
     return pid
 
 

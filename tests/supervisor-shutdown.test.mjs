@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
+import { readFileSync } from "node:fs";
 import { access, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createConnection } from "node:net";
 import { tmpdir } from "node:os";
@@ -20,6 +21,10 @@ function pidAlive(pid) {
   if (!Number.isInteger(pid) || pid <= 0) return false;
   try {
     process.kill(pid, 0);
+    try {
+      const state = readFileSync("/proc/" + pid + "/status", "utf8").match(/^State:\s+(.)/m)?.[1];
+      if (state === "Z") return false;
+    } catch {}
     return true;
   } catch {
     return false;
@@ -218,3 +223,14 @@ for (const shutdownSignal of ["SIGTERM", "SIGINT"]) {
     assert.equal(launched.pgid, launched.pid);
   });
 }
+
+test("launch_runner publishes process-group readiness before returning", () => {
+  const launch = SUPERVISOR_SOURCE.slice(SUPERVISOR_SOURCE.indexOf("def launch_runner"), SUPERVISOR_SOURCE.indexOf("def serve"));
+  const pipe = launch.indexOf("os.pipe()");
+  const fork = launch.indexOf("os.fork()", pipe);
+  const setsid = launch.indexOf("os.setsid()", fork);
+  const readyWrite = launch.indexOf("os.write(ready_w, b'1')", setsid);
+  const readyRead = launch.indexOf("os.read(ready_r, 1)", readyWrite);
+  const returned = launch.indexOf("return pid", readyRead);
+  assert.ok(pipe >= 0 && fork > pipe && setsid > fork && readyWrite > setsid && readyRead > readyWrite && returned > readyRead);
+});

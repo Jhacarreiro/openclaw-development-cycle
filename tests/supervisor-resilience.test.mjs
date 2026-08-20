@@ -75,8 +75,7 @@ test("supervisor rejects an oversized request and remains healthy", async (t) =>
     const sock = connect(socketPath);
     sock.on("connect", () => {
       sock.write(Buffer.alloc(1024 * 1024, 0x62));
-      sock.write(Buffer.alloc(64, 0x62));
-      sock.destroy();
+      sock.write(Buffer.alloc(64, 0x62), () => sock.destroy());
     });
     sock.on("close", resolve);
     sock.on("error", (error) => {

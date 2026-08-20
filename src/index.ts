@@ -818,16 +818,18 @@ async function persistApprovedPlan(project: string, runId: string, projectWikiPa
   return await writePinnedFile(plansDir, projectsWikiRoot, name, String(planText).trim() + "\n", true);
 }
 
-function wikiRelativePath(path: string) {
-  if (!wikiRoot || !pathWithin(wikiRoot, path)) return "";
-  return relative(resolve(wikiRoot), resolve(String(path))).replace(/\\/g, "/");
-}
-
-function allowedCanonicalPlanPath(path: string) {
-  if (!pathWithin(projectsWikiRoot, path)) return "";
-  const rel = wikiRelativePath(path);
-  if (!rel) return "";
-  return /(?:^|\/)plans\/[^/]+\.md$/.test(rel) ? rel : "";
+async function allowedCanonicalPlanPath(path: string) {
+  try {
+    const realWikiRoot = await realpath(wikiRoot);
+    const realProjectsRoot = await realpath(projectsWikiRoot);
+    const realPlan = await realpath(path);
+    if (!pathWithin(realProjectsRoot, realPlan) || !pathWithin(realWikiRoot, realPlan)) return "";
+    const rel = relative(realWikiRoot, realPlan).replace(/\\/g, "/");
+    if (!rel || rel === ".." || rel.startsWith("../") || rel.startsWith("/")) return "";
+    return /(?:^|\/)plans\/[^/]+\.md$/.test(rel) ? rel : "";
+  } catch {
+    return "";
+  }
 }
 
 async function execGit(args: string[], cwd = wikiRoot, timeout = 10000) {
@@ -840,7 +842,7 @@ async function execGit(args: string[], cwd = wikiRoot, timeout = 10000) {
 }
 
 async function autoCommitCanonicalPlan(project: string, runId: string, canonicalPlan: string) {
-  const rel = allowedCanonicalPlanPath(canonicalPlan);
+  const rel = await allowedCanonicalPlanPath(canonicalPlan);
   if (!rel) return { ok: false, skipped: true, reason: "canonical_plan_path_not_allowlisted", canonicalPlan };
   const fileStat = await stat(canonicalPlan).catch(() => null);
   if (!fileStat?.isFile()) return { ok: false, skipped: true, reason: "canonical_plan_missing", canonicalPlan };

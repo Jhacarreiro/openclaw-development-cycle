@@ -463,3 +463,41 @@ test("git checkout projectRoot authorizes contained plan read", async (t) => {
   const rec = await tool.execute("git-2", { action: "record_plan", project: "fixture-git", runId: req.details.runId, projectRoot: code, planPath, force: true }, undefined, undefined);
   assert.equal(rec.details.ok, true, JSON.stringify(rec.details));
 });
+
+test("start_implementation rejects external plan via symlinked wiki root", async (t) => {
+  const root = join(tmpdir(), `ocl-pathguard-start-${process.pid}-${Date.now()}`);
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const code = join(root, "code");
+  const docs = join(root, "docs");
+  const outside = join(root, "outside");
+  await mkdir(join(code, ".git"), { recursive: true });
+  await mkdir(join(docs, "fixture-start"), { recursive: true });
+  await mkdir(outside, { recursive: true });
+  const externalPlan = join(outside, "external-plan.md");
+  await writeFile(externalPlan, "# external\n");
+  const wikiLink = join(docs, "fixture-start", "escape");
+  await symlink(outside, wikiLink);
+  const tool = await registerPlugin(root);
+  const req = await tool.execute("start-1", { action: "request_plan", project: "fixture-start", projectRoot: code }, undefined, undefined);
+  const rec = await tool.execute("start-2", {
+    action: "record_plan",
+    project: "fixture-start",
+    runId: req.details.runId,
+    projectRoot: code,
+    projectWikiPath: join(docs, "fixture-start"),
+    planText: "# Implementation plan\n\n## Project paths\n- projectRoot\n- projectWikiPath\n\n## Tasks\n1. x\n\n## Validation checks\n- true\n\n## Stop conditions\n- none\n\n## Expected artifacts\n- file\n",
+    force: true,
+  }, undefined, undefined);
+  assert.equal(rec.details.ok, true, JSON.stringify(rec.details));
+  const started = await tool.execute("start-3", {
+    action: "start_implementation",
+    project: "fixture-start",
+    runId: req.details.runId,
+    projectRoot: code,
+    projectWikiPath: wikiLink,
+    planPath: externalPlan,
+    force: true,
+  }, undefined, undefined);
+  assert.equal(started.details.ok, false, JSON.stringify(started.details));
+  assert.equal(started.details.error, "plan_path_outside_allowed_roots");
+});

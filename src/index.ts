@@ -1868,12 +1868,13 @@ Create or validate the implementation plan only. Do not implement. The plan must
   if (action === "start_implementation") {
     const projectRoot = String(params.projectRoot || status.projectRoot || "");
     const projectWikiPath = resolveTrustedProjectWikiPath(project, params.projectWikiPath, status.projectWikiPath);
+    const containedProjectWikiPath = await resolveContainedWikiDir(project, projectWikiPath);
     if (!projectRoot) return { ok: false, error: "projectRoot_required", project, runId, dir, wikiRoot, projectWikiPath, hint: "projectRoot must be the real code checkout; projectWikiPath is only docs/state." };
     const rootStat = await stat(projectRoot).catch(() => null);
     if (!rootStat?.isDirectory()) return { ok: false, error: "projectRoot_missing_or_not_directory", project, runId, dir, projectRoot, wikiRoot, projectWikiPath, hint: "Pass the configured project documentation directory separately from the real code checkout." };
     let plan = params.planText || "";
     if (!String(plan).trim() && params.planPath) {
-      const loaded = await readAllowedTextFile(String(params.planPath), [dir, cycleRoot, projectsWikiRoot, wikiRoot, await trustedProjectRoot(projectRoot), projectWikiPath], "plan_path_outside_allowed_roots");
+      const loaded = await readAllowedTextFile(String(params.planPath), [dir, cycleRoot, projectsWikiRoot, wikiRoot, await trustedProjectRoot(projectRoot), containedProjectWikiPath], "plan_path_outside_allowed_roots");
       if (!loaded.ok) return { ok: false, error: loaded.error, project, runId, dir, path: (loaded as any).path };
       plan = loaded.text;
     }

@@ -60,3 +60,27 @@ test("configuration accepts command and Octopus adapter overrides", () => {
   assert.equal(config.notifications.account, "work");
   assert.equal(config.openclawBin, "/usr/local/bin/openclaw");
 });
+
+
+test("repository delivery is opt-in and configurable", () => {
+  const defaults = loadDevelopmentCycleConfig({ HOME: "/tmp/example-home" });
+  assert.equal(defaults.repositoryDelivery.enabled, false);
+  assert.equal(defaults.repositoryDelivery.command, "");
+  assert.deepEqual(defaults.repositoryDelivery.args, []);
+  assert.equal(defaults.repositoryDelivery.autoMergeSuccessful, true);
+  assert.equal(defaults.repositoryDelivery.baseBranch, "main");
+
+  const configured = loadDevelopmentCycleConfig({
+    HOME: "/tmp/example-home",
+    DEVELOPMENT_CYCLE_REPOSITORY_DELIVERY_ENABLED: "true",
+    DEVELOPMENT_CYCLE_REPOSITORY_DELIVERY_COMMAND: "node",
+    DEVELOPMENT_CYCLE_REPOSITORY_DELIVERY_ARGS_JSON: '["/opt/delivery-runner.mjs"]',
+    DEVELOPMENT_CYCLE_REPOSITORY_DELIVERY_AUTO_MERGE_SUCCESSFUL: "false",
+    DEVELOPMENT_CYCLE_REPOSITORY_DELIVERY_BASE_BRANCH: "trunk",
+  });
+  assert.equal(configured.repositoryDelivery.enabled, true);
+  assert.equal(configured.repositoryDelivery.command, "node");
+  assert.deepEqual(configured.repositoryDelivery.args, ["/opt/delivery-runner.mjs"]);
+  assert.equal(configured.repositoryDelivery.autoMergeSuccessful, false);
+  assert.equal(configured.repositoryDelivery.baseBranch, "trunk");
+});

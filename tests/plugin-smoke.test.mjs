@@ -12,6 +12,8 @@ test("plugin registers the generic tool and dispatches request_plan", async (t) 
   process.env.DEVELOPMENT_CYCLE_PROJECT_DOCS_ROOT = join(root, "docs");
   process.env.DEVELOPMENT_CYCLE_NOTIFICATIONS_ENABLED = "false";
   process.env.DEVELOPMENT_CYCLE_OBSERVER_ENABLED = "false";
+  delete process.env.DEVELOPMENT_CYCLE_EXTERNAL_GATE_SECRET_PATH;
+  delete process.env.DEVELOPMENT_CYCLE_EXTERNAL_GATE_URL;
 
   const { default: plugin } = await import(`../dist/index.js?smoke=${Date.now()}`);
   let registered;

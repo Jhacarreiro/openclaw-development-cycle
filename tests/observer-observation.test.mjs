@@ -46,6 +46,21 @@ test("concurrent observer observations produce distinct files and are processed 
   await writeFile(adapterPath, "#!/bin/sh\nexit 0\n");
   await chmod(adapterPath, 0o755);
 
+  const savedEnv = {
+    DEVELOPMENT_CYCLE_STATE_ROOT: process.env.DEVELOPMENT_CYCLE_STATE_ROOT,
+    DEVELOPMENT_CYCLE_PROJECT_DOCS_ROOT: process.env.DEVELOPMENT_CYCLE_PROJECT_DOCS_ROOT,
+    DEVELOPMENT_CYCLE_NOTIFICATIONS_ENABLED: process.env.DEVELOPMENT_CYCLE_NOTIFICATIONS_ENABLED,
+    DEVELOPMENT_CYCLE_OBSERVER_ENABLED: process.env.DEVELOPMENT_CYCLE_OBSERVER_ENABLED,
+    DEVELOPMENT_CYCLE_OBSERVER_HELPER_PATH: process.env.DEVELOPMENT_CYCLE_OBSERVER_HELPER_PATH,
+    DEVELOPMENT_CYCLE_IMPLEMENTATION_COMMAND: process.env.DEVELOPMENT_CYCLE_IMPLEMENTATION_COMMAND,
+    DEVELOPMENT_CYCLE_RUNNER_SUPERVISOR_SOCKET: process.env.DEVELOPMENT_CYCLE_RUNNER_SUPERVISOR_SOCKET,
+  };
+  t.after(() => {
+    for (const [k, v] of Object.entries(savedEnv)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+  });
   process.env.DEVELOPMENT_CYCLE_STATE_ROOT = stateRoot;
   process.env.DEVELOPMENT_CYCLE_PROJECT_DOCS_ROOT = docsRoot;
   process.env.DEVELOPMENT_CYCLE_NOTIFICATIONS_ENABLED = "false";
@@ -110,14 +125,26 @@ test("concurrent observer observations produce distinct files and are processed 
 
   const observationFiles = await collectObservationFiles(stateRoot);
   const names = observationFiles.map((file) => basename(file));
-  assert.equal(new Set(names).size, names.length);
+  assert.ok(observationFiles.length >= 2, `expected at least 2 observation files, found ${names.length}: ${names.join(", ")}`);
+  assert.equal(new Set(names).size, names.length, `duplicate observation filenames: ${names.join(", ")}`);
 
   const logs = [];
+  const observationIds = new Set();
   for (const file of observationFiles) {
     const sidecar = `${file}.log`;
     await access(sidecar);
-    logs.push(await readFile(sidecar, "utf8"));
+    const sidecarText = await readFile(sidecar, "utf8");
+    const lines = sidecarText.split("\n").filter(Boolean);
+    assert.equal(lines.length, 1, `expected 1 helper log line for ${basename(file)}, found ${lines.length}: ${JSON.stringify(sidecarText)}`);
+    // Each sidecar line is "<file>|<id>|<status>|<runId>" — collect distinct observation ids
+    const id = lines[0].split("|")[1] || "";
+    if (id) observationIds.add(id);
+    logs.push(sidecarText);
+    // Also verify the JSON payload is valid and has distinct file content
+    const payloadText = await readFile(file, "utf8");
+    assert.doesNotThrow(() => JSON.parse(payloadText), `observation file ${basename(file)} is not valid JSON`);
   }
+  assert.ok(observationIds.size >= 2, `expected 2 distinct observation ids, found ${observationIds.size}: ${[...observationIds].join(", ")}`);
   const combined = logs.join("");
   assert.match(combined, /run-a/);
   assert.match(combined, /run-b/);

@@ -630,30 +630,51 @@ async function trustedProjectRoot(value: string): Promise<string> {
     if (!st.isDirectory()) return "";
     const real = await realpath(abs);
     if (real === resolve("/")) return "";
-    // Explicitly reject broad system locations — an arbitrary existing
-    // directory like /etc must not become an allowlist root.
-    const blockedExact = ["/etc", "/var", "/usr", "/home", "/root", "/opt", "/bin", "/sbin", "/lib", "/lib64", "/srv"];
-    for (const b of blockedExact) {
-      if (real === resolve(b)) return "";
-    }
-    const blockedTrees = ["/proc", "/sys", "/dev", "/run"];
+    const blockedTrees = ["/etc", "/var", "/usr", "/bin", "/sbin", "/lib", "/lib64", "/proc", "/sys", "/dev", "/run", "/boot"];
     for (const b of blockedTrees) {
       const br = resolve(b);
       if (real === br || real.startsWith(br + "/")) return "";
     }
     if (real === resolve("/tmp") || real === resolve("/var/tmp")) return "";
+    const gitMarker = await lstat(join(real, ".git")).catch(() => null);
+    if (!gitMarker || gitMarker.isSymbolicLink()) return "";
     for (const owned of [cycleRoot, projectsWikiRoot, wikiRoot]) {
       if (!owned) continue;
       try {
         const ownedReal = await realpath(resolve(String(owned)));
         const rel = relative(real, ownedReal).replace(/\\/g, "/");
         if (rel === "" || (rel && rel !== ".." && !rel.startsWith("../") && !rel.startsWith("/"))) return "";
-      } catch { /* owned root may not exist yet */ }
+      } catch {}
     }
     return real;
   } catch {
     return "";
   }
+}
+
+async function validateContainedCreationPath(target: string, root: string): Promise<string> {
+  const absRoot = resolve(root);
+  const absTarget = resolve(target);
+  const lexicalRel = relative(absRoot, absTarget).replace(/\\/g, "/");
+  if (!(lexicalRel === "" || (lexicalRel && lexicalRel !== ".." && !lexicalRel.startsWith("../") && !lexicalRel.startsWith("/")))) return "";
+  let realRoot: string;
+  try {
+    realRoot = await realpath(absRoot);
+  } catch {
+    return "";
+  }
+  let cursor = absRoot;
+  for (const segment of lexicalRel.split("/").filter(Boolean)) {
+    cursor = join(cursor, segment);
+    const lst = await lstat(cursor).catch(() => null);
+    if (!lst) continue;
+    if (lst.isSymbolicLink()) return "";
+    const currentReal = await realpath(cursor).catch(() => "");
+    if (!currentReal) return "";
+    const rel = relative(realRoot, currentReal).replace(/\\/g, "/");
+    if (!(rel === "" || (rel && rel !== ".." && !rel.startsWith("../") && !rel.startsWith("/")))) return "";
+  }
+  return absTarget;
 }
 
 async function readAllowedTextFile(pathValue: string, roots: Array<string | null | undefined>, errorCode: string) {
@@ -691,30 +712,7 @@ async function readAllowedTextFile(pathValue: string, roots: Array<string | null
 
 async function resolveContainedWikiDir(project: string, projectWikiPath: string): Promise<string> {
   const trusted = resolveTrustedProjectWikiPath(project, projectWikiPath);
-  let realRoot = resolve(projectsWikiRoot);
-  try {
-    realRoot = await realpath(projectsWikiRoot);
-  } catch {
-    /* root may not exist yet */
-  }
-
-  // Validate the nearest existing ancestor before any mkdir. This catches
-  // dangling symlinks below the wiki root before they can redirect creation.
-  let cursor = trusted;
-  const missing: string[] = [];
-  for (;;) {
-    try {
-      const existingReal = await realpath(cursor);
-      const rel = relative(realRoot, existingReal).replace(/\\/g, "/");
-      if (!(rel === "" || (rel && rel !== ".." && !rel.startsWith("../") && !rel.startsWith("/")))) return "";
-      return missing.length ? trusted : existingReal;
-    } catch {
-      const parent = resolve(cursor, "..");
-      if (parent === cursor) return "";
-      missing.push(cursor);
-      cursor = parent;
-    }
-  }
+  return await validateContainedCreationPath(trusted, projectsWikiRoot);
 }
 
 async function persistApprovedPlan(project: string, runId: string, projectWikiPath: string, planText: string) {
@@ -726,7 +724,8 @@ async function persistApprovedPlan(project: string, runId: string, projectWikiPa
   } catch {
     /* root may not exist yet */
   }
-  const plansDir = join(normalized, "plans");
+  const plansDir = await validateContainedCreationPath(join(normalized, "plans"), projectsWikiRoot);
+  if (!plansDir) return "";
   await mkdir(plansDir, { recursive: true });
   try {
     const realPlansDir = await realpath(plansDir);
@@ -1466,7 +1465,18 @@ async function writeCouncilOnePager(dir: string, status: any, council: any, para
     const next = await cycleStatus(dir, { councilOnePagerWikiPath: out, councilOnePagerGeneratedAt: new Date().toISOString() });
     return { path: out, content: fallbackContent, status: next };
   }
-  const reportsDir = join(projectWikiPath, "reports");
+  const reportsDir = await validateContainedCreationPath(join(projectWikiPath, "reports"), projectsWikiRoot);
+  if (!reportsDir) {
+    const fallbackDir = join(dir, "reports");
+    await mkdir(fallbackDir, { recursive: true });
+    const stamp2 = new Date().toISOString().slice(0, 19).replace(/[-:T]/g, "");
+    const out2 = join(fallbackDir, `${stamp2}-${runId}-code-review-one-pager.md`);
+    const fallbackContent = `${content}(wiki reports dir untrusted; wrote under cycle dir)
+`;
+    await writeFile(out2, fallbackContent);
+    const next2 = await cycleStatus(dir, { councilOnePagerWikiPath: out2, councilOnePagerGeneratedAt: new Date().toISOString() });
+    return { path: out2, content: fallbackContent, status: next2 };
+  }
   await mkdir(reportsDir, { recursive: true });
   // Contain reportsDir against symlink redirection (pre-existing symlink under wiki).
   try {

@@ -1,7 +1,8 @@
 // @ts-nocheck
 import { Type } from "typebox";
 import { defineToolPlugin } from "openclaw/plugin-sdk/tool-plugin";
-import { lstat, mkdir, readFile, readdir, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
+import { lstat, mkdir, open, readFile, readdir, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
+import { constants as fsConstants } from "node:fs";
 import { join, relative, resolve, sep } from "node:path";
 import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
@@ -655,6 +656,7 @@ async function trustedProjectRoot(value: string): Promise<string> {
 async function validateContainedCreationPath(target: string, root: string): Promise<string> {
   const absRoot = resolve(root);
   const absTarget = resolve(target);
+  await mkdir(absRoot, { recursive: true });
   const lexicalRel = relative(absRoot, absTarget).replace(/\\/g, "/");
   if (!(lexicalRel === "" || (lexicalRel && lexicalRel !== ".." && !lexicalRel.startsWith("../") && !lexicalRel.startsWith("/")))) return "";
   let realRoot: string;
@@ -681,32 +683,88 @@ async function readAllowedTextFile(pathValue: string, roots: Array<string | null
   const raw = String(pathValue || "").trim();
   if (!raw) return { ok: false as const, error: errorCode };
   const abs = resolve(raw);
-  let realCandidate: string;
-  try {
-    realCandidate = await realpath(abs);
-  } catch (e: any) {
-    return { ok: false as const, error: errorCode, path: abs, detail: String(e?.message || e) };
-  }
-  let allowed = false;
+  const realRoots: string[] = [];
   for (const root of roots) {
     if (!root) continue;
-    try {
-      const realRoot = await realpath(resolve(String(root)));
-      const rel = relative(realRoot, realCandidate).replace(/\\/g, "/");
-      if (rel === "" || (Boolean(rel) && rel !== ".." && !rel.startsWith("../") && !rel.startsWith("/"))) {
-        allowed = true;
-        break;
-      }
-    } catch {
-      // root may not exist
-    }
+    try { realRoots.push(await realpath(resolve(String(root)))); } catch {}
   }
-  if (!allowed) return { ok: false as const, error: errorCode, path: abs };
+  let handle: any = null;
   try {
-    const text = await readFile(realCandidate, "utf8");
-    return { ok: true as const, path: realCandidate, text };
+    handle = await open(abs, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+    const realCandidate = await realpath(`/proc/self/fd/${handle.fd}`);
+    const allowed = realRoots.some((realRoot) => {
+      const rel = relative(realRoot, realCandidate).replace(/\\/g, "/");
+      return rel === "" || (Boolean(rel) && rel !== ".." && !rel.startsWith("../") && !rel.startsWith("/"));
+    });
+    if (!allowed) return { ok: false as const, error: errorCode, path: abs };
+    const text = await handle.readFile({ encoding: "utf8" });
+    return { ok: true as const, path: realCandidate, text: String(text) };
   } catch (e: any) {
-    return { ok: false as const, error: errorCode, path: realCandidate, detail: String(e?.message || e) };
+    return { ok: false as const, error: errorCode, path: abs, detail: String(e?.message || e) };
+  } finally {
+    await handle?.close().catch(() => null);
+  }
+}
+
+async function openPinnedContainedDir(target: string, root: string, create = false) {
+  const absRoot = resolve(root);
+  const absTarget = resolve(target);
+  const lexicalRel = relative(absRoot, absTarget).replace(/\\/g, "/");
+  if (!(lexicalRel === "" || (lexicalRel && lexicalRel !== ".." && !lexicalRel.startsWith("../") && !lexicalRel.startsWith("/")))) return null;
+  if (create) await mkdir(absRoot, { recursive: true });
+  let current: any = null;
+  try {
+    current = await open(absRoot, fsConstants.O_RDONLY | fsConstants.O_DIRECTORY | fsConstants.O_NOFOLLOW);
+    const realRoot = await realpath(`/proc/self/fd/${current.fd}`);
+    for (const segment of lexicalRel.split("/").filter(Boolean)) {
+      const child = `/proc/self/fd/${current.fd}/${segment}`;
+      if (create) await mkdir(child).catch((e: any) => { if (e?.code !== "EEXIST") throw e; });
+      const next = await open(child, fsConstants.O_RDONLY | fsConstants.O_DIRECTORY | fsConstants.O_NOFOLLOW);
+      const realNext = await realpath(`/proc/self/fd/${next.fd}`);
+      const rel = relative(realRoot, realNext).replace(/\\/g, "/");
+      if (!(rel === "" || (rel && rel !== ".." && !rel.startsWith("../") && !rel.startsWith("/")))) {
+        await next.close();
+        await current.close();
+        current = null;
+        return null;
+      }
+      await current.close();
+      current = next;
+    }
+    return { handle: current, procPath: `/proc/self/fd/${current.fd}` };
+  } catch {
+    await current?.close().catch(() => null);
+    return null;
+  }
+}
+
+async function writePinnedFile(dir: string, root: string, name: string, content: string, replace = false) {
+  const pinned = await openPinnedContainedDir(dir, root, true);
+  if (!pinned) return "";
+  const { handle, procPath } = pinned;
+  const readyFile = String(process.env.DEVELOPMENT_CYCLE_TEST_PINNED_WRITE_READY_FILE || "").trim();
+  if (readyFile) await writeFile(readyFile, "ready\n");
+  const delayMs = Number(process.env.DEVELOPMENT_CYCLE_TEST_PINNED_WRITE_DELAY_MS || 0);
+  if (Number.isFinite(delayMs) && delayMs > 0) await sleep(delayMs);
+  const target = `${procPath}/${name}`;
+  const tmpName = `.${name}.${process.pid}.${Date.now().toString(16)}.tmp`;
+  const tmp = `${procPath}/${tmpName}`;
+  let file: any = null;
+  try {
+    const writePath = replace ? tmp : target;
+    file = await open(writePath, fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_NOFOLLOW, 0o600);
+    await file.writeFile(content, { encoding: "utf8" });
+    await file.close();
+    file = null;
+    if (replace) await rename(tmp, target);
+    const realDir = await realpath(procPath);
+    return join(realDir, name);
+  } catch {
+    await file?.close().catch(() => null);
+    if (replace) await rm(tmp, { force: true }).catch(() => null);
+    return "";
+  } finally {
+    await handle.close().catch(() => null);
   }
 }
 
@@ -718,41 +776,9 @@ async function resolveContainedWikiDir(project: string, projectWikiPath: string)
 async function persistApprovedPlan(project: string, runId: string, projectWikiPath: string, planText: string) {
   const normalized = await resolveContainedWikiDir(project, projectWikiPath);
   if (!normalized) return "";
-  let realRoot = resolve(projectsWikiRoot);
-  try {
-    realRoot = await realpath(projectsWikiRoot);
-  } catch {
-    /* root may not exist yet */
-  }
-  const plansDir = await validateContainedCreationPath(join(normalized, "plans"), projectsWikiRoot);
-  if (!plansDir) return "";
-  await mkdir(plansDir, { recursive: true });
-  try {
-    const realPlansDir = await realpath(plansDir);
-    const plansRel = relative(realRoot, realPlansDir).replace(/\\/g, "/");
-    if (!(plansRel && plansRel !== ".." && !plansRel.startsWith("../") && !plansRel.startsWith("/"))) {
-      return "";
-    }
-  } catch {
-    return "";
-  }
-  const path = join(plansDir, `${new Date().toISOString().slice(0, 10)}-${cleanId(runId)}-implementation-plan.md`);
-  const tmp = join(plansDir, `.${cleanId(runId)}-${process.pid}-${Date.now().toString(16)}.tmp`);
-  try {
-    await writeFile(tmp, String(planText).trim() + "\n", { flag: "wx" });
-    const realTmp = await realpath(tmp);
-    const tmpRel = relative(realRoot, realTmp).replace(/\\/g, "/");
-    if (!(tmpRel && tmpRel !== ".." && !tmpRel.startsWith("../") && !tmpRel.startsWith("/"))) {
-      await rm(tmp, { force: true }).catch(() => null);
-      return "";
-    }
-    await rename(tmp, path);
-  } catch {
-    await rm(tmp, { force: true }).catch(() => null);
-    return "";
-  }
-
-  return path;
+  const plansDir = join(normalized, "plans");
+  const name = `${new Date().toISOString().slice(0, 10)}-${cleanId(runId)}-implementation-plan.md`;
+  return await writePinnedFile(plansDir, projectsWikiRoot, name, String(planText).trim() + "\n", true);
 }
 
 function wikiRelativePath(path: string) {
@@ -1084,61 +1110,41 @@ function mergeValidationConfig(base: any, extra: any) {
 async function loadProjectValidationConfig(project: string, status: any, params: any = {}) {
   const lexicalProjectWikiPath = resolveTrustedProjectWikiPath(project, params.projectWikiPath, status?.projectWikiPath);
   const projectWikiPath = await resolveContainedWikiDir(project, lexicalProjectWikiPath);
-  const allowedRoots = [projectsWikiRoot, wikiRoot, projectWikiPath, cycleRoot];
-  const candidates: string[] = [];
-  if (params.validationConfigPath) {
-    const requested = resolve(String(params.validationConfigPath));
-    let realRequested = "";
-    try {
-      realRequested = await realpath(requested);
-    } catch {
-      return {
-        config: defaultValidationConfig(),
-        path: "default",
-        projectWikiPath,
-        rejectedValidationConfigPath: requested,
-        error: "validation_config_path_unreadable",
-      };
-    }
-    let allowed = false;
-    for (const root of allowedRoots) {
-      if (!root) continue;
-      try {
-        const realRoot = await realpath(resolve(String(root)));
-        const rel = relative(realRoot, realRequested).replace(/\\/g, "/");
-        if (rel === "" || (Boolean(rel) && rel !== ".." && !rel.startsWith("../") && !rel.startsWith("/"))) {
-          allowed = true;
-          break;
-        }
-      } catch {}
-    }
-    if (!allowed) {
-      return {
-        config: defaultValidationConfig(),
-        path: "default",
-        projectWikiPath,
-        rejectedValidationConfigPath: requested,
-        error: "validation_config_path_outside_allowed_roots",
-      };
-    }
-    candidates.push(realRequested);
-  }
-  if (projectWikiPath) {
-    const defaultCandidate = join(projectWikiPath, "validation.json");
-    try {
-      const realCandidate = await realpath(defaultCandidate);
-      const realWiki = await realpath(projectWikiPath);
-      const rel = relative(realWiki, realCandidate).replace(/\\/g, "/");
-      if (rel === "validation.json") candidates.push(realCandidate);
-    } catch {
-      /* absent default validation config */
-    }
-  }
+  const projectRoot = await trustedProjectRoot(String(params.projectRoot || status?.projectRoot || ""));
+  const allowedRoots = [projectsWikiRoot, wikiRoot, projectWikiPath, cycleRoot, projectRoot];
   let config = defaultValidationConfig();
   let path = "default";
-  for (const candidate of candidates) {
-    const loaded = await readJsonIfExists(candidate);
-    if (loaded) { config = mergeValidationConfig(config, loaded); path = candidate; break; }
+
+  if (params.validationConfigPath) {
+    const requested = resolve(String(params.validationConfigPath));
+    const loaded = await readAllowedTextFile(requested, allowedRoots, "validation_config_path_outside_allowed_roots");
+    if (!loaded.ok) {
+      return {
+        config,
+        path,
+        projectWikiPath,
+        rejectedValidationConfigPath: requested,
+        error: loaded.error,
+      };
+    }
+    try {
+      config = mergeValidationConfig(config, JSON.parse(loaded.text));
+      path = loaded.path;
+    } catch {
+      return { config, path, projectWikiPath, rejectedValidationConfigPath: requested, error: "validation_config_invalid_json" };
+    }
+    return { config, path, projectWikiPath };
+  }
+
+  if (projectWikiPath) {
+    const defaultCandidate = join(projectWikiPath, "validation.json");
+    const loaded = await readAllowedTextFile(defaultCandidate, [projectWikiPath], "validation_config_path_unreadable");
+    if (loaded.ok) {
+      try {
+        config = mergeValidationConfig(config, JSON.parse(loaded.text));
+        path = loaded.path;
+      } catch {}
+    }
   }
   return { config, path, projectWikiPath };
 }
@@ -1465,68 +1471,21 @@ async function writeCouncilOnePager(dir: string, status: any, council: any, para
     const next = await cycleStatus(dir, { councilOnePagerWikiPath: out, councilOnePagerGeneratedAt: new Date().toISOString() });
     return { path: out, content: fallbackContent, status: next };
   }
-  const reportsDir = await validateContainedCreationPath(join(projectWikiPath, "reports"), projectsWikiRoot);
-  if (!reportsDir) {
+  const reportsDir = join(projectWikiPath, "reports");
+  const stamp = new Date().toISOString().slice(0, 19).replace(/[-:T]/g, "");
+  const name = `${stamp}-${runId}-code-review-one-pager.md`;
+  const out = await writePinnedFile(reportsDir, projectsWikiRoot, name, content, false);
+  if (!out) {
     const fallbackDir = join(dir, "reports");
     await mkdir(fallbackDir, { recursive: true });
     const stamp2 = new Date().toISOString().slice(0, 19).replace(/[-:T]/g, "");
     const out2 = join(fallbackDir, `${stamp2}-${runId}-code-review-one-pager.md`);
-    const fallbackContent = `${content}(wiki reports dir untrusted; wrote under cycle dir)
-`;
+    const fallbackContent = `${content}(wiki report path unsafe; wrote under cycle dir)\n`;
     await writeFile(out2, fallbackContent);
     const next2 = await cycleStatus(dir, { councilOnePagerWikiPath: out2, councilOnePagerGeneratedAt: new Date().toISOString() });
     return { path: out2, content: fallbackContent, status: next2 };
   }
-  await mkdir(reportsDir, { recursive: true });
-  // Contain reportsDir against symlink redirection (pre-existing symlink under wiki).
-  try {
-    const realReportsDir = await realpath(reportsDir);
-    let realRoot = resolve(projectsWikiRoot);
-    try { realRoot = await realpath(projectsWikiRoot); } catch {}
-    const reportsRel = relative(realRoot, realReportsDir).replace(/\\/g, "/");
-    if (!(reportsRel && reportsRel !== ".." && !reportsRel.startsWith("../") && !reportsRel.startsWith("/"))) {
-      const fallbackDir = join(dir, "reports");
-      await mkdir(fallbackDir, { recursive: true });
-      const stamp2 = new Date().toISOString().slice(0, 19).replace(/[-:T]/g, "");
-      const out2 = join(fallbackDir, `${stamp2}-${runId}-code-review-one-pager.md`);
-      const fallbackContent = `${content}(wiki reports dir untrusted; wrote under cycle dir)\n`;
-      await writeFile(out2, fallbackContent);
-      const next2 = await cycleStatus(dir, { councilOnePagerWikiPath: out2, councilOnePagerGeneratedAt: new Date().toISOString() });
-      return { path: out2, content: fallbackContent, status: next2 };
-    }
-  } catch {}
-  const stamp = new Date().toISOString().slice(0, 19).replace(/[-:T]/g, "");
-  const out = join(reportsDir, `${stamp}-${runId}-code-review-one-pager.md`);
-  // Write via O_EXCL-like: if out is a symlink, realpath will escape; detect after write.
-  try {
-    await writeFile(out, content, { flag: "wx" });
-  } catch {
-    const fallbackDir = join(dir, "reports");
-    await mkdir(fallbackDir, { recursive: true });
-    const stamp3 = new Date().toISOString().slice(0, 19).replace(/[-:T]/g, "");
-    const out3 = join(fallbackDir, `${stamp3}-${runId}-code-review-one-pager.md`);
-    const fallbackContent = `${content}(wiki report file already existed or was unsafe; rewrote under cycle dir)\n`;
-    await writeFile(out3, fallbackContent);
-    const next3 = await cycleStatus(dir, { councilOnePagerWikiPath: out3, councilOnePagerGeneratedAt: new Date().toISOString() });
-    return { path: out3, content: fallbackContent, status: next3 };
-  }
-  try {
-    const realOut = await realpath(out);
-    let realRoot = resolve(projectsWikiRoot);
-    try { realRoot = await realpath(projectsWikiRoot); } catch {}
-    const outRel = relative(realRoot, realOut).replace(/\\/g, "/");
-    if (!(outRel && outRel !== ".." && !outRel.startsWith("../") && !outRel.startsWith("/"))) {
-      await rm(out, { force: true }).catch(() => null);
-      const fallbackDir = join(dir, "reports");
-      await mkdir(fallbackDir, { recursive: true });
-      const stamp3 = new Date().toISOString().slice(0, 19).replace(/[-:T]/g, "");
-      const out3 = join(fallbackDir, `${stamp3}-${runId}-code-review-one-pager.md`);
-      const fallbackContent = `${content}(wiki report file was a symlink; rewrote under cycle dir)\n`;
-      await writeFile(out3, fallbackContent);
-      const next3 = await cycleStatus(dir, { councilOnePagerWikiPath: out3, councilOnePagerGeneratedAt: new Date().toISOString() });
-      return { path: out3, content: fallbackContent, status: next3 };
-    }
-  } catch {}
+
   const next = await cycleStatus(dir, { councilOnePagerWikiPath: out, councilOnePagerGeneratedAt: new Date().toISOString() });
   return { path: out, content, status: next };
 }

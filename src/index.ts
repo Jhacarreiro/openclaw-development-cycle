@@ -71,6 +71,7 @@ const cycleRoot = developmentCycleConfig.stateRoot;
 const wikiRoot = developmentCycleConfig.projectDocsGitRoot;
 const projectsWikiRoot = developmentCycleConfig.projectDocsRoot;
 const implementationConfig = developmentCycleConfig.implementation;
+const repositoryDeliveryConfig = developmentCycleConfig.repositoryDelivery;
 const observerObserveHelper = developmentCycleConfig.observer.observeHelperPath;
 const observerAgentHook = developmentCycleConfig.observer.agentHookPath;
 const observerHookLog = developmentCycleConfig.observer.hookLogPath;
@@ -839,6 +840,140 @@ async function execGit(args: string[], cwd = wikiRoot, timeout = 10000) {
   } catch (err: any) {
     return { ok: false, stdout: String(err?.stdout || ""), stderr: String(err?.stderr || ""), error: String(err?.message || err) };
   }
+}
+
+function inferDeliveryClassification(phase: string, requested: any) {
+  const raw = String(requested || "").trim().toLowerCase();
+  if (["success", "partial", "invalid"].includes(raw)) return raw;
+  if (phase === "final_validated") return "success";
+  if ([
+    "needs_corrections",
+    "implementation_failed",
+    "corrections_failed",
+    "council_review_needs_corrections",
+    "council_review_failed",
+    "external_validation_failed",
+    "stopped",
+  ].includes(phase)) return "partial";
+  return "invalid";
+}
+
+function repositoryFindings(status: any, max = 12) {
+  const raw = [...(status?.councilReviewFindings || [])];
+  if (status?.failureRecommendedAction) raw.push(String(status.failureRecommendedAction));
+  const out: string[] = [];
+  for (const value of raw) {
+    const text = String(value || "").trim().replace(/\s+/g, " ");
+    if (!text || out.includes(text)) continue;
+    out.push(text);
+    if (out.length >= max) break;
+  }
+  return out;
+}
+
+async function runRepositoryDeliveryAdapter(dir: string, status: any, params: any) {
+  const project = cleanId(params.project || status?.project || "default");
+  const runId = cleanId(params.runId || status?.runId || "run");
+  const projectRoot = String(params.projectRoot || status?.projectRoot || "");
+  const sourcePhase = String(status?.phase || "");
+  const classification = inferDeliveryClassification(sourcePhase, params.deliveryClassification || status?.repositoryDelivery?.classification);
+  const requestPath = join(dir, "repository_delivery_request.json");
+  const resultPath = join(dir, "repository_delivery.json");
+  const request = {
+    schemaVersion: 1,
+    operation: params.repositoryDeliveryOperation || "publish",
+    project,
+    runId,
+    projectRoot,
+    sourcePhase,
+    classification,
+    baseBranch: String(params.repositoryBaseBranch || repositoryDeliveryConfig.baseBranch || "main"),
+    autoMerge: classification === "success" && repositoryDeliveryConfig.autoMergeSuccessful,
+    findings: repositoryFindings(status),
+    existingDelivery: status?.repositoryDelivery || null,
+    createdAt: new Date().toISOString(),
+  };
+  await saveJson(requestPath, request);
+  if (classification === "invalid") {
+    const result = { ok: false, skipped: true, classification, reason: "delivery_classified_invalid", requestPath, projectRoot };
+    await saveJson(resultPath, result);
+    return { ...result, resultPath };
+  }
+  if (!projectRoot) return { ok: false, classification, error: "projectRoot_missing", requestPath, resultPath };
+  if (!repositoryDeliveryConfig.enabled) return { ok: false, classification, error: "repository_delivery_disabled", requestPath, resultPath };
+  if (!repositoryDeliveryConfig.command) return { ok: false, classification, error: "repository_delivery_command_missing", requestPath, resultPath };
+  let execResult: any;
+  try {
+    execResult = await execFileAsync(repositoryDeliveryConfig.command, [...repositoryDeliveryConfig.args, requestPath], {
+      cwd: projectRoot,
+      timeout: Number(params.repositoryDeliveryTimeoutMs || 120000),
+      maxBuffer: 2 * 1024 * 1024,
+    });
+  } catch (err: any) {
+    const result = {
+      ok: false,
+      classification,
+      error: String(err?.message || err),
+      stdout: excerpt(err?.stdout || "", 4000),
+      stderr: excerpt(err?.stderr || "", 4000),
+      requestPath,
+    };
+    await saveJson(resultPath, result);
+    return { ...result, resultPath };
+  }
+  let parsed: any = null;
+  try { parsed = JSON.parse(String(execResult.stdout || "").trim()); } catch {}
+  const result = parsed && typeof parsed === "object" ? { ...parsed, classification, requestPath, completedAt: new Date().toISOString() } : {
+    ok: false,
+    classification,
+    error: "repository_delivery_invalid_json",
+    stdout: excerpt(execResult.stdout || "", 4000),
+    stderr: excerpt(execResult.stderr || "", 4000),
+    requestPath,
+  };
+  await saveJson(resultPath, result);
+  return { ...result, resultPath };
+}
+
+async function finalizeRepositoryDeliveryState(dir: string, status: any, params: any) {
+  const delivery = await runRepositoryDeliveryAdapter(dir, status, params);
+  if (!delivery.ok) {
+    const phase = delivery.skipped ? "closed_invalid" : "repository_delivery_failed";
+    const next = await cycleStatus(dir, {
+      phase,
+      owner: "main",
+      ok: false,
+      repositoryDelivery: delivery,
+      nextAction: delivery.skipped ? "none" : "Fix repository delivery and retry finalize_delivery.",
+    });
+    return { ok: false, phase: next.phase, status: next, delivery };
+  }
+  const phase = delivery.classification === "success"
+    ? (delivery.merged ? "merged" : "delivery_published")
+    : "closed_partial";
+  const next = await cycleStatus(dir, {
+    phase,
+    owner: "main",
+    ok: true,
+    repositoryDelivery: delivery,
+    nextAction: phase === "delivery_published" ? "Wait for repository checks/auto-merge." : "none",
+  });
+  return { ok: true, phase: next.phase, status: next, delivery };
+}
+
+async function reconcileRepositoryDeliveryState(dir: string, status: any, params: any) {
+  if (!repositoryDeliveryConfig.enabled || String(status?.phase || "") !== "delivery_published") return null;
+  const checked = await runRepositoryDeliveryAdapter(dir, status, { ...params, repositoryDeliveryOperation: "status" });
+  if (!checked.ok) return { ok: false, status, delivery: checked };
+  if (!checked.merged) return { ok: true, status: { ...status, repositoryDelivery: checked }, delivery: checked };
+  const next = await cycleStatus(dir, {
+    phase: "merged",
+    owner: "main",
+    ok: true,
+    repositoryDelivery: checked,
+    nextAction: "none",
+  });
+  return { ok: true, status: next, delivery: checked };
 }
 
 async function autoCommitCanonicalPlan(project: string, runId: string, canonicalPlan: string) {
@@ -1740,6 +1875,8 @@ async function projectCycle(params: any) {
   if (action === "reconcile") {
     const refreshedStatus = await refreshLaunchedImplementationStatus(dir, status);
     let effectiveStatus = refreshedStatus;
+    const repositoryDeliveryReconcile = await reconcileRepositoryDeliveryState(dir, { ...effectiveStatus, project, runId }, params);
+    effectiveStatus = repositoryDeliveryReconcile?.status || effectiveStatus;
     let automaticValidation: any = null;
     if (params.autoRunFinalValidation === true && ["implementation_delivered", "corrections_completed"].includes(String(effectiveStatus?.phase || "")) && !effectiveStatus?.externalValidation) {
       automaticValidation = await runExternalFinalValidation(dir, { ...effectiveStatus, project, runId }, params, "implementation_delivered");
@@ -1757,8 +1894,13 @@ async function projectCycle(params: any) {
     const runtimeEvent = await dcClassify(dir, { ...effectiveStatus, project, runId }, runtime);
     const failurePolicy = await dcPersistFailure(dir, effectiveStatus, runtimeEvent);
     effectiveStatus = failurePolicy.status || effectiveStatus;
+    let automaticRepositoryDelivery: any = null;
+    if (repositoryDeliveryConfig.enabled && ["implementation_failed", "corrections_failed", "stopped"].includes(String(effectiveStatus?.phase || ""))) {
+      automaticRepositoryDelivery = await finalizeRepositoryDeliveryState(dir, { ...effectiveStatus, project, runId }, params);
+      effectiveStatus = automaticRepositoryDelivery.status || effectiveStatus;
+    }
     const mainUpdate = await dcNotifyMain(dir, project, runId, effectiveStatus, params, runtimeEvent);
-    return { ok: true, readOnly: false, project, runId, dir, status: effectiveStatus, files, runtime, stall, automaticValidation, councilEndgate, failurePolicy: runtimeEvent, mainUpdate };
+    return { ok: true, readOnly: false, project, runId, dir, status: effectiveStatus, files, runtime, stall, automaticValidation, councilEndgate, repositoryDeliveryReconcile, automaticRepositoryDelivery, failurePolicy: runtimeEvent, mainUpdate };
   }
 
   const transition = checkActionTransition(action, status?.phase);
@@ -1961,8 +2103,16 @@ Create or validate the implementation plan only. Do not implement. The plan must
     const file = join(dir, "final_validation_response.md");
     await writeFile(file, String(validationText));
     const phase = parsedDecision.decision === "go" ? "final_validated" : parsedDecision.decision === "stop" ? "stopped" : "needs_corrections";
-    const nextAction = phase === "needs_corrections" ? "Call start_corrections with the final validation feedback." : phase === "final_validated" ? "Call close when reporting is complete." : "Stop and report to the operator.";
+    const nextAction = phase === "needs_corrections"
+      ? "Call start_corrections with the final validation feedback."
+      : repositoryDeliveryConfig.enabled
+        ? "Repository delivery will materialize this terminal run outcome."
+        : "Call finalize_delivery to materialize this terminal run outcome.";
     const next = await cycleStatus(dir, { phase, owner: "main", nextAction, finalValidation: file });
+    if (phase !== "needs_corrections" && repositoryDeliveryConfig.enabled) {
+      const finalized = await finalizeRepositoryDeliveryState(dir, { ...next, project, runId }, params);
+      return { ok: finalized.ok, project, runId, dir, phase: finalized.phase, finalValidation: file, delivery: finalized.delivery };
+    }
     return { ok: true, project, runId, dir, phase: next.phase, finalValidation: file };
   }
 
@@ -2004,6 +2154,11 @@ Create or validate the implementation plan only. Do not implement. The plan must
     const next = await cycleStatus(dir, { phase: "corrections_launched", owner: "implementation", nextAction: "Use development_cycle status to watch the supervised corrections runner.", projectRoot, implementationAdapter: launch.adapter, implementationCorrectionsSessionId: launch.sessionId, directCorrectionsStatus: launch.statusPath, directCorrectionsStdout: launch.stdoutPath, directCorrectionsStderr: launch.stderrPath, observerCorrectionsObservationId: observerObservationId, implementationCorrectionsRequest: requestPath, implementationCorrectionsLaunch: launchRecord, correctionsStdout: launch.stdoutPath, correctionsStderr: launch.stderrPath });
     return { ok: true, project, runId, dir, phase: next.phase, implementationAdapter: launch.adapter, implementationCorrectionsSessionId: launch.sessionId, observerObservationId, launchState: launch.status?.launchState || null, directCorrectionsStatus: launch.statusPath };
 
+  }
+
+  if (action === "finalize_delivery") {
+    const finalized = await finalizeRepositoryDeliveryState(dir, { ...status, project, runId }, params);
+    return { ok: finalized.ok, project, runId, dir, phase: finalized.phase, delivery: finalized.delivery };
   }
 
   if (action === "close") {
@@ -2073,6 +2228,9 @@ export default defineToolPlugin({
         mainUpdateTimeoutMs: Type.Optional(Type.Number()),
         mainUpdateExecTimeoutMs: Type.Optional(Type.Number()),
         stallQuietSeconds: Type.Optional(Type.Number()),
+        deliveryClassification: Type.Optional(lit("success", "partial", "invalid")),
+        repositoryBaseBranch: Type.Optional(Type.String()),
+        repositoryDeliveryTimeoutMs: Type.Optional(Type.Number()),
       }),
       execute: async (params) => await projectCycle(params),
     }),

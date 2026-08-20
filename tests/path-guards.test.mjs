@@ -3,6 +3,7 @@ import { mkdir, mkdtemp, readFile, writeFile, rm, access, symlink, rename, readd
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { execFileSync } from "node:child_process";
 
 async function registerPlugin(root) {
   process.env.DEVELOPMENT_CYCLE_STATE_ROOT = join(root, "state");
@@ -529,6 +530,14 @@ test("pinned write resists concurrent parent symlink swap",async t=>{const r=joi
 test("configured projectsWikiRoot may be a symlink", async (t) => {
   const root = join(tmpdir(), `ocl-rootlink-${process.pid}-${Date.now()}`);
   t.after(() => rm(root, { recursive: true, force: true }));
+  t.after(() => { delete process.env.DEVELOPMENT_CYCLE_PROJECT_DOCS_GIT_ROOT; });
+  process.env.DEVELOPMENT_CYCLE_PROJECT_DOCS_GIT_ROOT = root;
+  execFileSync("git", ["init", "-q", root]);
+  execFileSync("git", ["-C", root, "config", "user.name", "Path Guard Test"]);
+  execFileSync("git", ["-C", root, "config", "user.email", "pathguard@example.invalid"]);
+  await writeFile(join(root, ".gitignore"), "state/\ncode/\n");
+  execFileSync("git", ["-C", root, "add", ".gitignore"]);
+  execFileSync("git", ["-C", root, "commit", "-q", "-m", "fixture"]);
   const realDocs = join(root, "real-docs");
   await mkdir(realDocs, { recursive: true });
   await symlink(realDocs, join(root, "docs"));
@@ -540,6 +549,10 @@ test("configured projectsWikiRoot may be a symlink", async (t) => {
   assert.equal(rec.details.ok, true, JSON.stringify(rec.details));
   assert.ok(rec.details.canonicalPlan?.startsWith(realDocs + "/"), JSON.stringify(rec.details));
   await access(rec.details.canonicalPlan);
+  assert.equal(rec.details.canonicalPlanGit?.ok, true, JSON.stringify(rec.details.canonicalPlanGit));
+  assert.equal(rec.details.canonicalPlanGit?.skipped, false, JSON.stringify(rec.details.canonicalPlanGit));
+  const committed = execFileSync("git", ["-C", root, "show", "--name-only", "--format=", "HEAD"], { encoding: "utf8" });
+  assert.match(committed, /real-docs\/rootlink\/plans\/.*implementation-plan\.md/);
 });
 
 test("concurrent writers tolerate EEXIST while creating plans directory", async (t) => {

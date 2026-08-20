@@ -234,3 +234,11 @@ test("launch_runner publishes process-group readiness before returning", () => {
   const returned = launch.indexOf("return pid", readyRead);
   assert.ok(pipe >= 0 && fork > pipe && setsid > fork && readyWrite > setsid && readyRead > readyWrite && returned > readyRead);
 });
+
+test("reaped runner remains shutdown-visible until group termination completes", () => {
+  const loop = SUPERVISOR_SOURCE.slice(SUPERVISOR_SOURCE.indexOf("for pid, _status in reap_all(runners):"));
+  const lookup = loop.indexOf("runners.get(pid, pid)");
+  const terminate = loop.indexOf("terminate_group(pgid, runners)", lookup);
+  const remove = loop.indexOf("runners.pop(pid, None)", terminate);
+  assert.ok(lookup >= 0 && terminate > lookup && remove > terminate);
+});

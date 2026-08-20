@@ -194,8 +194,9 @@ def serve(socket_path: str) -> None:
                 conn.sendall((json.dumps(response) + '\n').encode('utf-8'))
 
         for pid, _status in reap_all(runners):
-            pgid = runners.pop(pid, pid)
+            pgid = runners.get(pid, pid)
             terminate_group(pgid, runners)
+            runners.pop(pid, None)
             reap_all(runners)
 
 

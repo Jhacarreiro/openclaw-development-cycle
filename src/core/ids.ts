@@ -12,12 +12,7 @@ export function legacyCleanId(input: unknown, fallback = "run", maxLength = CLEA
     .replace(/[^a-zA-Z0-9._-]+/g, "-")
     .replace(/^-+|-+$/g, "")
     .slice(0, maxLength);
-  // path.join treats "." / ".." as traversal; pure-dot tokens must not become dir names.
-  // Pre-fix state under escaped dot paths (e.g. ".." dirs) is intentionally not migrated; reconcile those dirs manually.
-  if (!cleaned || cleaned === "." || cleaned === ".." || /^\.+$/.test(cleaned)) {
-    return fallback;
-  }
-  return cleaned;
+  return cleaned || fallback;
 }
 
 function identityDigest(raw: string): string {

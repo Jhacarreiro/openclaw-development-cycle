@@ -1399,11 +1399,12 @@ function mergeValidationConfig(base: any, extra: any) {
   };
 }
 
-async function loadProjectValidationConfig(project: string, status: any, params: any = {}) {
+async function loadProjectValidationConfig(project: string, status: any, params: any = {}, borrowedProjectRoot: any = null) {
   const lexicalProjectWikiPath = resolveTrustedProjectWikiPath(project, params.projectWikiPath, status?.projectWikiPath);
   const pinnedProjectWiki = await pinContainedWikiDir(project, lexicalProjectWikiPath);
   const projectWikiPath = pinnedProjectWiki?.realPath || "";
-  const pinnedProjectRoot = await pinTrustedProjectRoot(String(params.projectRoot || status?.projectRoot || ""));
+  const ownsProjectRoot = !borrowedProjectRoot;
+  const pinnedProjectRoot = borrowedProjectRoot || await pinTrustedProjectRoot(String(params.projectRoot || status?.projectRoot || ""));
   const projectRoot = pinnedProjectRoot?.realPath || "";
   if (pinnedProjectRoot) {
     const readyFile = String(process.env.DEVELOPMENT_CYCLE_TEST_PINNED_PROJECT_ROOT_READ_READY_FILE || "").trim();
@@ -1450,7 +1451,7 @@ async function loadProjectValidationConfig(project: string, status: any, params:
   return { config, path, projectWikiPath };
   } finally {
     await pinnedProjectWiki?.handle.close().catch(() => null);
-    await pinnedProjectRoot?.handle.close().catch(() => null);
+    if (ownsProjectRoot) await pinnedProjectRoot?.handle.close().catch(() => null);
   }
 }
 
@@ -1567,8 +1568,13 @@ async function existingForbiddenPathCheck(projectRoot: string, config: any) {
 async function runExternalFinalValidation(dir: string, status: any, params: any = {}, reason = "manual") {
   const project = cleanId(params.project || status?.project || "default");
   const runId = cleanId(params.runId || status?.runId || "run");
-  const projectRoot = String(params.projectRoot || status?.projectRoot || "");
-  const loaded = await loadProjectValidationConfig(project, status, params);
+  const requestedProjectRoot = String(params.projectRoot || status?.projectRoot || "");
+  const pinnedProjectRoot = await pinTrustedProjectRoot(requestedProjectRoot);
+  const projectRoot = pinnedProjectRoot?.realPath || requestedProjectRoot;
+  const validationRoot = pinnedProjectRoot?.procPath || "";
+  const loaded = pinnedProjectRoot
+    ? await loadProjectValidationConfig(project, status, params, pinnedProjectRoot)
+    : { config: defaultValidationConfig(), path: "default", rejectedValidationConfigPath: null, error: "project_root_not_trusted_git_checkout" };
   const config = loaded.config;
   await mkdir(dir, { recursive: true });
   const stdoutPath = join(dir, "validation_stdout.log");
@@ -1579,23 +1585,30 @@ async function runExternalFinalValidation(dir: string, status: any, params: any 
   const commandResults: any[] = [];
   let preservedDiff: any = null;
 
-  const rootStat = projectRoot ? await stat(projectRoot).catch(() => null) : null;
-  if (!rootStat?.isDirectory()) failures.push({ check: "projectRoot", severity: "stop", reason: "projectRoot missing or not a directory", projectRoot });
-  if (rootStat?.isDirectory() && config.preserveDiff !== false) preservedDiff = await preserveValidationDiff(dir, projectRoot, `validation-${reason}`);
+  try {
+  const rootStat = validationRoot ? await stat(validationRoot).catch(() => null) : null;
+  if (!rootStat?.isDirectory()) failures.push({ check: "projectRoot", severity: "stop", reason: "projectRoot must be an existing trusted Git checkout on a supported Linux host", projectRoot: requestedProjectRoot });
+  if (rootStat?.isDirectory()) {
+    const readyFile = String(process.env.DEVELOPMENT_CYCLE_TEST_VALIDATION_ROOT_READY_FILE || "").trim();
+    if (readyFile) await writeFile(readyFile, "ready\n");
+    const delayMs = Number(process.env.DEVELOPMENT_CYCLE_TEST_VALIDATION_ROOT_DELAY_MS || 0);
+    if (Number.isFinite(delayMs) && delayMs > 0) await sleep(delayMs);
+  }
+  if (rootStat?.isDirectory() && config.preserveDiff !== false) preservedDiff = await preserveValidationDiff(dir, validationRoot, `validation-${reason}`);
 
   if (rootStat?.isDirectory()) {
-    const validationCommands = await inferValidationCommands(projectRoot, config);
+    const validationCommands = await inferValidationCommands(validationRoot, config);
     config.resolvedCommands = validationCommands;
     for (const command of validationCommands) {
-      const result = await execValidationCommand(String(command), projectRoot, Number(config.commandTimeoutMs || 120000));
+      const result = await execValidationCommand(String(command), validationRoot, Number(config.commandTimeoutMs || 120000));
       commandResults.push({ ...result, stdout: excerpt(result.stdout || "", 20000), stderr: excerpt(result.stderr || "", 20000) });
       if (!result.ok) failures.push({ check: "command", command, severity: "revise", reason: result.error || `command exited ${result.exitCode}`, exitCode: result.exitCode, timedOut: result.timedOut || false });
     }
-    const dirty = await dirtyWorktreeCheck(projectRoot, config);
+    const dirty = await dirtyWorktreeCheck(validationRoot, config);
     failures.push(...dirty.failures);
-    failures.push(...await existingForbiddenPathCheck(projectRoot, config));
+    failures.push(...await existingForbiddenPathCheck(validationRoot, config));
     failures.push(...await portsFreeCheck(config.portsMustBeFree || []));
-    failures.push(...await requiredOpenApiPathCheck(projectRoot, config.requiredOpenApiPaths || []));
+    failures.push(...await requiredOpenApiPathCheck(validationRoot, config.requiredOpenApiPaths || []));
   }
 
   const stop = failures.some((f) => f.severity === "stop");
@@ -1610,6 +1623,9 @@ async function runExternalFinalValidation(dir: string, status: any, params: any 
   const nextAction = ok ? "Mechanical validation passed; human/AI final review may record go or close when appropriate." : decision === "stop" ? "Stop and report the validation blocker to the operator." : "Send delta-only corrections to Implementation or apply a minimal manual fix, then rerun run_final_validation.";
   const next = await cycleStatus(dir, { phase, owner: "main", ok, externalValidationDecision: decision, externalValidation: resultPath, validationSummary: summaryPath, validationStdout: stdoutPath, validationStderr: stderrPath, validationConfigPath: loaded.path, rejectedValidationConfigPath: loaded.rejectedValidationConfigPath || null, validationConfigError: loaded.error || null, nextAction });
   return { ok, decision, project, runId, dir, phase: next.phase, validationResult: resultPath, validationSummary: summaryPath, validationStdout: stdoutPath, validationStderr: stderrPath, failures, commandResults: commandResults.map((r) => ({ command: r.command, ok: r.ok, exitCode: r.exitCode, timedOut: r.timedOut || false, durationMs: r.durationMs })), preservedDiff, rejectedValidationConfigPath: loaded.rejectedValidationConfigPath || null, validationConfigError: loaded.error || null, status: next };
+  } finally {
+    await pinnedProjectRoot?.handle.close().catch(() => null);
+  }
 }
 async function latestRunActivityMtime(status: any) {
   const paths = [status?.implementationStdout, status?.implementationStderr, status?.correctionsStdout, status?.correctionsStderr, status?.directImplementationStdout, status?.directImplementationStderr].filter(Boolean).map(String);

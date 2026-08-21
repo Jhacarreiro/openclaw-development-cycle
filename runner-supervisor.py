@@ -75,14 +75,38 @@ def terminate_group(pgid: int, runners: dict[int, int]) -> None:
 
 
 def launch_runner(runner_path: str, cwd: str) -> int:
-    pid = os.fork()
+    ready_r, ready_w = os.pipe()
+    try:
+        pid = os.fork()
+    except BaseException:
+        os.close(ready_r)
+        os.close(ready_w)
+        raise
     if pid == 0:
+        os.close(ready_r)
         try:
             os.setsid()
+            os.write(ready_w, b'1')
+            os.close(ready_w)
             os.chdir(cwd)
             os.execv('/bin/sh', ['sh', runner_path])
         except BaseException:
+            try:
+                os.close(ready_w)
+            except OSError:
+                pass
             os._exit(127)
+    os.close(ready_w)
+    try:
+        ready = os.read(ready_r, 1)
+    finally:
+        os.close(ready_r)
+    if ready != b'1':
+        try:
+            os.waitpid(pid, 0)
+        except ChildProcessError:
+            pass
+        raise RuntimeError('runner failed before process-group readiness')
     return pid
 
 
@@ -99,12 +123,39 @@ def serve(socket_path: str) -> None:
     server.listen(16)
     server.settimeout(0.2)
     runners: dict[int, int] = {}
+    launch_in_flight = False
+    shutdown_requested = False
 
     def ignore_sigchld(_sig, _frame):
         return None
 
+    def cleanup_and_exit() -> None:
+        for pgid in list(runners.values()):
+            try:
+                terminate_group(pgid, runners)
+            except BaseException:
+                pass
+        os._exit(0)
+
+    def shutdown(_sig, _frame):
+        # Runners are setsid()'d into their own process groups; if the
+        # supervisor dies without terminating them they survive, reparent
+        # to init, and run unmanaged (a relaunched supervisor starts with
+        # an empty runners dict and never sees them). Kill every group on
+        # SIGTERM/SIGINT so a supervisor restart cannot orphan runners.
+        # launch_runner() forks and setsid()s before serve() records
+        # runners[pid]; if a signal arrives in that window, defer _exit
+        # until the new group is tracked.
+        nonlocal shutdown_requested
+        shutdown_requested = True
+        if launch_in_flight:
+            return
+        cleanup_and_exit()
+
     signal.signal(signal.SIGCHLD, ignore_sigchld)
     signal.signal(signal.SIGPIPE, signal.SIG_IGN)
+    signal.signal(signal.SIGTERM, shutdown)
+    signal.signal(signal.SIGINT, shutdown)
 
     while True:
         try:
@@ -120,6 +171,8 @@ def serve(socket_path: str) -> None:
                         if not chunk:
                             break
                         raw += chunk
+                        if len(raw) > 1024 * 1024:
+                            raise ValueError('request too large')
                     request = json.loads(raw.decode('utf-8'))
                     action = request.get('action')
                     if action == 'ping':
@@ -127,9 +180,15 @@ def serve(socket_path: str) -> None:
                     elif action == 'launch':
                         runner_path = str(request['runnerPath'])
                         cwd = str(request['cwd'])
-                        pid = launch_runner(runner_path, cwd)
-                        runners[pid] = pid
-                        response = {'ok': True, 'pid': pid, 'pgid': pid, 'supervisorPid': os.getpid()}
+                        launch_in_flight = True
+                        try:
+                            pid = launch_runner(runner_path, cwd)
+                            runners[pid] = pid
+                            response = {'ok': True, 'pid': pid, 'pgid': pid, 'supervisorPid': os.getpid()}
+                        finally:
+                            launch_in_flight = False
+                            if shutdown_requested:
+                                cleanup_and_exit()
                     else:
                         response = {'ok': False, 'error': 'unknown_action'}
                 except Exception as exc:
@@ -142,8 +201,9 @@ def serve(socket_path: str) -> None:
                     pass
 
         for pid, _status in reap_all(runners):
-            pgid = runners.pop(pid, pid)
+            pgid = runners.get(pid, pid)
             terminate_group(pgid, runners)
+            runners.pop(pid, None)
             reap_all(runners)
 
 

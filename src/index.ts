@@ -339,9 +339,7 @@ ${commandLine} > ${shellQuote(stdoutPath)} 2> ${shellQuote(stderrPath)}
     promptPath,
     purpose: params.purpose || "development_cycle implementation",
   });
-  // Do NOT persist status as "running" yet: if the supervisor launch fails
-  // below we throw, and a persisted running state with no runnerPid would
-  // be permanent phantom litter that never reconciles.
+  await saveJson(statusPath, status);
 
   const supervisor = await ensureRunnerSupervisor();
   const launched = await execFileAsync("python3", [runnerSupervisorPath, "--socket", runnerSupervisorSocket, "launch", runnerPath, sessionDir], {
@@ -361,10 +359,7 @@ ${commandLine} > ${shellQuote(stdoutPath)} 2> ${shellQuote(stderrPath)}
   status.runnerSupervisorSocket = runnerSupervisorSocket;
   status.useProcessGroup = true;
   status.stopSignalPolicy = "process-group-term-kill";
-  status.launchState = "running";
   status.updatedAt = new Date().toISOString();
-  // Only now that the supervisor confirmed the runner PID persist the
-  // running state - a launch failure leaves no phantom running session.
   await saveJson(statusPath, status);
   return {
     ok: true,

@@ -37,10 +37,14 @@ Experimental `v0.1.0`. The state machine, storage, adapters, shell quoting, and 
 
 ## Requirements
 
+- Linux with `/proc/self/fd` support for guarded project-root filesystem operations
+- `projectRoot` must be an existing Git checkout for implementation and mechanical validation actions
 - Node.js 22 or newer
 - Python 3
 - OpenClaw `2026.5.17` or newer
 - an executable implementation adapter
+
+The filesystem hardening deliberately fails closed when `projectRoot` is not a trusted Git checkout or when the host cannot provide the Linux descriptor-path semantics used to pin the checkout during reads, handoff, and validation execution.
 
 ## Install
 

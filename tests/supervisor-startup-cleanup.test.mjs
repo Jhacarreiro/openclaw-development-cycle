@@ -29,7 +29,7 @@ test("failed supervisor startup is cleaned up and retry succeeds", async (t) => 
   const sock = join(root, "supervisor.sock"), marker = join(root, "healthy"), pidFile = join(root, "broken.pid");
   const fixture = join(root, "fixture.py");
   const real = new URL("../runner-supervisor.py", import.meta.url).pathname;
-  await mkdir(project, { recursive: true });
+  await mkdir(join(project, ".git"), { recursive: true });
   await writeFile(fixture, `#!/usr/bin/env python3
 import os,socket,sys,time
 marker=${JSON.stringify("/MARKER/")}

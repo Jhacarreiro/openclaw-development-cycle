@@ -1,14 +1,16 @@
 // @ts-nocheck
 import { Type } from "typebox";
 import { defineToolPlugin } from "openclaw/plugin-sdk/tool-plugin";
-import { mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
-import { join, relative, resolve } from "node:path";
+import { lstat, mkdir, open, readFile, readdir, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
+import { constants as fsConstants } from "node:fs";
+import { join, relative, resolve, sep } from "node:path";
 import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
 import { setTimeout as sleep } from "node:timers/promises";
 import { ACTIONS, checkActionTransition } from "./core/state-machine.js";
 import { parseFinalDecision } from "./core/decisions.js";
 import { cleanId, newRunId as createRunId } from "./core/ids.js";
+import { nextStallQuietAccounting } from "./core/stall-accounting.js";
 import { loadDevelopmentCycleConfig } from "./config.js";
 import { createFilesystemStore } from "./storage/filesystem.js";
 import { buildImplementationLaunchSpec, jsonShellQuote, renderShellCommand, renderShellEnvironment, shellQuote } from "./adapters/implementation.js";
@@ -39,7 +41,12 @@ function redactRemoteCredentials(text: string) {
 }
 
 async function request(path: string, options: any = {}) {
-  const cfg = await loadConfig();
+  let cfg: { url: string; token: string };
+  try {
+    cfg = await loadConfig();
+  } catch (error: any) {
+    return { ok: false, error: `external_gate_config_unreadable: ${String(error?.message || error)}`, secretPath };
+  }
   if (!cfg.token) return { ok: false, error: "missing_external_gate_token", secretPath };
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), options.timeoutMs || 10000);
@@ -160,7 +167,13 @@ function dcMainText(project: string, runId: string, dir: string, status: any, ev
 async function dcNotifyMain(dir: string, project: string, runId: string, status: any, params: any, ev: any) { if (params.notifyMain===false || params.emitMainUpdates===false) return {ok:true,skipped:true,reason:"notifyMain_disabled"}; if (!ev?.shouldNotifyMain) return {ok:true,skipped:true,reason:"not_notifiable"}; const statePath=join(dir,"main_update_state.json"), eventsPath=join(dir,"main_update_events.jsonl"), sig=dcSig(project,runId,status,ev), state=await loadJson(statePath); if (state?.lastSignature===sig) return {ok:true,skipped:true,reason:"duplicate_signature",statePath,eventsPath}; const event={eventType:"development_cycle.update",createdAt:new Date().toISOString(),project,runId,dir,phase:status?.phase||ev?.phase||"",classification:ev?.classification||null,alertCodes:ev?.alertCodes||[],recommendedAction:ev?.classification?.recommendedAction||status?.nextAction||"",evidencePaths:ev?.evidencePaths||[],signature:sig}; await appendJsonl(eventsPath,event); await saveJson(statePath,{lastSignature:sig,lastEvent:event,updatedAt:event.createdAt}); const text=dcMainText(project,runId,dir,status,ev); if (params.dryRunMainUpdate===true) return {ok:true,skipped:true,reason:"dry_run",event,statePath,eventsPath,text}; try { const r=await execFileAsync("openclaw",["system","event","--mode","now","--timeout",String(params.mainUpdateTimeoutMs||15000),"--text",text,"--json"],{timeout:Number(params.mainUpdateExecTimeoutMs||20000),maxBuffer:512*1024,env:{...process.env,HOME: runtimeHome}}); let parsed:any=null; try{parsed=JSON.parse(String(r.stdout||"{}"));}catch{} return {ok:true,event,statePath,eventsPath,systemEvent:parsed||{stdout:dcShort(r.stdout,2000),stderr:dcShort(r.stderr,2000)}}; } catch(e:any) { return {ok:false,event,statePath,eventsPath,error:String(e?.message||e),stdout:dcShort(e?.stdout||"",2000),stderr:dcShort(e?.stderr||"",2000)}; } }
 
 async function createImplementationRunnerSession(dir: string, params: any) {
-  const projectRoot = String(params.projectRoot || "");
+  const requestedProjectRoot = String(params.projectRoot || "");
+  const pinnedProjectRoot = await pinTrustedProjectRoot(requestedProjectRoot);
+  if (!pinnedProjectRoot) return { ok: false, error: "projectRoot_missing_or_not_trusted_git_checkout", projectRoot: requestedProjectRoot };
+  const projectRoot = pinnedProjectRoot.realPath;
+  const projectRootStat = await pinnedProjectRoot.handle.stat();
+  const projectRootIdentity = `${projectRootStat.dev}:${projectRootStat.ino}`;
+  await pinnedProjectRoot.handle.close().catch(() => null);
   const prompt = String(params.prompt || "");
   const command = String(params.command || "implement");
   const mode = String(params.kind || "delivery") === "corrections" ? "corrections" : "delivery";
@@ -186,11 +199,6 @@ async function createImplementationRunnerSession(dir: string, params: any) {
   const stdoutPath = join(logsDir, "stdout.log");
   const stderrPath = join(logsDir, "stderr.log");
 
-  const rootStat = await stat(projectRoot).catch(() => null);
-  if (!rootStat?.isDirectory()) {
-    return { ok: false, error: "projectRoot_missing_or_not_directory", projectRoot };
-  }
-
   await mkdir(logsDir, { recursive: true });
   await writeFile(promptPath, prompt);
   const request = {
@@ -199,6 +207,7 @@ async function createImplementationRunnerSession(dir: string, params: any) {
     runId: String(params.runId || ""),
     mode,
     projectRoot,
+    projectRootIdentity,
     promptPath,
     planPath: String(params.planPath || ""),
     validationPath: String(params.validationPath || ""),
@@ -289,7 +298,12 @@ trap 'exit 130' INT
 trap 'exit 129' HUP
 (while :; do printf '{"at":"%s","pid":%s,"observerSessionId":%s}\n' "$(date -Is)" "$$" ${jsonShellQuote(observerRootSessionId)} > "$HEARTBEAT_FILE"; sleep ${runnerHeartbeatIntervalSeconds}; done) &
 heartbeat_pid=$!
-cd ${shellQuote(projectRoot)}
+cd ${shellQuote(projectRoot)} || exit 72
+actual_project_root_identity=$(stat -Lc '%d:%i' . 2>/dev/null || true)
+if [ "$actual_project_root_identity" != ${shellQuote(projectRootIdentity)} ]; then
+  printf '%s\n' "projectRoot identity changed before execution" >&2
+  exit 72
+fi
 ${commandLine} > ${shellQuote(stdoutPath)} 2> ${shellQuote(stderrPath)}
 `;
   await writeFile(runnerPath, runnerScript, { mode: 0o755 } as any);
@@ -311,6 +325,7 @@ ${commandLine} > ${shellQuote(stdoutPath)} 2> ${shellQuote(stderrPath)}
     createdAt: now,
     updatedAt: now,
     projectRoot,
+    projectRootIdentity,
     executable: launchSpec.executable,
     runnerPath,
     requestPath,
@@ -328,6 +343,7 @@ ${commandLine} > ${shellQuote(stdoutPath)} 2> ${shellQuote(stderrPath)}
     mode,
     adapter: launchSpec.adapter,
     projectRoot,
+    projectRootIdentity,
     executable: launchSpec.executable,
     requestPath,
     promptPath,
@@ -559,8 +575,13 @@ async function projectWikiBrief(projectWikiPath: string) {
   const wanted = ["README.md", "status.md", "ROADMAP.md", "RUNS.md", "architecture.md", "runbook.md"];
   const parts: string[] = [];
   for (const name of wanted) {
-    const text = await readTextIfExists(join(projectWikiPath, name));
-    if (text.trim()) parts.push(`### ${name}\n\n${excerpt(text, 2500)}`);
+    let handle: any = null;
+    try {
+      handle = await open(join(projectWikiPath, name), fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+      const text = String(await handle.readFile({ encoding: "utf8" }));
+      if (text.trim()) parts.push(`### ${name}\n\n${excerpt(text, 2500)}`);
+    } catch {}
+    finally { await handle?.close().catch(() => null); }
   }
   return parts.length ? parts.join("\n\n") : "No standard project wiki files found.";
 }
@@ -570,17 +591,42 @@ async function packageScriptsBrief(projectRoot: string) {
   return Object.entries(pkg.scripts).map(([k, v]) => `- ${k}: ${v}`).join("\n");
 }
 async function writePlanningPack(dir: string, params: any) {
-  const projectRoot = params.projectRoot || "";
-  const projectWikiPath = params.projectWikiPath || "";
-  const rootStat = projectRoot ? await stat(projectRoot).catch(() => null) : null;
-  const wikiStat = projectWikiPath ? await stat(projectWikiPath).catch(() => null) : null;
-  const gitStatus = rootStat?.isDirectory() ? await execSummary("git", ["status", "--short", "--branch"], projectRoot) : "projectRoot missing or not supplied";
-  const gitRemote = rootStat?.isDirectory() ? redactRemoteCredentials(await execSummary("git", ["remote", "-v"], projectRoot)) : "projectRoot missing or not supplied";
-  const gitDiffStat = rootStat?.isDirectory() ? await execSummary("git", ["diff", "--stat"], projectRoot) : "projectRoot missing or not supplied";
-  const rootEntries = rootStat?.isDirectory() ? (await safeDirEntries(projectRoot)).join("\n") : "projectRoot missing or not supplied";
-  const wikiEntries = wikiStat?.isDirectory() ? (await safeDirEntries(projectWikiPath)).join("\n") : "projectWikiPath missing or not supplied";
-  const wikiBrief = wikiStat?.isDirectory() ? await projectWikiBrief(projectWikiPath) : "projectWikiPath missing or not supplied";
-  const packageScripts = rootStat?.isDirectory() ? await packageScriptsBrief(projectRoot) : "projectRoot missing or not supplied";
+  const rawProjectRoot = String(params.projectRoot || "").trim();
+  const pinnedProjectRoot = rawProjectRoot ? await pinTrustedProjectRoot(rawProjectRoot) : null;
+  const projectRoot = pinnedProjectRoot?.realPath || "";
+  // Resolve through symlinks so a wiki dir under projectsWikiRoot cannot redirect recon reads.
+  const trustedWiki = params.projectWikiPath
+    ? await resolveContainedWikiDir(String(params.project || "default"), String(params.projectWikiPath))
+    : "";
+  const pinnedWiki = trustedWiki ? await openPinnedContainedDir(trustedWiki, projectsWikiRoot, false) : null;
+  const rootStat = pinnedProjectRoot ? await pinnedProjectRoot.handle.stat().catch(() => null) : null;
+  let projectWikiPath = "";
+  let wikiStat: any = null;
+  let wikiEntries = "projectWikiPath missing or not supplied";
+  let wikiBrief = "projectWikiPath missing or not supplied";
+  if (pinnedWiki) {
+    try {
+      projectWikiPath = await realpath(pinnedWiki.procPath);
+      wikiStat = await pinnedWiki.handle.stat();
+      const readyFile = String(process.env.DEVELOPMENT_CYCLE_TEST_PINNED_READ_READY_FILE || "").trim();
+      if (readyFile) await writeFile(readyFile, "ready\n");
+      const delayMs = Number(process.env.DEVELOPMENT_CYCLE_TEST_PINNED_READ_DELAY_MS || 0);
+      if (Number.isFinite(delayMs) && delayMs > 0) await new Promise((resolveDelay) => setTimeout(resolveDelay, delayMs));
+      if (wikiStat?.isDirectory()) {
+        wikiEntries = (await safeDirEntries(pinnedWiki.procPath)).join("\n");
+        wikiBrief = await projectWikiBrief(pinnedWiki.procPath);
+      }
+    } finally {
+      await pinnedWiki.handle.close().catch(() => null);
+    }
+  }
+  const pinnedProjectPath = pinnedProjectRoot?.procPath || "";
+  const gitStatus = rootStat?.isDirectory() ? await execSummary("git", ["status", "--short", "--branch"], pinnedProjectPath) : "projectRoot missing or not supplied";
+  const gitRemote = rootStat?.isDirectory() ? redactRemoteCredentials(await execSummary("git", ["remote", "-v"], pinnedProjectPath)) : "projectRoot missing or not supplied";
+  const gitDiffStat = rootStat?.isDirectory() ? await execSummary("git", ["diff", "--stat"], pinnedProjectPath) : "projectRoot missing or not supplied";
+  const rootEntries = rootStat?.isDirectory() ? (await safeDirEntries(pinnedProjectPath)).join("\n") : "projectRoot missing or not supplied";
+  const packageScripts = rootStat?.isDirectory() ? await packageScriptsBrief(pinnedProjectPath) : "projectRoot missing or not supplied";
+  await pinnedProjectRoot?.handle.close().catch(() => null);
   const contextPack = join(dir, "context_pack.md");
   await writeFile(contextPack, `# Development cycle context pack\n\nProject: ${params.project}\nRun: ${params.runId}\nGenerated: ${new Date().toISOString()}\n\n## User direction\n\n${params.direction || "not supplied"}\n\n## Paths\n\n- projectWikiPath: ${projectWikiPath || "not supplied"}\n- projectWikiPath exists: ${Boolean(wikiStat?.isDirectory())}\n- projectRoot: ${projectRoot || "not supplied"}\n- projectRoot exists: ${Boolean(rootStat?.isDirectory())}\n- existingPlanPath: ${params.existingPlanPath || "not supplied"}\n\n## Project wiki directory\n\n${wikiEntries}\n\n## Project root directory\n\n${rootEntries}\n\n## Git status\n\n\`\`\`text\n${excerpt(gitStatus, 6000)}\n\`\`\`\n\n## Git remotes\n\n\`\`\`text\n${excerpt(gitRemote, 3000)}\n\`\`\`\n\n## Git diff stat\n\n\`\`\`text\n${excerpt(gitDiffStat, 3000)}\n\`\`\`\n\n## Package scripts / validation commands detected\n\n${packageScripts}\n\n## Project wiki brief\n\n${wikiBrief}\n`);
   const operatorConstraints = join(dir, "operator_constraints.md");
@@ -589,32 +635,320 @@ async function writePlanningPack(dir: string, params: any) {
   await writeFile(expectedPlanContract, `# Expected implementation plan contract\n\nThe plan returned by an external planner or human reviewer must be an implementation plan, not another planning request.\n\n## Required sections\n\n1. Objective and non-goals\n2. Project paths: projectWikiPath, projectRoot, planPath, affected paths, artifacts, protected/risky paths\n3. Current state summary from context_pack.md\n4. Ordered implementation tasks\n5. Observer / Implementation observation plan\n6. Validation checks and smoke tests\n7. Stop conditions and human-confirmation points\n8. Rollback or recovery notes\n9. Final acceptance criteria\n\nA plan without projectRoot, affected files, validation checks, stop conditions and expected artifacts is not ready for Implementation handoff.\n`);
   return { contextPack, operatorConstraints, expectedPlanContract };
 }
+
+/** Prefer caller-supplied wiki path only when it stays under projectsWikiRoot. */
+function resolveTrustedProjectWikiPath(project: string, ...candidates: Array<string | null | undefined>): string {
+  let fallback = resolve(join(projectsWikiRoot, cleanId(project || "default")));
+  // Dot-tokens (`.` / `..`) survive cleanId and would make the fallback the wiki root or its parent.
+  if (!pathWithin(projectsWikiRoot, fallback) || fallback === resolve(projectsWikiRoot)) {
+    fallback = resolve(join(projectsWikiRoot, "default"));
+  }
+  for (const c of candidates) {
+    if (!c) continue;
+    const abs = resolve(String(c));
+    if (pathWithin(projectsWikiRoot, abs)) return abs;
+  }
+  return fallback;
+}
+
 function pathWithin(root: string, candidate: string) {
   if (!root || !candidate) return false;
   const rel = relative(resolve(root), resolve(candidate)).replace(/\\/g, "/");
   return Boolean(rel) && rel !== ".." && !rel.startsWith("../") && !rel.startsWith("/");
 }
 
+/** True if candidate resolves inside any allowed root (or equals a root). */
+function pathWithinAny(roots: Array<string | null | undefined>, candidate: string) {
+  const c = resolve(String(candidate || ""));
+  for (const root of roots) {
+    if (!root) continue;
+    const r = resolve(String(root));
+    if (c === r || pathWithin(r, c)) return true;
+  }
+  return false;
+}
+
+export function isExactBroadProjectRoot(value: string): boolean {
+  const real = resolve(String(value || ""));
+  return ["/home", "/root", "/opt", "/srv"].map((p) => resolve(p)).includes(real);
+}
+
+async function openStableDirectory(pathValue: string) {
+  const abs = resolve(String(pathValue || ""));
+  let expectedReal = "";
+  let expected: any = null;
+  let handle: any = null;
+  try {
+    expectedReal = await realpath(abs);
+    expected = await stat(expectedReal);
+    if (!expected.isDirectory()) return null;
+    const readyFile = String(process.env.DEVELOPMENT_CYCLE_TEST_STABLE_ROOT_READY_FILE || "").trim();
+    if (readyFile) await writeFile(readyFile, "ready\n");
+    const delayMs = Number(process.env.DEVELOPMENT_CYCLE_TEST_STABLE_ROOT_DELAY_MS || 0);
+    if (Number.isFinite(delayMs) && delayMs > 0) await sleep(delayMs);
+    handle = await open(expectedReal, fsConstants.O_RDONLY | fsConstants.O_DIRECTORY | fsConstants.O_NOFOLLOW);
+    const opened = await handle.stat();
+    const openedReal = await realpath(`/proc/self/fd/${handle.fd}`);
+    if (opened.dev !== expected.dev || opened.ino !== expected.ino || openedReal !== expectedReal) {
+      await handle.close();
+      return null;
+    }
+    return { handle, realPath: openedReal, procPath: `/proc/self/fd/${handle.fd}` };
+  } catch {
+    await handle?.close().catch(() => null);
+    return null;
+  }
+}
+
+async function openOrCreateStableDirectory(pathValue: string) {
+  const abs = resolve(String(pathValue || ""));
+  const existing = await openStableDirectory(abs);
+  if (existing) return existing;
+  const parts = abs.split("/").filter(Boolean);
+  let current: any = null;
+  try {
+    current = await open("/", fsConstants.O_RDONLY | fsConstants.O_DIRECTORY | fsConstants.O_NOFOLLOW);
+    for (const segment of parts) {
+      const child = `/proc/self/fd/${current.fd}/${segment}`;
+      let next: any = null;
+      try {
+        next = await open(child, fsConstants.O_RDONLY | fsConstants.O_DIRECTORY | fsConstants.O_NOFOLLOW);
+      } catch (e: any) {
+        if (e?.code !== "ENOENT") throw e;
+        const readyFile = String(process.env.DEVELOPMENT_CYCLE_TEST_PINNED_CREATE_READY_FILE || "").trim();
+        if (readyFile) await writeFile(readyFile, "ready\n");
+        const delayMs = Number(process.env.DEVELOPMENT_CYCLE_TEST_PINNED_CREATE_DELAY_MS || 0);
+        if (Number.isFinite(delayMs) && delayMs > 0) await sleep(delayMs);
+        try {
+          await mkdir(child);
+        } catch (mkdirError: any) {
+          if (mkdirError?.code !== "EEXIST") throw mkdirError;
+        }
+        next = await open(child, fsConstants.O_RDONLY | fsConstants.O_DIRECTORY | fsConstants.O_NOFOLLOW);
+      }
+      await current.close();
+      current = next;
+    }
+    const realPath = await realpath(`/proc/self/fd/${current.fd}`);
+    return { handle: current, realPath, procPath: `/proc/self/fd/${current.fd}` };
+  } catch {
+    await current?.close().catch(() => null);
+    return null;
+  }
+}
+
+/** Pin an existing trusted Git checkout; else null. */
+async function pinTrustedProjectRoot(value: string) {
+  const raw = String(value || "").trim();
+  if (!raw) return null;
+  const pinned = await openStableDirectory(raw);
+  if (!pinned) return null;
+  let keep = false;
+  try {
+    const real = pinned.realPath;
+    if (real === resolve("/")) return null;
+    const blockedTrees = ["/etc", "/var", "/usr", "/bin", "/sbin", "/lib", "/lib64", "/proc", "/sys", "/dev", "/run", "/boot"];
+    for (const b of blockedTrees) {
+      const br = resolve(b);
+      if (real === br || real.startsWith(br + "/")) return null;
+    }
+    if (real === resolve("/tmp") || real === resolve("/var/tmp")) return null;
+    if (isExactBroadProjectRoot(real)) return null;
+    const gitMarker = await lstat(`${pinned.procPath}/.git`).catch(() => null);
+    if (!gitMarker || gitMarker.isSymbolicLink()) return null;
+    for (const owned of [cycleRoot, projectsWikiRoot, wikiRoot]) {
+      if (!owned) continue;
+      const ownedPinned = await openStableDirectory(String(owned));
+      if (!ownedPinned) continue;
+      try {
+        const rel = relative(real, ownedPinned.realPath).replace(/\\/g, "/");
+        if (rel === "" || (rel && rel !== ".." && !rel.startsWith("../") && !rel.startsWith("/"))) return null;
+      } finally {
+        await ownedPinned.handle.close().catch(() => null);
+      }
+    }
+    keep = true;
+    return pinned;
+  } finally {
+    if (!keep) await pinned.handle.close().catch(() => null);
+  }
+}
+
+
+async function readAllowedTextFile(pathValue: string, roots: Array<any>, errorCode: string) {
+  const raw = String(pathValue || "").trim();
+  if (!raw) return { ok: false as const, error: errorCode };
+  const abs = resolve(raw);
+  for (const rootValue of roots) {
+    if (!rootValue) continue;
+    const borrowed = typeof rootValue === "object" && rootValue.handle && rootValue.procPath;
+    const absRoot = resolve(String(borrowed ? (rootValue.lexicalPath || rootValue.realPath || rootValue.procPath) : rootValue));
+    let rootHandle: any = null;
+    let current: any = null;
+    try {
+      const pinnedRoot = borrowed ? rootValue : await openStableDirectory(absRoot);
+      if (!pinnedRoot) continue;
+      rootHandle = pinnedRoot.handle;
+      current = rootHandle;
+      const pinnedRealRoot = pinnedRoot.realPath || await realpath(pinnedRoot.procPath);
+      let rel = "";
+      if (pathWithin(absRoot, abs)) rel = relative(absRoot, abs).replace(/\\/g, "/");
+      else if (pathWithin(pinnedRealRoot, abs)) rel = relative(pinnedRealRoot, abs).replace(/\\/g, "/");
+      else continue;
+      if (!rel || rel === ".." || rel.startsWith("../") || rel.startsWith("/")) continue;
+
+      const parts = rel.split("/").filter(Boolean);
+      const readyFile = String(process.env.DEVELOPMENT_CYCLE_TEST_PINNED_ALLOWED_READ_READY_FILE || "").trim();
+      if (readyFile) await writeFile(readyFile, "ready\n");
+      const delayMs = Number(process.env.DEVELOPMENT_CYCLE_TEST_PINNED_ALLOWED_READ_DELAY_MS || 0);
+      if (Number.isFinite(delayMs) && delayMs > 0) await new Promise((resolveDelay) => setTimeout(resolveDelay, delayMs));
+
+      for (const segment of parts.slice(0, -1)) {
+        const next = await open(`/proc/self/fd/${current.fd}/${segment}`, fsConstants.O_RDONLY | fsConstants.O_DIRECTORY | fsConstants.O_NOFOLLOW);
+        if (current !== rootHandle) await current.close();
+        current = next;
+      }
+      const fileHandle = await open(`/proc/self/fd/${current.fd}/${parts.at(-1)}`, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+      try {
+        const realCandidate = await realpath(`/proc/self/fd/${fileHandle.fd}`);
+        const text = await fileHandle.readFile({ encoding: "utf8" });
+        return { ok: true as const, path: realCandidate, text: String(text) };
+      } finally {
+        await fileHandle.close().catch(() => null);
+      }
+    } catch {}
+    finally {
+      if (current && current !== rootHandle) await current.close().catch(() => null);
+      if (!borrowed) await rootHandle?.close().catch(() => null);
+    }
+  }
+  return { ok: false as const, error: errorCode, path: abs };
+}
+
+async function openPinnedContainedDir(target: string, root: string, create = false) {
+  const absRoot = resolve(root);
+  const absTarget = resolve(target);
+  const pinnedRoot = create ? await openOrCreateStableDirectory(absRoot) : await openStableDirectory(absRoot);
+  if (!pinnedRoot) return null;
+  const realRoot = pinnedRoot.realPath;
+  let targetRel = "";
+  if (absTarget === absRoot || pathWithin(absRoot, absTarget)) targetRel = relative(absRoot, absTarget).replace(/\\/g, "/");
+  else if (absTarget === realRoot || pathWithin(realRoot, absTarget)) targetRel = relative(realRoot, absTarget).replace(/\\/g, "/");
+  else {
+    await pinnedRoot.handle.close().catch(() => null);
+    return null;
+  }
+  let current: any = pinnedRoot.handle;
+  try {
+    for (const segment of targetRel.split("/").filter(Boolean)) {
+      const child = `/proc/self/fd/${current.fd}/${segment}`;
+      let next: any = null;
+      try {
+        next = await open(child, fsConstants.O_RDONLY | fsConstants.O_DIRECTORY | fsConstants.O_NOFOLLOW);
+      } catch (e: any) {
+        if (!create || e?.code !== "ENOENT") throw e;
+        try {
+          await mkdir(child);
+        } catch (mkdirError: any) {
+          if (mkdirError?.code !== "EEXIST") throw mkdirError;
+        }
+        next = await open(child, fsConstants.O_RDONLY | fsConstants.O_DIRECTORY | fsConstants.O_NOFOLLOW);
+      }
+      const realNext = await realpath(`/proc/self/fd/${next.fd}`);
+      const rel = relative(realRoot, realNext).replace(/\\/g, "/");
+      if (!(rel === "" || (rel && rel !== ".." && !rel.startsWith("../") && !rel.startsWith("/")))) {
+        await next.close();
+        await current.close();
+        current = null;
+        return null;
+      }
+      await current.close();
+      current = next;
+    }
+    return { handle: current, procPath: `/proc/self/fd/${current.fd}` };
+  } catch {
+    await current?.close().catch(() => null);
+    return null;
+  }
+}
+
+async function writePinnedFile(dir: string, root: string, name: string, content: string, replace = false) {
+  const pinned = await openPinnedContainedDir(dir, root, true);
+  if (!pinned) return "";
+  const { handle, procPath } = pinned;
+  const readyFile = String(process.env.DEVELOPMENT_CYCLE_TEST_PINNED_WRITE_READY_FILE || "").trim();
+  if (readyFile) await writeFile(readyFile, "ready\n");
+  const delayMs = Number(process.env.DEVELOPMENT_CYCLE_TEST_PINNED_WRITE_DELAY_MS || 0);
+  if (Number.isFinite(delayMs) && delayMs > 0) await sleep(delayMs);
+  const target = `${procPath}/${name}`;
+  const tmpName = `.${name}.${process.pid}.${Date.now().toString(16)}.tmp`;
+  const tmp = `${procPath}/${tmpName}`;
+  let file: any = null;
+  try {
+    const writePath = replace ? tmp : target;
+    file = await open(writePath, fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_NOFOLLOW, 0o600);
+    await file.writeFile(content, { encoding: "utf8" });
+    await file.close();
+    file = null;
+    if (replace) await rename(tmp, target);
+    const realDir = await realpath(procPath);
+    return join(realDir, name);
+  } catch {
+    await file?.close().catch(() => null);
+    if (replace) await rm(tmp, { force: true }).catch(() => null);
+    return "";
+  } finally {
+    await handle.close().catch(() => null);
+  }
+}
+
+async function pinContainedWikiDir(project: string, projectWikiPath: string) {
+  const raw = String(projectWikiPath || "").trim();
+  const target = raw ? resolve(raw) : resolveTrustedProjectWikiPath(project, "");
+  const pinned = await openPinnedContainedDir(target, projectsWikiRoot, true);
+  if (!pinned) return null;
+  try {
+    return { ...pinned, realPath: await realpath(pinned.procPath), lexicalPath: target };
+  } catch {
+    await pinned.handle.close().catch(() => null);
+    return null;
+  }
+}
+
+async function resolveContainedWikiDir(project: string, projectWikiPath: string): Promise<string> {
+  const pinned = await pinContainedWikiDir(project, projectWikiPath);
+  if (!pinned) return "";
+  try { return pinned.realPath; }
+  finally { await pinned.handle.close().catch(() => null); }
+}
+
 async function persistApprovedPlan(project: string, runId: string, projectWikiPath: string, planText: string) {
-  const normalized = resolve(String(projectWikiPath || ""));
-  if (!pathWithin(projectsWikiRoot, normalized)) return "";
+  const normalized = await resolveContainedWikiDir(project, projectWikiPath);
+  if (!normalized) return "";
   const plansDir = join(normalized, "plans");
-  await mkdir(plansDir, { recursive: true });
-  const path = join(plansDir, `${new Date().toISOString().slice(0, 10)}-${cleanId(runId)}-implementation-plan.md`);
-  await writeFile(path, String(planText).trim() + "\n");
-  return path;
+  const name = `${new Date().toISOString().slice(0, 10)}-${cleanId(runId)}-implementation-plan.md`;
+  return await writePinnedFile(plansDir, projectsWikiRoot, name, String(planText).trim() + "\n", true);
 }
 
-function wikiRelativePath(path: string) {
-  if (!wikiRoot || !pathWithin(wikiRoot, path)) return "";
-  return relative(resolve(wikiRoot), resolve(String(path))).replace(/\\/g, "/");
-}
-
-function allowedCanonicalPlanPath(path: string) {
-  if (!pathWithin(projectsWikiRoot, path)) return "";
-  const rel = wikiRelativePath(path);
-  if (!rel) return "";
-  return /(?:^|\/)plans\/[^/]+\.md$/.test(rel) ? rel : "";
+async function pinAllowedCanonicalPlan(path: string) {
+  const pinnedWiki = await openStableDirectory(wikiRoot);
+  if (!pinnedWiki) return null;
+  let pinnedProjects: any = null;
+  let keepWiki = false;
+  try {
+    pinnedProjects = await openStableDirectory(projectsWikiRoot);
+    if (!pinnedProjects) return null;
+    const realPlan = await realpath(path);
+    if (!pathWithin(pinnedProjects.realPath, realPlan) || !pathWithin(pinnedWiki.realPath, realPlan)) return null;
+    const rel = relative(pinnedWiki.realPath, realPlan).replace(/\\/g, "/");
+    if (!rel || rel === ".." || rel.startsWith("../") || rel.startsWith("/")) return null;
+    if (!/(?:^|\/)plans\/[^/]+\.md$/.test(rel)) return null;
+    keepWiki = true;
+    return { rel, wiki: pinnedWiki };
+  } finally {
+    await pinnedProjects?.handle.close().catch(() => null);
+    if (!keepWiki) await pinnedWiki.handle.close().catch(() => null);
+  }
 }
 
 async function execGit(args: string[], cwd = wikiRoot, timeout = 10000) {
@@ -761,37 +1095,49 @@ async function reconcileRepositoryDeliveryState(dir: string, status: any, params
 }
 
 async function autoCommitCanonicalPlan(project: string, runId: string, canonicalPlan: string) {
-  const rel = allowedCanonicalPlanPath(canonicalPlan);
-  if (!rel) return { ok: false, skipped: true, reason: "canonical_plan_path_not_allowlisted", canonicalPlan };
-  const fileStat = await stat(canonicalPlan).catch(() => null);
-  if (!fileStat?.isFile()) return { ok: false, skipped: true, reason: "canonical_plan_missing", canonicalPlan };
+  const pinned = await pinAllowedCanonicalPlan(canonicalPlan);
+  if (!pinned) return { ok: false, skipped: true, reason: "canonical_plan_path_not_allowlisted", canonicalPlan };
+  const { rel, wiki } = pinned;
+  try {
+    const fileHandle = await open(`${wiki.procPath}/${rel}`, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW).catch(() => null);
+    if (!fileHandle) return { ok: false, skipped: true, reason: "canonical_plan_missing", canonicalPlan };
+    try {
+      const st = await fileHandle.stat();
+      if (!st.isFile()) return { ok: false, skipped: true, reason: "canonical_plan_missing", canonicalPlan };
+    } finally {
+      await fileHandle.close().catch(() => null);
+    }
 
-  const stagedBefore = await execGit(["diff", "--cached", "--name-only"]);
-  if (!stagedBefore.ok) return { ok: false, skipped: true, reason: "git_staged_check_failed", detail: excerpt(`${stagedBefore.error || ""}\n${stagedBefore.stderr || ""}`, 2000) };
-  const staged = stagedBefore.stdout.split(/\r?\n/).map((x) => x.trim()).filter(Boolean);
-  const foreignStaged = staged.filter((x) => x !== rel);
-  if (foreignStaged.length) return { ok: false, skipped: true, reason: "foreign_staged_changes_present", staged: foreignStaged.slice(0, 20) };
+    const stagedBefore = await execGit(["diff", "--cached", "--name-only"], wiki.procPath);
+    if (!stagedBefore.ok) return { ok: false, skipped: true, reason: "git_staged_check_failed", detail: excerpt(`${stagedBefore.error || ""}\n${stagedBefore.stderr || ""}`, 2000) };
+    const staged = stagedBefore.stdout.split(/\r?\n/).map((x) => x.trim()).filter(Boolean);
+    const foreignStaged = staged.filter((x) => x !== rel);
+    if (foreignStaged.length) return { ok: false, skipped: true, reason: "foreign_staged_changes_present", staged: foreignStaged.slice(0, 20) };
 
-  const add = await execGit(["add", "--", rel]);
-  if (!add.ok) return { ok: false, skipped: true, reason: "git_add_failed", detail: excerpt(`${add.error || ""}\n${add.stderr || ""}`, 2000), canonicalPlan };
+    const add = await execGit(["add", "--", rel], wiki.procPath);
+    if (!add.ok) return { ok: false, skipped: true, reason: "git_add_failed", detail: excerpt(`${add.error || ""}\n${add.stderr || ""}`, 2000), canonicalPlan };
 
-  const status = await execGit(["status", "--short", "--", rel]);
-  if (!status.ok) return { ok: false, skipped: true, reason: "git_status_failed", detail: excerpt(`${status.error || ""}\n${status.stderr || ""}`, 2000), canonicalPlan };
-  if (!status.stdout.trim()) return { ok: true, skipped: true, reason: "no_plan_changes_to_commit", canonicalPlan, relativePath: rel };
+    const status = await execGit(["status", "--short", "--", rel], wiki.procPath);
+    if (!status.ok) return { ok: false, skipped: true, reason: "git_status_failed", detail: excerpt(`${status.error || ""}\n${status.stderr || ""}`, 2000), canonicalPlan };
+    if (!status.stdout.trim()) return { ok: true, skipped: true, reason: "no_plan_changes_to_commit", canonicalPlan, relativePath: rel };
 
-  const stagedAfter = await execGit(["diff", "--cached", "--name-only"]);
-  if (!stagedAfter.ok) return { ok: false, skipped: true, reason: "git_staged_after_check_failed", detail: excerpt(`${stagedAfter.error || ""}\n${stagedAfter.stderr || ""}`, 2000), canonicalPlan };
-  const stagedAfterFiles = stagedAfter.stdout.split(/\r?\n/).map((x) => x.trim()).filter(Boolean);
-  const unexpected = stagedAfterFiles.filter((x) => x !== rel);
-  if (unexpected.length) return { ok: false, skipped: true, reason: "unexpected_staged_changes_present", staged: unexpected.slice(0, 20), canonicalPlan };
+    const stagedAfter = await execGit(["diff", "--cached", "--name-only"], wiki.procPath);
+    if (!stagedAfter.ok) return { ok: false, skipped: true, reason: "git_staged_after_check_failed", detail: excerpt(`${stagedAfter.error || ""}\n${stagedAfter.stderr || ""}`, 2000), canonicalPlan };
+    const stagedAfterFiles = stagedAfter.stdout.split(/\r?\n/).map((x) => x.trim()).filter(Boolean);
+    const unexpected = stagedAfterFiles.filter((x) => x !== rel);
+    if (unexpected.length) return { ok: false, skipped: true, reason: "unexpected_staged_changes_present", staged: unexpected.slice(0, 20), canonicalPlan };
 
-  const message = `development-cycle: track approved plan for ${cleanId(project)} ${cleanId(runId)}`;
-  const commit = await execGit(["commit", "-m", message, "--", rel], wikiRoot, 20000);
-  if (!commit.ok) return { ok: false, skipped: true, reason: "git_commit_failed", detail: excerpt(`${commit.error || ""}\n${commit.stdout || ""}\n${commit.stderr || ""}`, 3000), canonicalPlan, relativePath: rel };
+    const message = `development-cycle: track approved plan for ${cleanId(project)} ${cleanId(runId)}`;
+    const commit = await execGit(["commit", "-m", message, "--", rel], wiki.procPath, 20000);
+    if (!commit.ok) return { ok: false, skipped: true, reason: "git_commit_failed", detail: excerpt(`${commit.error || ""}\n${commit.stdout || ""}\n${commit.stderr || ""}`, 3000), canonicalPlan, relativePath: rel };
 
-  const rev = await execGit(["rev-parse", "--short", "HEAD"]);
-  return { ok: true, skipped: false, commit: rev.ok ? rev.stdout.trim() : "", message, canonicalPlan, relativePath: rel };
+    const rev = await execGit(["rev-parse", "--short", "HEAD"], wiki.procPath);
+    return { ok: true, skipped: false, commit: rev.ok ? rev.stdout.trim() : "", message, canonicalPlan, relativePath: rel };
+  } finally {
+    await wiki.handle.close().catch(() => null);
+  }
 }
+
 async function collectObserverSessions(status: any) {
   if (!developmentCycleConfig.observer.enabled || !adapterSessionsRoot) return [];
   const roots = [status?.observerSessionId, status?.observerCorrectionsSessionId, status?.observerObservationId, status?.observerCorrectionsObservationId].filter(Boolean).map(String);
@@ -1068,16 +1414,60 @@ function mergeValidationConfig(base: any, extra: any) {
   };
 }
 
-async function loadProjectValidationConfig(project: string, status: any, params: any = {}) {
-  const projectWikiPath = String(params.projectWikiPath || status?.projectWikiPath || join(projectsWikiRoot, project));
-  const candidates = [params.validationConfigPath, join(projectWikiPath, "validation.json")].filter(Boolean).map(String);
+async function loadProjectValidationConfig(project: string, status: any, params: any = {}, borrowedProjectRoot: any = null) {
+  const lexicalProjectWikiPath = resolveTrustedProjectWikiPath(project, params.projectWikiPath, status?.projectWikiPath);
+  const pinnedProjectWiki = await pinContainedWikiDir(project, lexicalProjectWikiPath);
+  const projectWikiPath = pinnedProjectWiki?.realPath || "";
+  const ownsProjectRoot = !borrowedProjectRoot;
+  const pinnedProjectRoot = borrowedProjectRoot || await pinTrustedProjectRoot(String(params.projectRoot || status?.projectRoot || ""));
+  const projectRoot = pinnedProjectRoot?.realPath || "";
+  if (pinnedProjectRoot) {
+    const readyFile = String(process.env.DEVELOPMENT_CYCLE_TEST_PINNED_PROJECT_ROOT_READ_READY_FILE || "").trim();
+    if (readyFile) await writeFile(readyFile, "ready\n");
+    const delayMs = Number(process.env.DEVELOPMENT_CYCLE_TEST_PINNED_PROJECT_ROOT_READ_DELAY_MS || 0);
+    if (Number.isFinite(delayMs) && delayMs > 0) await sleep(delayMs);
+  }
+  const allowedRoots = [pinnedProjectWiki, projectsWikiRoot, wikiRoot, cycleRoot, pinnedProjectRoot];
   let config = defaultValidationConfig();
   let path = "default";
-  for (const candidate of candidates) {
-    const loaded = await readJsonIfExists(candidate);
-    if (loaded) { config = mergeValidationConfig(config, loaded); path = candidate; break; }
+
+  try {
+  if (params.validationConfigPath) {
+    const requested = resolve(String(params.validationConfigPath));
+    const loaded = await readAllowedTextFile(requested, allowedRoots, "validation_config_path_outside_allowed_roots");
+    if (!loaded.ok) {
+      return {
+        config,
+        path,
+        projectWikiPath,
+        rejectedValidationConfigPath: requested,
+        error: loaded.error,
+      };
+    }
+    try {
+      config = mergeValidationConfig(config, JSON.parse(loaded.text));
+      path = loaded.path;
+    } catch {
+      return { config, path, projectWikiPath, rejectedValidationConfigPath: requested, error: "validation_config_invalid_json" };
+    }
+    return { config, path, projectWikiPath };
+  }
+
+  if (projectWikiPath) {
+    const defaultCandidate = join(projectWikiPath, "validation.json");
+    const loaded = await readAllowedTextFile(defaultCandidate, [pinnedProjectWiki], "validation_config_path_unreadable");
+    if (loaded.ok) {
+      try {
+        config = mergeValidationConfig(config, JSON.parse(loaded.text));
+        path = loaded.path;
+      } catch {}
+    }
   }
   return { config, path, projectWikiPath };
+  } finally {
+    await pinnedProjectWiki?.handle.close().catch(() => null);
+    if (ownsProjectRoot) await pinnedProjectRoot?.handle.close().catch(() => null);
+  }
 }
 
 function validationRuleMatches(path: string, rules: any[]) {
@@ -1193,8 +1583,13 @@ async function existingForbiddenPathCheck(projectRoot: string, config: any) {
 async function runExternalFinalValidation(dir: string, status: any, params: any = {}, reason = "manual") {
   const project = cleanId(params.project || status?.project || "default");
   const runId = cleanId(params.runId || status?.runId || "run");
-  const projectRoot = String(params.projectRoot || status?.projectRoot || "");
-  const loaded = await loadProjectValidationConfig(project, status, params);
+  const requestedProjectRoot = String(params.projectRoot || status?.projectRoot || "");
+  const pinnedProjectRoot = await pinTrustedProjectRoot(requestedProjectRoot);
+  const projectRoot = pinnedProjectRoot?.realPath || requestedProjectRoot;
+  const validationRoot = pinnedProjectRoot?.procPath || "";
+  const loaded = pinnedProjectRoot
+    ? await loadProjectValidationConfig(project, status, params, pinnedProjectRoot)
+    : { config: defaultValidationConfig(), path: "default", rejectedValidationConfigPath: null, error: "project_root_not_trusted_git_checkout" };
   const config = loaded.config;
   await mkdir(dir, { recursive: true });
   const stdoutPath = join(dir, "validation_stdout.log");
@@ -1205,37 +1600,47 @@ async function runExternalFinalValidation(dir: string, status: any, params: any 
   const commandResults: any[] = [];
   let preservedDiff: any = null;
 
-  const rootStat = projectRoot ? await stat(projectRoot).catch(() => null) : null;
-  if (!rootStat?.isDirectory()) failures.push({ check: "projectRoot", severity: "stop", reason: "projectRoot missing or not a directory", projectRoot });
-  if (rootStat?.isDirectory() && config.preserveDiff !== false) preservedDiff = await preserveValidationDiff(dir, projectRoot, `validation-${reason}`);
+  try {
+  const rootStat = validationRoot ? await stat(validationRoot).catch(() => null) : null;
+  if (!rootStat?.isDirectory()) failures.push({ check: "projectRoot", severity: "stop", reason: "projectRoot must be an existing trusted Git checkout on a supported Linux host", projectRoot: requestedProjectRoot });
+  if (rootStat?.isDirectory()) {
+    const readyFile = String(process.env.DEVELOPMENT_CYCLE_TEST_VALIDATION_ROOT_READY_FILE || "").trim();
+    if (readyFile) await writeFile(readyFile, "ready\n");
+    const delayMs = Number(process.env.DEVELOPMENT_CYCLE_TEST_VALIDATION_ROOT_DELAY_MS || 0);
+    if (Number.isFinite(delayMs) && delayMs > 0) await sleep(delayMs);
+  }
+  if (rootStat?.isDirectory() && config.preserveDiff !== false) preservedDiff = await preserveValidationDiff(dir, validationRoot, `validation-${reason}`);
 
   if (rootStat?.isDirectory()) {
-    const validationCommands = await inferValidationCommands(projectRoot, config);
+    const validationCommands = await inferValidationCommands(validationRoot, config);
     config.resolvedCommands = validationCommands;
     for (const command of validationCommands) {
-      const result = await execValidationCommand(String(command), projectRoot, Number(config.commandTimeoutMs || 120000));
+      const result = await execValidationCommand(String(command), validationRoot, Number(config.commandTimeoutMs || 120000));
       commandResults.push({ ...result, stdout: excerpt(result.stdout || "", 20000), stderr: excerpt(result.stderr || "", 20000) });
       if (!result.ok) failures.push({ check: "command", command, severity: "revise", reason: result.error || `command exited ${result.exitCode}`, exitCode: result.exitCode, timedOut: result.timedOut || false });
     }
-    const dirty = await dirtyWorktreeCheck(projectRoot, config);
+    const dirty = await dirtyWorktreeCheck(validationRoot, config);
     failures.push(...dirty.failures);
-    failures.push(...await existingForbiddenPathCheck(projectRoot, config));
+    failures.push(...await existingForbiddenPathCheck(validationRoot, config));
     failures.push(...await portsFreeCheck(config.portsMustBeFree || []));
-    failures.push(...await requiredOpenApiPathCheck(projectRoot, config.requiredOpenApiPaths || []));
+    failures.push(...await requiredOpenApiPathCheck(validationRoot, config.requiredOpenApiPaths || []));
   }
 
   const stop = failures.some((f) => f.severity === "stop");
   const ok = failures.length === 0;
   const decision = ok ? "go" : stop ? "stop" : "revise";
-  const result = { ok, decision, reason, project, runId, generatedAt: new Date().toISOString(), projectRoot, validationConfigPath: loaded.path, config, preservedDiff, commandResults, failures };
+  const result = { ok, decision, reason, project, runId, generatedAt: new Date().toISOString(), projectRoot, validationConfigPath: loaded.path, rejectedValidationConfigPath: loaded.rejectedValidationConfigPath || null, error: loaded.error || null, config, preservedDiff, commandResults, failures };
   await saveJson(resultPath, result);
   await writeFile(stdoutPath, commandResults.map((r) => `# ${r.command}\n\n${r.stdout || ""}`).join("\n\n---\n\n"));
   await writeFile(stderrPath, commandResults.map((r) => `# ${r.command}\n\n${r.stderr || r.error || ""}`).join("\n\n---\n\n"));
-  await writeFile(summaryPath, `# Mechanical final validation\n\nProject: ${project}\nRun: ${runId}\nReason: ${reason}\nDecision: ${decision}\nOK: ${ok}\nGenerated: ${result.generatedAt}\nConfig: ${loaded.path}\n\n## Commands\n\n${commandResults.map((r) => `- ${r.ok ? "PASS" : "FAIL"}: ${r.command}${r.timedOut ? " (timed out)" : ""}`).join("\n") || "none"}\n\n## Failures\n\n${failures.length ? failures.map((f) => `- [${f.severity || "revise"}] ${f.check}: ${f.reason || f.path || f.command}`).join("\n") : "none"}\n\n## Preserved diff\n\n${preservedDiff ? `- worktree: ${preservedDiff.worktreePatch} (${preservedDiff.worktreeBytes} bytes)\n- index: ${preservedDiff.indexPatch} (${preservedDiff.indexBytes} bytes)` : "not preserved"}\n`);
+  await writeFile(summaryPath, `# Mechanical final validation\n\nProject: ${project}\nRun: ${runId}\nReason: ${reason}\nDecision: ${decision}\nOK: ${ok}\nGenerated: ${result.generatedAt}\nConfig: ${loaded.path}\nRejected config: ${loaded.rejectedValidationConfigPath || "none"}${loaded.error ? `\nConfig error: ${loaded.error}` : ""}\n\n## Commands\n\n${commandResults.map((r) => `- ${r.ok ? "PASS" : "FAIL"}: ${r.command}${r.timedOut ? " (timed out)" : ""}`).join("\n") || "none"}\n\n## Failures\n\n${failures.length ? failures.map((f) => `- [${f.severity || "revise"}] ${f.check}: ${f.reason || f.path || f.command}`).join("\n") : "none"}\n\n## Preserved diff\n\n${preservedDiff ? `- worktree: ${preservedDiff.worktreePatch} (${preservedDiff.worktreeBytes} bytes)\n- index: ${preservedDiff.indexPatch} (${preservedDiff.indexBytes} bytes)` : "not preserved"}\n`);
   const phase = ok ? "external_validation_passed" : decision === "stop" ? "external_validation_stopped" : "external_validation_needs_revision";
   const nextAction = ok ? "Mechanical validation passed; human/AI final review may record go or close when appropriate." : decision === "stop" ? "Stop and report the validation blocker to the operator." : "Mechanical validation needs revision; call start_corrections with the validation feedback to launch delta-only corrections.";
-  const next = await cycleStatus(dir, { phase, owner: "main", ok, externalValidationDecision: decision, externalValidation: resultPath, validationSummary: summaryPath, validationStdout: stdoutPath, validationStderr: stderrPath, validationConfigPath: loaded.path, nextAction });
-  return { ok, decision, project, runId, dir, phase: next.phase, validationResult: resultPath, validationSummary: summaryPath, validationStdout: stdoutPath, validationStderr: stderrPath, failures, commandResults: commandResults.map((r) => ({ command: r.command, ok: r.ok, exitCode: r.exitCode, timedOut: r.timedOut || false, durationMs: r.durationMs })), preservedDiff, status: next };
+  const next = await cycleStatus(dir, { phase, owner: "main", ok, externalValidationDecision: decision, externalValidation: resultPath, validationSummary: summaryPath, validationStdout: stdoutPath, validationStderr: stderrPath, validationConfigPath: loaded.path, rejectedValidationConfigPath: loaded.rejectedValidationConfigPath || null, validationConfigError: loaded.error || null, nextAction });
+  return { ok, decision, project, runId, dir, phase: next.phase, validationResult: resultPath, validationSummary: summaryPath, validationStdout: stdoutPath, validationStderr: stderrPath, failures, commandResults: commandResults.map((r) => ({ command: r.command, ok: r.ok, exitCode: r.exitCode, timedOut: r.timedOut || false, durationMs: r.durationMs })), preservedDiff, rejectedValidationConfigPath: loaded.rejectedValidationConfigPath || null, validationConfigError: loaded.error || null, status: next };
+  } finally {
+    await pinnedProjectRoot?.handle.close().catch(() => null);
+  }
 }
 async function latestRunActivityMtime(status: any) {
   const paths = [status?.implementationStdout, status?.implementationStderr, status?.correctionsStdout, status?.correctionsStderr, status?.directImplementationStdout, status?.directImplementationStderr].filter(Boolean).map(String);
@@ -1261,8 +1666,26 @@ async function maybeHandleStalledRun(dir: string, status: any, params: any = {})
   if (!activeRoots.length || !activeProviders.length) return null;
   const activity = await latestRunActivityMtime(status);
   if (!activity.latest) return null;
-  const quietMs = Date.now() - activity.latest;
-  if (quietMs < quietSeconds * 1000) return null;
+  const nowMs = Date.now();
+  const heartbeatIntervalSeconds = Number(
+    params.heartbeatIntervalSeconds || status?.heartbeatIntervalSeconds || runnerHeartbeatIntervalSeconds,
+  );
+  const next = nextStallQuietAccounting({
+    nowMs,
+    activityLatestMs: activity.latest,
+    stallQuietAccumMs: Number(status?.stallQuietAccumMs || 0),
+    stallLastCheckAt: Number(status?.stallLastCheckAt || 0),
+    stallLastActivityMtime: Number(status?.stallLastActivityMtime || 0),
+    quietThresholdMs: quietSeconds * 1000,
+    heartbeatIntervalMs: heartbeatIntervalSeconds * 1000,
+  });
+  await cycleStatus(dir, {
+    stallQuietAccumMs: next.stallQuietAccumMs,
+    stallLastCheckAt: next.stallLastCheckAt,
+    stallLastActivityMtime: next.stallLastActivityMtime,
+  });
+  if (!next.shouldStop) return null;
+  const quietMs = next.stallQuietAccumMs;
   const reason = `development_cycle stall detector: provider alive but runner artifacts quiet for ${Math.round(quietMs / 1000)}s (threshold ${quietSeconds}s).`;
   const stopped = await stopLaunchedImplementation(dir, status, reason);
   const validation = await runExternalFinalValidation(dir, stopped.status || status, { ...params, project }, "stalled_provider");
@@ -1381,11 +1804,6 @@ async function runCouncilCodeReview(dir: string, status: any, params: any = {}) 
 async function writeCouncilOnePager(dir: string, status: any, council: any, params: any = {}) {
   const project = cleanId(params.project || status?.project || "default");
   const runId = cleanId(params.runId || status?.runId || "run");
-  const projectWikiPath = String(params.projectWikiPath || status?.projectWikiPath || join(projectsWikiRoot, project));
-  const reportsDir = join(projectWikiPath, "reports");
-  await mkdir(reportsDir, { recursive: true });
-  const stamp = new Date().toISOString().slice(0, 19).replace(/[-:T]/g, "");
-  const out = join(reportsDir, `${stamp}-${runId}-code-review-one-pager.md`);
   const projectRoot = String(status?.projectRoot || params.projectRoot || "");
   const gitStat = projectRoot ? await execSummary("git", ["diff", "--stat"], projectRoot, 15000) : "projectRoot not supplied";
   const gitNames = projectRoot ? await execSummary("git", ["diff", "--name-only"], projectRoot, 15000) : "projectRoot not supplied";
@@ -1395,7 +1813,33 @@ async function writeCouncilOnePager(dir: string, status: any, council: any, para
   const decision = council?.needsCorrections ? "Corrections required before ship" : council?.ok ? "Council validated" : "Council review failed or inconclusive";
   const nextSteps = council?.needsCorrections ? "Implementation corrections were/will be launched automatically from the council feedback. Re-run mechanical validation and council review after corrections." : "Ready for human deploy/commit decision after checking the worktree and excluding local runtime artifacts.";
   const content = `# ${project} — code review one-pager\n\nRun: ${runId}\nGenerated: ${new Date().toISOString()}\nDecision: **${decision}**\n\n## What the work was\n\nImplement the approved development-cycle plan for ${project}. The council reviewed the resulting code diff, not the planning document.\n\n## What changed\n\n\`\`\`text\n${excerpt(gitStat, 3000)}\n\`\`\`\n\nChanged files:\n\n\`\`\`text\n${excerpt(gitNames, 2000)}\n\`\`\`\n\n## Mechanical validation\n\n${excerpt(validation, 2500)}\n\n## Council verdict\n\n${excerpt(synthesis, 4500)}\n\n## Key findings\n\n${findings.length ? findings.map((f: string) => `- ${f}`).join("\n") : "- No key findings extracted."}\n\n## Next steps\n\n${nextSteps}\n\n## Artifacts\n\n- Council summary: ${council?.summaryPath || status?.councilReviewSummary || "not available"}\n- Council synthesis: ${council?.synthesisPath || status?.councilReviewSynthesis || "not available"}\n- Mechanical validation: ${status?.externalValidation || "not available"}\n- Run directory: ${dir}\n`;
-  await writeFile(out, content);
+  const projectWikiPath = await resolveContainedWikiDir(project, String(params.projectWikiPath || status?.projectWikiPath || ""));
+  if (!projectWikiPath) {
+    // Fall back to cycle dir when wiki path escapes or is missing.
+    const reportsDir = join(dir, "reports");
+    await mkdir(reportsDir, { recursive: true });
+    const stamp = new Date().toISOString().slice(0, 19).replace(/[-:T]/g, "");
+    const out = join(reportsDir, `${stamp}-${runId}-code-review-one-pager.md`);
+    const fallbackContent = `${content}(wiki path untrusted; wrote under cycle dir)\n`;
+    await writeFile(out, fallbackContent);
+    const next = await cycleStatus(dir, { councilOnePagerWikiPath: out, councilOnePagerGeneratedAt: new Date().toISOString() });
+    return { path: out, content: fallbackContent, status: next };
+  }
+  const reportsDir = join(projectWikiPath, "reports");
+  const stamp = new Date().toISOString().slice(0, 19).replace(/[-:T]/g, "");
+  const name = `${stamp}-${runId}-code-review-one-pager.md`;
+  const out = await writePinnedFile(reportsDir, projectsWikiRoot, name, content, false);
+  if (!out) {
+    const fallbackDir = join(dir, "reports");
+    await mkdir(fallbackDir, { recursive: true });
+    const stamp2 = new Date().toISOString().slice(0, 19).replace(/[-:T]/g, "");
+    const out2 = join(fallbackDir, `${stamp2}-${runId}-code-review-one-pager.md`);
+    const fallbackContent = `${content}(wiki report path unsafe; wrote under cycle dir)\n`;
+    await writeFile(out2, fallbackContent);
+    const next2 = await cycleStatus(dir, { councilOnePagerWikiPath: out2, councilOnePagerGeneratedAt: new Date().toISOString() });
+    return { path: out2, content: fallbackContent, status: next2 };
+  }
+
   const next = await cycleStatus(dir, { councilOnePagerWikiPath: out, councilOnePagerGeneratedAt: new Date().toISOString() });
   return { path: out, content, status: next };
 }
@@ -1433,7 +1877,7 @@ async function launchCouncilCorrections(dir: string, status: any, council: any, 
   const project = cleanId(params.project || status?.project || "default");
   const runId = cleanId(params.runId || status?.runId || "run");
   const projectRoot = String(params.projectRoot || status?.projectRoot || "");
-  const projectWikiPath = String(params.projectWikiPath || status?.projectWikiPath || join(projectsWikiRoot, project));
+  const projectWikiPath = resolveTrustedProjectWikiPath(project, params.projectWikiPath, status?.projectWikiPath);
   const count = Number(status?.councilCorrectionCount || 0);
   const max = Number(params.autoCouncilCorrectionsMax || 2);
   if (!projectRoot) return { ok: false, error: "projectRoot_required" };
@@ -1579,15 +2023,31 @@ async function latestRunId(project: string) {
   } catch { return ""; }
 }
 
+const LIVE_RUN_PHASES = ["implementation_launched", "implementation_running", "corrections_launched", "corrections_running"];
+
+// Returns the current live phase when the run has an active runner, else "".
+function liveRunPhase(phase: any): string {
+  const p = String(phase || "");
+  return LIVE_RUN_PHASES.includes(p) ? p : "";
+}
+
 async function projectCycle(params: any) {
+  // Defense-in-depth: host SDKs validate arguments before execute, but direct
+  // or future invocations with null/undefined must behave like {} (the plugin
+  // already defaults every field at runtime), not throw an unhandled trace.
+  params ??= {};
   const supported = [...ACTIONS];
   const action = params.action || "status";
   if (!supported.includes(action)) return { ok: false, error: "unknown_action", action, supported };
 
   const project = cleanId(params.project || "default");
   const createRun = action === "request_plan" || action === "record_plan";
-  const runId = cleanId(params.runId || (createRun ? newRunId(project) : await latestRunId(project)));
-  if (!runId) return { ok: true, project, runId: null, dir: null, status: null, files: [], nextAction: "request_plan or record_plan" };
+  // cleanId("") falls back to "run", which would turn a "no run exists yet"
+  // latestRunId result into a phantom run directory. Check the raw value for
+  // the documented no-run response BEFORE normalizing it into a run id.
+  const requestedRunId = params.runId || (createRun ? newRunId(project) : await latestRunId(project));
+  if (!requestedRunId) return { ok: true, project, runId: null, dir: null, status: null, files: [], nextAction: "request_plan or record_plan" };
+  const runId = cleanId(requestedRunId);
   const dir = cycleDir(project, runId);
   const status = await loadJson(join(dir, "status.json"));
 
@@ -1660,9 +2120,18 @@ async function projectCycle(params: any) {
   await mkdir(dir, { recursive: true });
 
   if (action === "request_plan") {
+    // request_plan is always-allowed (it is the cycle restart escape hatch),
+    // but it must not hijack a LIVE run: advancing the phase here would
+    // orphan the running runner (reconcile only observes implementation_*/
+    // corrections_* phases) and stop_implementation is blocked from the
+    // planning phases. Require an explicit stop first.
+    const livePhase = liveRunPhase(status?.phase);
+    if (livePhase) {
+      return { ok: false, error: "active_run_present", project, runId, dir, phase: livePhase, hint: "Call stop_implementation first, then request a new plan." };
+    }
     const direction = String(params.direction || params.objective || "Create or validate the implementation plan for this development cycle.");
     const projectRoot = String(params.projectRoot || status.projectRoot || "");
-    const projectWikiPath = String(params.projectWikiPath || status.projectWikiPath || join(projectsWikiRoot, project));
+    const projectWikiPath = resolveTrustedProjectWikiPath(project, params.projectWikiPath, status.projectWikiPath);
     const existingPlanPath = String(params.planPath || "");
     const planningPack = await writePlanningPack(dir, { project, runId, projectRoot, projectWikiPath, direction, existingPlanPath });
     const text = `# Development plan request for external gate
@@ -1710,13 +2179,36 @@ Create or validate the implementation plan only. Do not implement. The plan must
 `;
     const file = join(dir, "plan_request.md");
     await writeFile(file, text);
+    // TOCTOU: `status` above was read before any of the writes in this
+    // handler; a concurrent start_implementation may have recorded its launch
+    // since. Re-read the freshest status and re-apply the live-run guard
+    // immediately before the phase transition that would orphan the runner.
+    const freshPhase = liveRunPhase((await loadJson(join(dir, "status.json")))?.phase);
+    if (freshPhase) {
+      return { ok: false, error: "active_run_present", project, runId, dir, phase: freshPhase, hint: "Call stop_implementation first, then request a new plan." };
+    }
     const next = await cycleStatus(dir, { phase: "waiting_external_plan", owner: "external_gate_or_human", nextAction: "Send plan_request.md plus planning pack to an external gate or human reviewer, then call record_plan with planText or planPath.", project, runId, projectRoot, projectWikiPath, direction, planRequest: file, planningPack });
     const notice = await sendCycleNotice(params, runId, `Development plan needed: ${project}`, `Development plan request ready for an external gate or human reviewer validation: ${file}`);
+    // A failing notice must not be silently dropped: persist the error into
+    // status so later status reads show the gate was never notified.
+    if (!notice.ok) await cycleStatus(dir, { externalGateNotice: { ...notice, sentAt: new Date().toISOString() } });
     return { ok: true, project, runId, dir, phase: next.phase, planRequest: file, notice };
   }
 
   if (action === "record_plan") {
-    const planText = params.planText || (params.planPath ? await readFile(String(params.planPath), "utf8") : "");
+    let planText = params.planText || "";
+    if (!String(planText).trim() && params.planPath) {
+      const pinnedProjectRootEarly = await pinTrustedProjectRoot(String(params.projectRoot || status.projectRoot || ""));
+      const pinnedProjectWikiEarly = await pinContainedWikiDir(project, String(params.projectWikiPath || "") || String(status.projectWikiPath || ""));
+      try {
+        const loaded = await readAllowedTextFile(String(params.planPath), [pinnedProjectWikiEarly, dir, cycleRoot, projectsWikiRoot, wikiRoot, pinnedProjectRootEarly], "plan_path_outside_allowed_roots");
+        if (!loaded.ok) return { ok: false, error: loaded.error, project, runId, dir, path: (loaded as any).path };
+        planText = loaded.text;
+      } finally {
+        await pinnedProjectWikiEarly?.handle.close().catch(() => null);
+        await pinnedProjectRootEarly?.handle.close().catch(() => null);
+      }
+    }
     if (!String(planText).trim()) return { ok: false, error: "planText_or_planPath_required", project, runId, dir };
     if (!params.force && looksLikePlanRequest(String(planText))) {
       return { ok: false, error: "plan_request_not_implementation_plan", project, runId, dir, nextAction: "Ask an external gate or human reviewer to write the actual implementation plan, then call record_plan with that plan. Use force only after explicit human confirmation." };
@@ -1725,7 +2217,7 @@ Create or validate the implementation plan only. Do not implement. The plan must
       return { ok: false, error: "implementation_plan_not_validated", project, runId, dir, nextAction: "Provide a concrete implementation plan with a Project paths section including projectWikiPath, projectRoot, relevant code paths/affected files, validation checks, stop conditions, and expected artifacts; or set force=true after explicit human confirmation." };
     }
     const projectRoot = String(params.projectRoot || status.projectRoot || "");
-    const projectWikiPath = String(params.projectWikiPath || status.projectWikiPath || join(projectsWikiRoot, project));
+    const projectWikiPath = resolveTrustedProjectWikiPath(project, params.projectWikiPath, status.projectWikiPath);
     const file = join(dir, "implementation_plan.md");
     await writeFile(file, String(planText));
     const canonicalPlan = await persistApprovedPlan(project, runId, projectWikiPath, String(planText));
@@ -1735,27 +2227,66 @@ Create or validate the implementation plan only. Do not implement. The plan must
   }
 
   if (action === "start_implementation") {
-    const projectRoot = String(params.projectRoot || status.projectRoot || "");
-    const projectWikiPath = String(params.projectWikiPath || status.projectWikiPath || join(projectsWikiRoot, project));
-    if (!projectRoot) return { ok: false, error: "projectRoot_required", project, runId, dir, wikiRoot, projectWikiPath, hint: "projectRoot must be the real code checkout; projectWikiPath is only docs/state." };
-    const rootStat = await stat(projectRoot).catch(() => null);
-    if (!rootStat?.isDirectory()) return { ok: false, error: "projectRoot_missing_or_not_directory", project, runId, dir, projectRoot, wikiRoot, projectWikiPath, hint: "Pass the configured project documentation directory separately from the real code checkout." };
-    const plan = params.planText || (params.planPath ? await readFile(String(params.planPath), "utf8") : await readTextIfExists(join(dir, "implementation_plan.md")));
-    if (!String(plan).trim()) return { ok: false, error: "missing_implementation_plan", project, runId, dir, expected: join(dir, "implementation_plan.md") };
+    const requestedProjectRoot = String(params.projectRoot || status.projectRoot || "");
+    const projectWikiPath = resolveTrustedProjectWikiPath(project, params.projectWikiPath, status.projectWikiPath);
+    const pinnedProjectWiki = await pinContainedWikiDir(project, projectWikiPath);
+    const containedProjectWikiPath = pinnedProjectWiki?.realPath || "";
+    if (pinnedProjectWiki) {
+      const readyFile = String(process.env.DEVELOPMENT_CYCLE_TEST_PINNED_WIKI_HANDOFF_READY_FILE || "").trim();
+      if (readyFile) await writeFile(readyFile, "ready\n");
+      const delayMs = Number(process.env.DEVELOPMENT_CYCLE_TEST_PINNED_WIKI_HANDOFF_DELAY_MS || 0);
+      if (Number.isFinite(delayMs) && delayMs > 0) await sleep(delayMs);
+    }
+    if (!requestedProjectRoot) return { ok: false, error: "projectRoot_required", project, runId, dir, wikiRoot, projectWikiPath: containedProjectWikiPath || projectWikiPath, hint: "projectRoot must be the real code checkout; projectWikiPath is only docs/state." };
+    const pinnedProjectRoot = await pinTrustedProjectRoot(requestedProjectRoot);
+    const projectRoot = pinnedProjectRoot?.realPath || "";
+    if (!projectRoot) return { ok: false, error: "projectRoot_missing_or_not_trusted_git_checkout", project, runId, dir, projectRoot: requestedProjectRoot, wikiRoot, projectWikiPath: containedProjectWikiPath || projectWikiPath, hint: "Pass an existing Git checkout, not a broad/system/docs root." };
+    let plan = params.planText || "";
+    let containedPlanPath = "";
+    const requestedPlanPath = String(params.planPath || status.plan || "").trim();
+    if (requestedPlanPath) {
+      const loaded = await readAllowedTextFile(requestedPlanPath, [pinnedProjectWiki, dir, cycleRoot, projectsWikiRoot, wikiRoot, pinnedProjectRoot], "plan_path_outside_allowed_roots");
+      if (!loaded.ok) {
+        await pinnedProjectWiki?.handle.close().catch(() => null);
+        await pinnedProjectRoot?.handle.close().catch(() => null);
+        return { ok: false, error: loaded.error, project, runId, dir, path: (loaded as any).path };
+      }
+      containedPlanPath = loaded.path;
+      if (!String(plan).trim()) plan = loaded.text;
+    }
+    if (!containedProjectWikiPath) {
+      await pinnedProjectWiki?.handle.close().catch(() => null);
+      await pinnedProjectRoot?.handle.close().catch(() => null);
+      return { ok: false, error: "project_wiki_path_outside_allowed_root", project, runId, dir, projectWikiPath };
+    }
+    if (!String(plan).trim()) {
+      const fallback = await readAllowedTextFile(join(dir, "implementation_plan.md"), [dir], "plan_path_outside_allowed_roots");
+      if (fallback.ok) {
+        containedPlanPath = fallback.path;
+        plan = fallback.text;
+      }
+    }
+    if (!String(plan).trim()) {
+      await pinnedProjectWiki?.handle.close().catch(() => null);
+      await pinnedProjectRoot?.handle.close().catch(() => null);
+      return { ok: false, error: "missing_implementation_plan", project, runId, dir, expected: join(dir, "implementation_plan.md") };
+    }
+    await pinnedProjectWiki?.handle.close().catch(() => null);
+    await pinnedProjectRoot?.handle.close().catch(() => null);
     const adapter = String(params.implementationAdapter || status.implementationAdapter || implementationConfig.adapter);
     const command = String(params.implementationCommand || (adapter === "octopus" ? "tangle" : "implement"));
     if (adapter === "octopus" && command !== "tangle") return { ok: false, error: "unsupported_octopus_command", supported: ["tangle"] };
-    const prompt = `Run the approved development plan. Stay within the agreed scope. Stop and report before risky, destructive, or protected changes that need human approval.\n\nPROJECT_DOCUMENTATION_PATH:\n${projectWikiPath}\n\nPROJECT_ROOT_CODE_CHECKOUT:\n${projectRoot}\n\nIMPLEMENTATION_ADAPTER:\n${adapter}\n\nAPPROVED_PLAN:\n${plan}`;
+    const prompt = `Run the approved development plan. Stay within the agreed scope. Stop and report before risky, destructive, or protected changes that need human approval.\n\nPROJECT_DOCUMENTATION_PATH:\n${containedProjectWikiPath}\n\nPROJECT_ROOT_CODE_CHECKOUT:\n${projectRoot}\n\nIMPLEMENTATION_ADAPTER:\n${adapter}\n\nAPPROVED_PLAN:\n${plan}`;
     const handoffRequest = join(dir, "implementation_request.md");
     const stdoutPath = join(dir, "implementation_delivery_stdout.txt");
     const stderrPath = join(dir, "implementation_delivery_stderr.txt");
     await writeFile(handoffRequest, prompt);
-    const observerObservationId = await createImplementationObserverSession(dir, { project, runId, command, projectRoot, projectWikiPath, stdoutPath, stderrPath, status: "running", summary: `development_cycle ${command} ${project}`, message: "Development-cycle implementation run queued." });
+    const observerObservationId = await createImplementationObserverSession(dir, { project, runId, command, projectRoot, projectWikiPath: containedProjectWikiPath, stdoutPath, stderrPath, status: "running", summary: `development_cycle ${command} ${project}`, message: "Development-cycle implementation run queued." });
     if (developmentCycleConfig.observer.enabled && !observerObservationId) {
-      const next = await cycleStatus(dir, { phase: "implementation_failed", owner: "main", ok: false, error: "observer_root_session_creation_failed", projectRoot, projectWikiPath, implementationCommand: command, implementationHandoffRequest: handoffRequest });
+      const next = await cycleStatus(dir, { phase: "implementation_failed", owner: "main", ok: false, error: "observer_root_session_creation_failed", projectRoot, projectWikiPath: containedProjectWikiPath, implementationCommand: command, implementationHandoffRequest: handoffRequest });
       return { ok: false, project, runId, dir, phase: next.phase, error: next.error };
     }
-    const launch = await createImplementationRunnerSession(dir, { project, runId, projectRoot, command, prompt, kind: "delivery", implementationAdapter: adapter, planPath: String(params.planPath || status.plan || join(dir, "implementation_plan.md")), timeoutSeconds: Number(params.timeoutSeconds ?? params.timeout_ms ?? 0), observerObservationId, purpose: `development_cycle ${command} ${project}` });
+    const launch = await createImplementationRunnerSession(dir, { project, runId, projectRoot, command, prompt, kind: "delivery", implementationAdapter: adapter, planPath: containedPlanPath, timeoutSeconds: Number(params.timeoutSeconds ?? params.timeout_ms ?? 0), observerObservationId, purpose: `development_cycle ${command} ${project}` });
     if (!launch.ok) {
       // Supervisor-startup failure: the session is already marked
       // launchState:"failed" (no phantom running state), and the run stays in
@@ -1764,19 +2295,38 @@ Create or validate the implementation plan only. Do not implement. The plan must
       if (String(launch.error || "").startsWith("runner_supervisor_start_failed")) {
         return { ok: false, project, runId, dir, error: launch.error, observerObservationId };
       }
-      const next = await cycleStatus(dir, { phase: "implementation_failed", owner: "main", ok: false, nextAction: "Fix direct runner launch blocker, then launch a new clean handoff.", error: launch.error || "direct_runner_launch_failed", projectRoot, projectWikiPath, implementationCommand: command, codexSandbox: defaultCodexSandbox, observerObservationId, implementationHandoffRequest: handoffRequest });
+      const next = await cycleStatus(dir, { phase: "implementation_failed", owner: "main", ok: false, nextAction: "Fix direct runner launch blocker, then launch a new clean handoff.", error: launch.error || "direct_runner_launch_failed", projectRoot, projectWikiPath: containedProjectWikiPath, implementationCommand: command, codexSandbox: defaultCodexSandbox, observerObservationId, implementationHandoffRequest: handoffRequest });
       return { ok: false, project, runId, dir, phase: next.phase, error: next.error, observerObservationId };
     }
-    await updateImplementationObserverSession(dir, observerObservationId, { project, runId, command, projectRoot, projectWikiPath, stdoutPath: launch.stdoutPath, stderrPath: launch.stderrPath, status: "running", summary: `development_cycle ${command} ${project} running`, message: "Implementation runner launched; observer integration is optional." });
+    await updateImplementationObserverSession(dir, observerObservationId, { project, runId, command, projectRoot, projectWikiPath: containedProjectWikiPath, stdoutPath: launch.stdoutPath, stderrPath: launch.stderrPath, status: "running", summary: `development_cycle ${command} ${project} running`, message: "Implementation runner launched; observer integration is optional." });
     const launchRecord = join(dir, "implementation_launch.json");
     await writeFile(launchRecord, JSON.stringify(launch, null, 2) + "\n");
-    const next = await cycleStatus(dir, { phase: "implementation_launched", owner: "implementation", nextAction: "Use development_cycle status to watch the supervised implementation runner.", projectRoot, projectWikiPath, implementationAdapter: launch.adapter, implementationCommand: command, codexSandbox: defaultCodexSandbox, implementationSessionId: launch.sessionId, directImplementationStatus: launch.statusPath, directImplementationStdout: launch.stdoutPath, directImplementationStderr: launch.stderrPath, observerObservationId, implementationHandoffRequest: handoffRequest, implementationLaunch: launchRecord, implementationStdout: launch.stdoutPath, implementationStderr: launch.stderrPath });
+    const next = await cycleStatus(dir, { phase: "implementation_launched", owner: "implementation", nextAction: "Use development_cycle status to watch the supervised implementation runner.", projectRoot, projectWikiPath: containedProjectWikiPath, implementationAdapter: launch.adapter, implementationCommand: command, codexSandbox: defaultCodexSandbox, implementationSessionId: launch.sessionId, directImplementationStatus: launch.statusPath, directImplementationStdout: launch.stdoutPath, directImplementationStderr: launch.stderrPath, observerObservationId, implementationHandoffRequest: handoffRequest, implementationLaunch: launchRecord, implementationStdout: launch.stdoutPath, implementationStderr: launch.stderrPath });
     return { ok: true, project, runId, dir, phase: next.phase, implementationAdapter: launch.adapter, implementationSessionId: launch.sessionId, observerObservationId, launchState: launch.status?.launchState || null, directImplementationStatus: launch.statusPath };
 
   }
 
   if (action === "record_delivery") {
-    const deliveryText = params.deliveryText || (params.deliveryPath ? await readFile(String(params.deliveryPath), "utf8") : "");
+    let deliveryText = params.deliveryText || "";
+    if (!String(deliveryText).trim() && params.deliveryPath) {
+      const wikiRootA = await pinContainedWikiDir(project, String(status?.projectWikiPath || ""));
+      const wikiRootB = await pinContainedWikiDir(project, String(params.projectWikiPath || ""));
+      const projectRootA = await pinTrustedProjectRoot(String(status?.projectRoot || ""));
+      const projectRootB = await pinTrustedProjectRoot(String(params.projectRoot || ""));
+      const loaded = await readAllowedTextFile(String(params.deliveryPath), [wikiRootA, wikiRootB, dir, cycleRoot, projectsWikiRoot, wikiRoot, projectRootA, projectRootB], "delivery_path_outside_allowed_roots");
+      if (!loaded.ok) {
+        await wikiRootA?.handle.close().catch(() => null);
+        await wikiRootB?.handle.close().catch(() => null);
+        await projectRootA?.handle.close().catch(() => null);
+        await projectRootB?.handle.close().catch(() => null);
+        return { ok: false, error: loaded.error, project, runId, dir, path: (loaded as any).path };
+      }
+      deliveryText = loaded.text;
+      await wikiRootA?.handle.close().catch(() => null);
+      await wikiRootB?.handle.close().catch(() => null);
+      await projectRootA?.handle.close().catch(() => null);
+      await projectRootB?.handle.close().catch(() => null);
+    }
     if (!String(deliveryText).trim()) return { ok: false, error: "deliveryText_or_deliveryPath_required", project, runId, dir };
     const file = join(dir, "implementation_delivery.md");
     await writeFile(file, String(deliveryText));
@@ -1796,11 +2346,34 @@ Create or validate the implementation plan only. Do not implement. The plan must
     await writeFile(file, `# Final validation request for external gate\n\nProject: ${project}\nRun: ${runId}\n\nReview the approved plan, delivery summary, test evidence, Observer sessions and risk checklist. Return exactly one decision as the first token: go | revise | stop.\n\nGO only if the plan was fulfilled, evidence is adequate, no protected/risky paths were changed without explicit authorization, worktree state is understood, and required docs/runbooks/state were updated. If revise, include direct delta-only correction instructions for Implementation. If stop, explain the blocker for the operator.\n\nValidation pack files:\n- deliverySummary: ${validationPack.deliverySummary}\n- artifactManifest: ${validationPack.artifactManifest}\n- observerSessions: ${validationPack.observerSessions}\n- testEvidence: ${validationPack.testEvidence}\n- riskChecklist: ${validationPack.riskChecklist}\n\n${parts.join("\n\n---\n\n")}\n`);
     const next = await cycleStatus(dir, { phase: "waiting_final_validation", owner: "external_gate_or_human", nextAction: "Send final_validation_request.md plus validation pack to an external gate or human reviewer, then call record_final_validation.", finalValidationRequest: file, validationPack });
     const notice = await sendCycleNotice(params, runId, `Final validation needed: ${project}`, `Final validation request ready for an external gate or human reviewer: ${file}`);
+    // A failing notice must not be silently dropped: persist the error into
+    // status so later status reads show the gate was never notified.
+    if (!notice.ok) await cycleStatus(dir, { externalGateNotice: { ...notice, sentAt: new Date().toISOString() } });
     return { ok: true, project, runId, dir, phase: next.phase, finalValidationRequest: file, validationPack, notice };
   }
 
   if (action === "record_final_validation") {
-    const validationText = params.validationText || params.feedbackText || (params.validationPath ? await readFile(String(params.validationPath), "utf8") : params.feedbackPath ? await readFile(String(params.feedbackPath), "utf8") : "");
+    let validationText = params.validationText || params.feedbackText || "";
+    if (!String(validationText).trim() && (params.validationPath || params.feedbackPath)) {
+      const pathValue = String(params.validationPath || params.feedbackPath);
+      const wikiRootA = await pinContainedWikiDir(project, String(status?.projectWikiPath || ""));
+      const wikiRootB = await pinContainedWikiDir(project, String(params.projectWikiPath || ""));
+      const projectRootA = await pinTrustedProjectRoot(String(status?.projectRoot || ""));
+      const projectRootB = await pinTrustedProjectRoot(String(params.projectRoot || ""));
+      const loaded = await readAllowedTextFile(pathValue, [wikiRootA, wikiRootB, dir, cycleRoot, projectsWikiRoot, wikiRoot, projectRootA, projectRootB], "validation_path_outside_allowed_roots");
+      if (!loaded.ok) {
+        await wikiRootA?.handle.close().catch(() => null);
+        await wikiRootB?.handle.close().catch(() => null);
+        await projectRootA?.handle.close().catch(() => null);
+        await projectRootB?.handle.close().catch(() => null);
+        return { ok: false, error: loaded.error, project, runId, dir, path: (loaded as any).path };
+      }
+      validationText = loaded.text;
+      await wikiRootA?.handle.close().catch(() => null);
+      await wikiRootB?.handle.close().catch(() => null);
+      await projectRootA?.handle.close().catch(() => null);
+      await projectRootB?.handle.close().catch(() => null);
+    }
     if (!String(validationText).trim()) return { ok: false, error: "validationText_or_validationPath_required", project, runId, dir };
     const parsedDecision = parseFinalDecision(validationText);
     if (!parsedDecision.ok) return { ok: false, project, runId, dir, ...parsedDecision };
@@ -1824,7 +2397,24 @@ Create or validate the implementation plan only. Do not implement. The plan must
     const projectRoot = String(params.projectRoot || status.projectRoot || "");
     if (!projectRoot) return { ok: false, error: "projectRoot_required", project, runId, dir };
     const plan = await readTextIfExists(join(dir, "implementation_plan.md"));
-    const validation = params.feedbackText || params.validationText || (params.feedbackPath ? await readFile(String(params.feedbackPath), "utf8") : (await readTextIfExists(join(dir, "validation_summary.md"))) || (await readTextIfExists(join(dir, "final_validation_response.md"))));
+    let validation = params.feedbackText || params.validationText || "";
+    if (!String(validation).trim() && params.feedbackPath) {
+      const wikiRootA = await pinContainedWikiDir(project, String(status?.projectWikiPath || ""));
+      const wikiRootB = await pinContainedWikiDir(project, String(params.projectWikiPath || ""));
+      const pinnedFeedbackProjectRoot = await pinTrustedProjectRoot(String(projectRoot || ""));
+      const loaded = await readAllowedTextFile(String(params.feedbackPath), [wikiRootA, wikiRootB, dir, cycleRoot, projectsWikiRoot, wikiRoot, pinnedFeedbackProjectRoot], "feedback_path_outside_allowed_roots");
+      if (!loaded.ok) {
+        await wikiRootA?.handle.close().catch(() => null);
+        await wikiRootB?.handle.close().catch(() => null);
+        await pinnedFeedbackProjectRoot?.handle.close().catch(() => null);
+        return { ok: false, error: loaded.error, project, runId, dir, path: (loaded as any).path };
+      }
+      validation = loaded.text;
+      await wikiRootA?.handle.close().catch(() => null);
+      await wikiRootB?.handle.close().catch(() => null);
+      await pinnedFeedbackProjectRoot?.handle.close().catch(() => null);
+    }
+    if (!String(validation).trim()) validation = await readTextIfExists(join(dir, "final_validation_response.md"));
     if (!String(validation).trim()) return { ok: false, error: "missing_final_validation_feedback", project, runId, dir };
     const adapter = String(params.implementationAdapter || status.implementationAdapter || implementationConfig.adapter);
     const command = String(params.implementationCommand || (adapter === "octopus" ? "tangle" : "correct"));

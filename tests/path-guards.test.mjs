@@ -80,7 +80,7 @@ test("record_plan rejects planPath outside allowed roots", async (t) => {
 test("run_final_validation ignores validationConfigPath outside allowed roots", async (t) => {
   const root = join(tmpdir(), `ocl-pathguard-h-${process.pid}-${Date.now()}`);
   t.after(() => rm(root, { recursive: true, force: true }));
-  await mkdir(join(root, "code"), { recursive: true });
+  await mkdir(join(root, "code", ".git"), { recursive: true });
   await writeFile(join(root, "code", "package.json"), JSON.stringify({ name: "x", scripts: { check: "true" } }));
   const marker = join(root, "rce.txt");
   const evil = join(root, "evil-validation.json");
@@ -327,7 +327,7 @@ test("broad projectRoot does not make outside planPath readable", async (t) => {
 test("resolveTrustedProjectWikiPath fallback does not escape for dot-token projects", async (t) => {
   const root = join(tmpdir(), `ocl-pathguard-dot-${process.pid}-${Date.now()}`);
   t.after(() => rm(root, { recursive: true, force: true }));
-  await mkdir(join(root, "code"), { recursive: true });
+  await mkdir(join(root, "code", ".git"), { recursive: true });
   await writeFile(join(root, "code", "package.json"), JSON.stringify({ name: "x", scripts: { check: "true" } }));
   const sibling = join(root, "sibling");
   await mkdir(sibling, { recursive: true });
@@ -941,4 +941,112 @@ test("validation config stays pinned after projectRoot validation", async (t) =>
   const validation = JSON.parse(await readFile(result.details.validationResult, "utf8"));
   assert.equal(validation.config.commandTimeoutMs, 11111, JSON.stringify(validation.config));
   assert.notEqual(validation.config.commandTimeoutMs, 22222, JSON.stringify(validation.config));
+});
+
+
+test("run_final_validation fails closed for a non-Git projectRoot", async (t) => {
+  const root = join(tmpdir(), `ocl-validation-nongit-${process.pid}-${Date.now()}`);
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const code = join(root, "code");
+  const marker = join(code, "MALICIOUS_RAN");
+  await mkdir(code, { recursive: true });
+  await writeFile(join(code, "package.json"), JSON.stringify({
+    name: "nongit-malicious",
+    scripts: { test: "node -e \"require('fs').writeFileSync('MALICIOUS_RAN','yes')\"" },
+  }));
+
+  const tool = await registerPlugin(root);
+  const req = await tool.execute("nongit-1", { action: "request_plan", project: "nongit-validation", projectRoot: code });
+  assert.equal(req.details.ok, true, JSON.stringify(req.details));
+  const rec = await tool.execute("nongit-2", {
+    action: "record_plan",
+    project: "nongit-validation",
+    runId: req.details.runId,
+    projectRoot: code,
+    planText: "# Implementation plan\n\n## Project paths\n- code\n\n## Tasks\n1. x\n\n## Validation checks\n- npm test\n\n## Stop conditions\n- none\n\n## Expected artifacts\n- none\n",
+    force: true,
+  });
+  assert.equal(rec.details.ok, true, JSON.stringify(rec.details));
+  const statusPath = join(req.details.dir, "status.json");
+  const status = JSON.parse(await readFile(statusPath, "utf8"));
+  status.phase = "implementation_delivered";
+  await writeFile(statusPath, JSON.stringify(status));
+
+  const result = await tool.execute("nongit-3", {
+    action: "run_final_validation",
+    project: "nongit-validation",
+    runId: req.details.runId,
+    projectRoot: code,
+  });
+  assert.equal(result.details.ok, false, JSON.stringify(result.details));
+  assert.equal(result.details.decision, "stop", JSON.stringify(result.details));
+  assert.match(JSON.stringify(result.details.failures), /trusted Git checkout/);
+  await assert.rejects(access(marker));
+});
+
+test("run_final_validation keeps the checkout pinned after config load", async (t) => {
+  const root = join(tmpdir(), `ocl-validation-root-swap-${process.pid}-${Date.now()}`);
+  t.after(() => rm(root, { recursive: true, force: true }));
+  t.after(() => {
+    delete process.env.DEVELOPMENT_CYCLE_TEST_VALIDATION_ROOT_READY_FILE;
+    delete process.env.DEVELOPMENT_CYCLE_TEST_VALIDATION_ROOT_DELAY_MS;
+  });
+  const code = join(root, "code");
+  const moved = join(root, "code-real");
+  const outside = join(root, "outside");
+  const ready = join(root, "validation-root-ready");
+  await mkdir(code, { recursive: true });
+  await mkdir(outside, { recursive: true });
+  execFileSync("git", ["init", "-q", code]);
+  execFileSync("git", ["init", "-q", outside]);
+  await writeFile(join(code, "validation.json"), JSON.stringify({ commands: "auto", preserveDiff: false }));
+  await writeFile(join(outside, "validation.json"), JSON.stringify({ commands: "auto", preserveDiff: false }));
+  await writeFile(join(code, "package.json"), JSON.stringify({
+    name: "safe-checkout",
+    scripts: { test: "node -e \"require('fs').writeFileSync('SAFE_VALIDATION_RAN','safe')\"" },
+  }));
+  await writeFile(join(outside, "package.json"), JSON.stringify({
+    name: "evil-checkout",
+    scripts: { test: "node -e \"require('fs').writeFileSync('EVIL_VALIDATION_RAN','evil')\"" },
+  }));
+
+  const tool = await registerPlugin(root);
+  const req = await tool.execute("vswap-1", { action: "request_plan", project: "validation-swap", projectRoot: code });
+  assert.equal(req.details.ok, true, JSON.stringify(req.details));
+  const rec = await tool.execute("vswap-2", {
+    action: "record_plan",
+    project: "validation-swap",
+    runId: req.details.runId,
+    projectRoot: code,
+    planText: "# Implementation plan\n\n## Project paths\n- code\n\n## Tasks\n1. x\n\n## Validation checks\n- npm test\n\n## Stop conditions\n- none\n\n## Expected artifacts\n- SAFE_VALIDATION_RAN\n",
+    force: true,
+  });
+  assert.equal(rec.details.ok, true, JSON.stringify(rec.details));
+  const statusPath = join(req.details.dir, "status.json");
+  const status = JSON.parse(await readFile(statusPath, "utf8"));
+  status.phase = "implementation_delivered";
+  await writeFile(statusPath, JSON.stringify(status));
+
+  process.env.DEVELOPMENT_CYCLE_TEST_VALIDATION_ROOT_READY_FILE = ready;
+  process.env.DEVELOPMENT_CYCLE_TEST_VALIDATION_ROOT_DELAY_MS = "300";
+  const pending = tool.execute("vswap-3", {
+    action: "run_final_validation",
+    project: "validation-swap",
+    runId: req.details.runId,
+    projectRoot: code,
+    validationConfigPath: join(code, "validation.json"),
+  });
+  let signaled = false;
+  for (let i = 0; i < 100; i++) {
+    try { await access(ready); signaled = true; break; } catch { await new Promise((r) => setTimeout(r, 10)); }
+  }
+  assert.equal(signaled, true, "validation did not reach post-config pinned-root hook");
+  await rename(code, moved);
+  await symlink(outside, code);
+
+  const result = await pending;
+  assert.ok(result.details.commandResults.some((r) => r.command === "npm test"), JSON.stringify(result.details));
+  assert.equal(await readFile(join(moved, "SAFE_VALIDATION_RAN"), "utf8"), "safe");
+  await assert.rejects(access(join(outside, "EVIL_VALIDATION_RAN")));
+  await assert.rejects(access(join(outside, "SAFE_VALIDATION_RAN")));
 });

@@ -106,7 +106,7 @@ Optional integrations may add further records.
 
 ## State transitions
 
-`status`, `reconcile`, and `request_plan` are always allowed. Other actions are phase-gated by `src/core/state-machine.ts`.
+`status` and `reconcile` are always allowed. `request_plan` is allowed in every phase except while a run is live (`implementation_launched`/`implementation_running`/`corrections_launched`/`corrections_running`) — stop the live run first, then request a new plan. Other actions are phase-gated by `src/core/state-machine.ts`.
 
 ```text
 waiting_external_plan

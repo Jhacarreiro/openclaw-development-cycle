@@ -770,21 +770,22 @@ async function trustedProjectRoot(value: string): Promise<string> {
   finally { await pinned.handle.close().catch(() => null); }
 }
 
-async function readAllowedTextFile(pathValue: string, roots: Array<string | null | undefined>, errorCode: string) {
+async function readAllowedTextFile(pathValue: string, roots: Array<any>, errorCode: string) {
   const raw = String(pathValue || "").trim();
   if (!raw) return { ok: false as const, error: errorCode };
   const abs = resolve(raw);
   for (const rootValue of roots) {
     if (!rootValue) continue;
-    const absRoot = resolve(String(rootValue));
+    const borrowed = typeof rootValue === "object" && rootValue.handle && rootValue.procPath;
+    const absRoot = resolve(String(borrowed ? (rootValue.lexicalPath || rootValue.realPath || rootValue.procPath) : rootValue));
     let rootHandle: any = null;
     let current: any = null;
     try {
-      const pinnedRoot = await openStableDirectory(absRoot);
+      const pinnedRoot = borrowed ? rootValue : await openStableDirectory(absRoot);
       if (!pinnedRoot) continue;
       rootHandle = pinnedRoot.handle;
       current = rootHandle;
-      const pinnedRealRoot = pinnedRoot.realPath;
+      const pinnedRealRoot = pinnedRoot.realPath || await realpath(pinnedRoot.procPath);
       let rel = "";
       if (pathWithin(absRoot, abs)) rel = relative(absRoot, abs).replace(/\\/g, "/");
       else if (pathWithin(pinnedRealRoot, abs)) rel = relative(pinnedRealRoot, abs).replace(/\\/g, "/");
@@ -813,7 +814,7 @@ async function readAllowedTextFile(pathValue: string, roots: Array<string | null
     } catch {}
     finally {
       if (current && current !== rootHandle) await current.close().catch(() => null);
-      await rootHandle?.close().catch(() => null);
+      if (!borrowed) await rootHandle?.close().catch(() => null);
     }
   }
   return { ok: false as const, error: errorCode, path: abs };
@@ -896,16 +897,24 @@ async function writePinnedFile(dir: string, root: string, name: string, content:
   }
 }
 
-async function resolveContainedWikiDir(project: string, projectWikiPath: string): Promise<string> {
+async function pinContainedWikiDir(project: string, projectWikiPath: string) {
   const raw = String(projectWikiPath || "").trim();
   const target = raw ? resolve(raw) : resolveTrustedProjectWikiPath(project, "");
   const pinned = await openPinnedContainedDir(target, projectsWikiRoot, true);
-  if (!pinned) return "";
+  if (!pinned) return null;
   try {
-    return await realpath(pinned.procPath);
-  } finally {
+    return { ...pinned, realPath: await realpath(pinned.procPath), lexicalPath: target };
+  } catch {
     await pinned.handle.close().catch(() => null);
+    return null;
   }
+}
+
+async function resolveContainedWikiDir(project: string, projectWikiPath: string): Promise<string> {
+  const pinned = await pinContainedWikiDir(project, projectWikiPath);
+  if (!pinned) return "";
+  try { return pinned.realPath; }
+  finally { await pinned.handle.close().catch(() => null); }
 }
 
 async function persistApprovedPlan(project: string, runId: string, projectWikiPath: string, planText: string) {
@@ -1399,12 +1408,14 @@ function mergeValidationConfig(base: any, extra: any) {
 
 async function loadProjectValidationConfig(project: string, status: any, params: any = {}) {
   const lexicalProjectWikiPath = resolveTrustedProjectWikiPath(project, params.projectWikiPath, status?.projectWikiPath);
-  const projectWikiPath = await resolveContainedWikiDir(project, lexicalProjectWikiPath);
+  const pinnedProjectWiki = await pinContainedWikiDir(project, lexicalProjectWikiPath);
+  const projectWikiPath = pinnedProjectWiki?.realPath || "";
   const projectRoot = await trustedProjectRoot(String(params.projectRoot || status?.projectRoot || ""));
-  const allowedRoots = [projectsWikiRoot, wikiRoot, projectWikiPath, cycleRoot, projectRoot];
+  const allowedRoots = [pinnedProjectWiki, projectsWikiRoot, wikiRoot, cycleRoot, projectRoot];
   let config = defaultValidationConfig();
   let path = "default";
 
+  try {
   if (params.validationConfigPath) {
     const requested = resolve(String(params.validationConfigPath));
     const loaded = await readAllowedTextFile(requested, allowedRoots, "validation_config_path_outside_allowed_roots");
@@ -1428,7 +1439,7 @@ async function loadProjectValidationConfig(project: string, status: any, params:
 
   if (projectWikiPath) {
     const defaultCandidate = join(projectWikiPath, "validation.json");
-    const loaded = await readAllowedTextFile(defaultCandidate, [projectWikiPath], "validation_config_path_unreadable");
+    const loaded = await readAllowedTextFile(defaultCandidate, [pinnedProjectWiki], "validation_config_path_unreadable");
     if (loaded.ok) {
       try {
         config = mergeValidationConfig(config, JSON.parse(loaded.text));
@@ -1437,6 +1448,9 @@ async function loadProjectValidationConfig(project: string, status: any, params:
     }
   }
   return { config, path, projectWikiPath };
+  } finally {
+    await pinnedProjectWiki?.handle.close().catch(() => null);
+  }
 }
 
 function validationRuleMatches(path: string, rules: any[]) {
@@ -2099,10 +2113,14 @@ Create or validate the implementation plan only. Do not implement. The plan must
     let planText = params.planText || "";
     if (!String(planText).trim() && params.planPath) {
       const projectRootEarly = await trustedProjectRoot(String(params.projectRoot || status.projectRoot || ""));
-      const projectWikiPathEarly = await resolveContainedWikiDir(project, String(params.projectWikiPath || "") || String(status.projectWikiPath || ""));
-      const loaded = await readAllowedTextFile(String(params.planPath), [dir, cycleRoot, projectsWikiRoot, wikiRoot, projectRootEarly, projectWikiPathEarly], "plan_path_outside_allowed_roots");
-      if (!loaded.ok) return { ok: false, error: loaded.error, project, runId, dir, path: (loaded as any).path };
-      planText = loaded.text;
+      const pinnedProjectWikiEarly = await pinContainedWikiDir(project, String(params.projectWikiPath || "") || String(status.projectWikiPath || ""));
+      try {
+        const loaded = await readAllowedTextFile(String(params.planPath), [pinnedProjectWikiEarly, dir, cycleRoot, projectsWikiRoot, wikiRoot, projectRootEarly], "plan_path_outside_allowed_roots");
+        if (!loaded.ok) return { ok: false, error: loaded.error, project, runId, dir, path: (loaded as any).path };
+        planText = loaded.text;
+      } finally {
+        await pinnedProjectWikiEarly?.handle.close().catch(() => null);
+      }
     }
     if (!String(planText).trim()) return { ok: false, error: "planText_or_planPath_required", project, runId, dir };
     if (!params.force && looksLikePlanRequest(String(planText))) {
@@ -2124,7 +2142,14 @@ Create or validate the implementation plan only. Do not implement. The plan must
   if (action === "start_implementation") {
     const requestedProjectRoot = String(params.projectRoot || status.projectRoot || "");
     const projectWikiPath = resolveTrustedProjectWikiPath(project, params.projectWikiPath, status.projectWikiPath);
-    const containedProjectWikiPath = await resolveContainedWikiDir(project, projectWikiPath);
+    const pinnedProjectWiki = await pinContainedWikiDir(project, projectWikiPath);
+    const containedProjectWikiPath = pinnedProjectWiki?.realPath || "";
+    if (pinnedProjectWiki) {
+      const readyFile = String(process.env.DEVELOPMENT_CYCLE_TEST_PINNED_WIKI_HANDOFF_READY_FILE || "").trim();
+      if (readyFile) await writeFile(readyFile, "ready\n");
+      const delayMs = Number(process.env.DEVELOPMENT_CYCLE_TEST_PINNED_WIKI_HANDOFF_DELAY_MS || 0);
+      if (Number.isFinite(delayMs) && delayMs > 0) await sleep(delayMs);
+    }
     if (!requestedProjectRoot) return { ok: false, error: "projectRoot_required", project, runId, dir, wikiRoot, projectWikiPath: containedProjectWikiPath || projectWikiPath, hint: "projectRoot must be the real code checkout; projectWikiPath is only docs/state." };
     const projectRoot = await trustedProjectRoot(requestedProjectRoot);
     if (!projectRoot) return { ok: false, error: "projectRoot_missing_or_not_trusted_git_checkout", project, runId, dir, projectRoot: requestedProjectRoot, wikiRoot, projectWikiPath: containedProjectWikiPath || projectWikiPath, hint: "Pass an existing Git checkout, not a broad/system/docs root." };
@@ -2132,12 +2157,18 @@ Create or validate the implementation plan only. Do not implement. The plan must
     let containedPlanPath = "";
     const requestedPlanPath = String(params.planPath || status.plan || "").trim();
     if (requestedPlanPath) {
-      const loaded = await readAllowedTextFile(requestedPlanPath, [dir, cycleRoot, projectsWikiRoot, wikiRoot, await trustedProjectRoot(projectRoot), containedProjectWikiPath], "plan_path_outside_allowed_roots");
-      if (!loaded.ok) return { ok: false, error: loaded.error, project, runId, dir, path: (loaded as any).path };
+      const loaded = await readAllowedTextFile(requestedPlanPath, [pinnedProjectWiki, dir, cycleRoot, projectsWikiRoot, wikiRoot, await trustedProjectRoot(projectRoot)], "plan_path_outside_allowed_roots");
+      if (!loaded.ok) {
+        await pinnedProjectWiki?.handle.close().catch(() => null);
+        return { ok: false, error: loaded.error, project, runId, dir, path: (loaded as any).path };
+      }
       containedPlanPath = loaded.path;
       if (!String(plan).trim()) plan = loaded.text;
     }
-    if (!containedProjectWikiPath) return { ok: false, error: "project_wiki_path_outside_allowed_root", project, runId, dir, projectWikiPath };
+    if (!containedProjectWikiPath) {
+      await pinnedProjectWiki?.handle.close().catch(() => null);
+      return { ok: false, error: "project_wiki_path_outside_allowed_root", project, runId, dir, projectWikiPath };
+    }
     if (!String(plan).trim()) {
       const fallback = await readAllowedTextFile(join(dir, "implementation_plan.md"), [dir], "plan_path_outside_allowed_roots");
       if (fallback.ok) {
@@ -2145,7 +2176,11 @@ Create or validate the implementation plan only. Do not implement. The plan must
         plan = fallback.text;
       }
     }
-    if (!String(plan).trim()) return { ok: false, error: "missing_implementation_plan", project, runId, dir, expected: join(dir, "implementation_plan.md") };
+    if (!String(plan).trim()) {
+      await pinnedProjectWiki?.handle.close().catch(() => null);
+      return { ok: false, error: "missing_implementation_plan", project, runId, dir, expected: join(dir, "implementation_plan.md") };
+    }
+    await pinnedProjectWiki?.handle.close().catch(() => null);
     const adapter = String(params.implementationAdapter || status.implementationAdapter || implementationConfig.adapter);
     const command = String(params.implementationCommand || (adapter === "octopus" ? "tangle" : "implement"));
     if (adapter === "octopus" && command !== "tangle") return { ok: false, error: "unsupported_octopus_command", supported: ["tangle"] };
@@ -2175,11 +2210,17 @@ Create or validate the implementation plan only. Do not implement. The plan must
   if (action === "record_delivery") {
     let deliveryText = params.deliveryText || "";
     if (!String(deliveryText).trim() && params.deliveryPath) {
-      const wikiRootA = await resolveContainedWikiDir(project, String(status?.projectWikiPath || ""));
-      const wikiRootB = await resolveContainedWikiDir(project, String(params.projectWikiPath || ""));
-      const loaded = await readAllowedTextFile(String(params.deliveryPath), [dir, cycleRoot, projectsWikiRoot, wikiRoot, await trustedProjectRoot(status?.projectRoot), wikiRootA || null, await trustedProjectRoot(params.projectRoot), wikiRootB || null], "delivery_path_outside_allowed_roots");
-      if (!loaded.ok) return { ok: false, error: loaded.error, project, runId, dir, path: (loaded as any).path };
+      const wikiRootA = await pinContainedWikiDir(project, String(status?.projectWikiPath || ""));
+      const wikiRootB = await pinContainedWikiDir(project, String(params.projectWikiPath || ""));
+      const loaded = await readAllowedTextFile(String(params.deliveryPath), [wikiRootA, wikiRootB, dir, cycleRoot, projectsWikiRoot, wikiRoot, await trustedProjectRoot(status?.projectRoot), await trustedProjectRoot(params.projectRoot)], "delivery_path_outside_allowed_roots");
+      if (!loaded.ok) {
+        await wikiRootA?.handle.close().catch(() => null);
+        await wikiRootB?.handle.close().catch(() => null);
+        return { ok: false, error: loaded.error, project, runId, dir, path: (loaded as any).path };
+      }
       deliveryText = loaded.text;
+      await wikiRootA?.handle.close().catch(() => null);
+      await wikiRootB?.handle.close().catch(() => null);
     }
     if (!String(deliveryText).trim()) return { ok: false, error: "deliveryText_or_deliveryPath_required", project, runId, dir };
     const file = join(dir, "implementation_delivery.md");
@@ -2207,11 +2248,17 @@ Create or validate the implementation plan only. Do not implement. The plan must
     let validationText = params.validationText || params.feedbackText || "";
     if (!String(validationText).trim() && (params.validationPath || params.feedbackPath)) {
       const pathValue = String(params.validationPath || params.feedbackPath);
-      const wikiRootA = await resolveContainedWikiDir(project, String(status?.projectWikiPath || ""));
-      const wikiRootB = await resolveContainedWikiDir(project, String(params.projectWikiPath || ""));
-      const loaded = await readAllowedTextFile(pathValue, [dir, cycleRoot, projectsWikiRoot, wikiRoot, await trustedProjectRoot(status?.projectRoot), wikiRootA || null, await trustedProjectRoot(params.projectRoot), wikiRootB || null], "validation_path_outside_allowed_roots");
-      if (!loaded.ok) return { ok: false, error: loaded.error, project, runId, dir, path: (loaded as any).path };
+      const wikiRootA = await pinContainedWikiDir(project, String(status?.projectWikiPath || ""));
+      const wikiRootB = await pinContainedWikiDir(project, String(params.projectWikiPath || ""));
+      const loaded = await readAllowedTextFile(pathValue, [wikiRootA, wikiRootB, dir, cycleRoot, projectsWikiRoot, wikiRoot, await trustedProjectRoot(status?.projectRoot), await trustedProjectRoot(params.projectRoot)], "validation_path_outside_allowed_roots");
+      if (!loaded.ok) {
+        await wikiRootA?.handle.close().catch(() => null);
+        await wikiRootB?.handle.close().catch(() => null);
+        return { ok: false, error: loaded.error, project, runId, dir, path: (loaded as any).path };
+      }
       validationText = loaded.text;
+      await wikiRootA?.handle.close().catch(() => null);
+      await wikiRootB?.handle.close().catch(() => null);
     }
     if (!String(validationText).trim()) return { ok: false, error: "validationText_or_validationPath_required", project, runId, dir };
     const parsedDecision = parseFinalDecision(validationText);
@@ -2238,11 +2285,17 @@ Create or validate the implementation plan only. Do not implement. The plan must
     const plan = await readTextIfExists(join(dir, "implementation_plan.md"));
     let validation = params.feedbackText || params.validationText || "";
     if (!String(validation).trim() && params.feedbackPath) {
-      const wikiRootA = await resolveContainedWikiDir(project, String(status?.projectWikiPath || ""));
-      const wikiRootB = await resolveContainedWikiDir(project, String(params.projectWikiPath || ""));
-      const loaded = await readAllowedTextFile(String(params.feedbackPath), [dir, cycleRoot, projectsWikiRoot, wikiRoot, await trustedProjectRoot(projectRoot), wikiRootA || null, params.projectWikiPath ? wikiRootB : null], "feedback_path_outside_allowed_roots");
-      if (!loaded.ok) return { ok: false, error: loaded.error, project, runId, dir, path: (loaded as any).path };
+      const wikiRootA = await pinContainedWikiDir(project, String(status?.projectWikiPath || ""));
+      const wikiRootB = await pinContainedWikiDir(project, String(params.projectWikiPath || ""));
+      const loaded = await readAllowedTextFile(String(params.feedbackPath), [wikiRootA, wikiRootB, dir, cycleRoot, projectsWikiRoot, wikiRoot, await trustedProjectRoot(projectRoot)], "feedback_path_outside_allowed_roots");
+      if (!loaded.ok) {
+        await wikiRootA?.handle.close().catch(() => null);
+        await wikiRootB?.handle.close().catch(() => null);
+        return { ok: false, error: loaded.error, project, runId, dir, path: (loaded as any).path };
+      }
       validation = loaded.text;
+      await wikiRootA?.handle.close().catch(() => null);
+      await wikiRootB?.handle.close().catch(() => null);
     }
     if (!String(validation).trim()) validation = await readTextIfExists(join(dir, "final_validation_response.md"));
     if (!String(validation).trim()) return { ok: false, error: "missing_final_validation_feedback", project, runId, dir };

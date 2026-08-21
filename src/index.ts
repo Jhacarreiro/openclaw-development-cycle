@@ -2023,14 +2023,22 @@ function liveRunPhase(phase: any): string {
 }
 
 async function projectCycle(params: any) {
+  // Defense-in-depth: host SDKs validate arguments before execute, but direct
+  // or future invocations with null/undefined must behave like {} (the plugin
+  // already defaults every field at runtime), not throw an unhandled trace.
+  params ??= {};
   const supported = [...ACTIONS];
   const action = params.action || "status";
   if (!supported.includes(action)) return { ok: false, error: "unknown_action", action, supported };
 
   const project = cleanId(params.project || "default");
   const createRun = action === "request_plan" || action === "record_plan";
-  const runId = cleanId(params.runId || (createRun ? newRunId(project) : await latestRunId(project)));
-  if (!runId) return { ok: true, project, runId: null, dir: null, status: null, files: [], nextAction: "request_plan or record_plan" };
+  // cleanId("") falls back to "run", which would turn a "no run exists yet"
+  // latestRunId result into a phantom run directory. Check the raw value for
+  // the documented no-run response BEFORE normalizing it into a run id.
+  const requestedRunId = params.runId || (createRun ? newRunId(project) : await latestRunId(project));
+  if (!requestedRunId) return { ok: true, project, runId: null, dir: null, status: null, files: [], nextAction: "request_plan or record_plan" };
+  const runId = cleanId(requestedRunId);
   const dir = cycleDir(project, runId);
   const status = await loadJson(join(dir, "status.json"));
 

@@ -1839,12 +1839,20 @@ Create or validate the implementation plan only. Do not implement. The plan must
       const next = await cycleStatus(dir, { phase: "corrections_failed", owner: "main", ok: false, error: "observer_root_session_creation_failed", projectRoot, implementationCorrectionsRequest: requestPath });
       return { ok: false, project, runId, dir, phase: next.phase, error: next.error };
     }
-    // Align validationPath with the effective feedback: params.feedbackPath > validation_summary.md > finalValidation
+    // Align validationPath with the effective feedback. When both the
+    // mechanical summary and a human-recorded response exist, pick whichever
+    // was written LAST (mtime) so corrections always consume the freshest
+    // gate feedback regardless of whether the human step ran before or after
+    // the mechanical pass.
     let effectiveValidationPath = String(params.feedbackPath || "");
     if (!effectiveValidationPath) {
-      const mech = await readTextIfExists(join(dir, "validation_summary.md"));
-      if (String(mech).trim()) effectiveValidationPath = join(dir, "validation_summary.md");
-      else effectiveValidationPath = String(status.finalValidation || join(dir, "final_validation_response.md"));
+      const mechPath = join(dir, "validation_summary.md");
+      const humanPath = String(status.finalValidation || join(dir, "final_validation_response.md"));
+      const mechText = await readTextIfExists(mechPath);
+      const mechStat = mechText.trim() ? await stat(mechPath).catch(() => null) : null;
+      const humanStat = await stat(humanPath).catch(() => null);
+      if (mechStat && (!humanStat || (mechStat.mtimeMs >= humanStat.mtimeMs))) effectiveValidationPath = mechPath;
+      else effectiveValidationPath = humanPath;
     }
     const launch = await createImplementationRunnerSession(dir, { project, runId: `${runId}-corrections`, projectRoot, command, prompt, kind: "corrections", implementationAdapter: adapter, planPath: String(status.plan || join(dir, "implementation_plan.md")), validationPath: effectiveValidationPath, timeoutSeconds: Number(params.timeoutSeconds ?? params.timeout_ms ?? 0), observerObservationId, purpose: `development_cycle corrections ${project}` });
     if (!launch.ok) {

@@ -25,6 +25,7 @@ The command adapter is the portable default.
 | `DEVELOPMENT_CYCLE_IMPLEMENTATION_ARGS_JSON` | `[]` | JSON array of fixed string arguments placed before the request path. |
 | `DEVELOPMENT_CYCLE_OCTOPUS_ROOT` | empty | Root of an optional Octopus checkout. |
 | `DEVELOPMENT_CYCLE_OCTOPUS_SANDBOX` | `workspace-write` | Sandbox value passed by the Octopus adapter. |
+| `DEVELOPMENT_CYCLE_LOOP_UNTIL_APPROVED` | `true` | Retry failed Octopus subtasks until the configured quality retry limit is reached. Set `false` only for deliberate one-shot runs. |
 
 Example command adapter:
 
@@ -45,6 +46,32 @@ A tool call may override the configured adapter with `implementationAdapter` and
 
 See [Implementation adapters](adapters.md).
 
+## Repository delivery adapter
+
+Repository delivery is opt-in and disabled by default. The core lifecycle writes a durable `repository_delivery_request.json`, then invokes a configured adapter. This keeps forge-specific behavior out of the development-cycle core.
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `DEVELOPMENT_CYCLE_REPOSITORY_DELIVERY_ENABLED` | `false` | Allow `finalize_delivery` to publish repository state. |
+| `DEVELOPMENT_CYCLE_REPOSITORY_DELIVERY_COMMAND` | empty | Executable for the repository-delivery adapter. |
+| `DEVELOPMENT_CYCLE_REPOSITORY_DELIVERY_ARGS_JSON` | `[]` | Fixed arguments placed before the request JSON path. |
+| `DEVELOPMENT_CYCLE_REPOSITORY_DELIVERY_AUTO_MERGE_SUCCESSFUL` | `true` | Ask the adapter to auto-merge successful deliveries after repository checks permit it. |
+| `DEVELOPMENT_CYCLE_REPOSITORY_DELIVERY_BASE_BRANCH` | `main` | Default base branch for delivery PRs. |
+
+`finalize_delivery` classifies `final_validated` as `success`; recoverable terminal failure/correction phases as `partial`; and other explicitly requested outcomes as `invalid`. A partial delivery should publish the coherent work as a normal PR and create repository issues for residual findings. A successful delivery may queue auto-merge. While checks are pending, `reconcile` performs a read-only PR status check and promotes `delivery_published` to `merged` once the forge confirms the merge. Invalid output is recorded but not published.
+
+The bundled `scripts/github-delivery-runner.mjs` is a GitHub adapter. It refuses direct publication from `main`/`master`, runs `git diff --check`, refuses changed paths that look like credentials/auth/tokens/secrets/`.env`, commits coherent changes, pushes the current branch, opens a normal PR, de-duplicates exact-title follow-up issues, and uses GitHub auto-merge for successful runs.
+
+Example:
+
+```bash
+export DEVELOPMENT_CYCLE_REPOSITORY_DELIVERY_ENABLED=true
+export DEVELOPMENT_CYCLE_REPOSITORY_DELIVERY_COMMAND=node
+export DEVELOPMENT_CYCLE_REPOSITORY_DELIVERY_ARGS_JSON='["/opt/openclaw-development-cycle/scripts/github-delivery-runner.mjs"]'
+export DEVELOPMENT_CYCLE_REPOSITORY_DELIVERY_AUTO_MERGE_SUCCESSFUL=true
+export DEVELOPMENT_CYCLE_REPOSITORY_DELIVERY_BASE_BRANCH=main
+```
+
 ## Runner
 
 | Variable | Default | Description |
@@ -52,7 +79,7 @@ See [Implementation adapters](adapters.md).
 | `DEVELOPMENT_CYCLE_RUNNER_SUPERVISOR_PATH` | packaged `runner-supervisor.py` | Persistent Python subreaper supervisor. |
 | `DEVELOPMENT_CYCLE_RUNNER_SUPERVISOR_SOCKET` | system temp directory | Unix socket used by the supervisor. |
 | `DEVELOPMENT_CYCLE_HEARTBEAT_INTERVAL_SECONDS` | `30` | Heartbeat interval for supervised runs. |
-| `DEVELOPMENT_CYCLE_DEFAULT_TIMEOUT_SECONDS` | `7200` | Default bounded timeout. |
+| `DEVELOPMENT_CYCLE_DEFAULT_TIMEOUT_SECONDS` | `0` | Default implementation timeout. `0` delegates timeout policy to the implementation orchestrator. |
 
 ## OpenClaw notifications
 

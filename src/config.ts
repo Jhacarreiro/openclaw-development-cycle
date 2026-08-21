@@ -14,6 +14,13 @@ export interface DevelopmentCycleConfig {
     octopusSandbox: string;
     loopUntilApproved: boolean;
   };
+  repositoryDelivery: {
+    enabled: boolean;
+    command: string;
+    args: string[];
+    autoMergeSuccessful: boolean;
+    baseBranch: string;
+  };
   retentionDays: number;
   notifications: {
     enabled: boolean;
@@ -101,6 +108,13 @@ export function loadDevelopmentCycleConfig(env: NodeJS.ProcessEnv = process.env)
       octopusRoot: text(env, "DEVELOPMENT_CYCLE_OCTOPUS_ROOT"),
       octopusSandbox: text(env, "DEVELOPMENT_CYCLE_OCTOPUS_SANDBOX", "workspace-write"),
       loopUntilApproved: boolean(env, "DEVELOPMENT_CYCLE_LOOP_UNTIL_APPROVED", true),
+    },
+    repositoryDelivery: {
+      enabled: boolean(env, "DEVELOPMENT_CYCLE_REPOSITORY_DELIVERY_ENABLED", false),
+      command: text(env, "DEVELOPMENT_CYCLE_REPOSITORY_DELIVERY_COMMAND"),
+      args: stringArray(env, "DEVELOPMENT_CYCLE_REPOSITORY_DELIVERY_ARGS_JSON"),
+      autoMergeSuccessful: boolean(env, "DEVELOPMENT_CYCLE_REPOSITORY_DELIVERY_AUTO_MERGE_SUCCESSFUL", true),
+      baseBranch: text(env, "DEVELOPMENT_CYCLE_REPOSITORY_DELIVERY_BASE_BRANCH", "main"),
     },
     retentionDays: positiveInteger(env, "DEVELOPMENT_CYCLE_RETENTION_DAYS", 30),
     notifications: {

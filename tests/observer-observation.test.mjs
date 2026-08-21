@@ -25,6 +25,10 @@ test("concurrent observer observations produce distinct files and are processed 
 
   const stateRoot = join(root, "state");
   const docsRoot = join(root, "docs");
+  // main's pinned-root security requires projectRoot to look like a git
+  // checkout; a bare tmp root is rejected with projectRoot_missing_or_not_trusted_git_checkout.
+  const gitCheckout = join(root, "checkout");
+  await mkdir(join(gitCheckout, ".git"), { recursive: true });
   const helperPath = join(root, "observe-helper.cjs");
   const adapterPath = join(root, "fake-adapter.sh");
 
@@ -82,7 +86,7 @@ test("concurrent observer observations produce distinct files and are processed 
     const params = {
       project,
       runId,
-      projectRoot: root,
+      projectRoot: gitCheckout,
       projectWikiPath: join(docsRoot, project),
     };
     const planText = [

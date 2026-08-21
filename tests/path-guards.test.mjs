@@ -884,3 +884,61 @@ test("start_implementation keeps wiki root pinned between containment and plan r
   assert.match(request, /SAFE_WIKI_HANDOFF_PLAN/);
   assert.doesNotMatch(request, /SECRET_WIKI_HANDOFF_SWAP/);
 });
+
+
+test("validation config stays pinned after projectRoot validation", async (t) => {
+  const root = join(tmpdir(), `ocl-pcfg-root-swap-${process.pid}-${Date.now()}`);
+  t.after(() => rm(root, { recursive: true, force: true }));
+  t.after(() => {
+    delete process.env.DEVELOPMENT_CYCLE_TEST_PINNED_PROJECT_ROOT_READ_READY_FILE;
+    delete process.env.DEVELOPMENT_CYCLE_TEST_PINNED_PROJECT_ROOT_READ_DELAY_MS;
+  });
+  const code = join(root, "code");
+  const moved = join(root, "code-real");
+  const outside = join(root, "outside");
+  const ready = join(root, "project-root-read-ready");
+  const validationPath = join(code, "validation.json");
+  await mkdir(join(code, ".git"), { recursive: true });
+  await mkdir(join(outside, ".git"), { recursive: true });
+  await writeFile(validationPath, JSON.stringify({ commands: ["true"], preserveDiff: false, commandTimeoutMs: 11111 }));
+  await writeFile(join(outside, "validation.json"), JSON.stringify({ commands: ["true"], preserveDiff: false, commandTimeoutMs: 22222 }));
+
+  const tool = await registerPlugin(root);
+  const req = await tool.execute("pcfg-race-1", { action: "request_plan", project: "pcfg-race", projectRoot: code });
+  assert.equal(req.details.ok, true, JSON.stringify(req.details));
+  const rec = await tool.execute("pcfg-race-2", {
+    action: "record_plan",
+    project: "pcfg-race",
+    runId: req.details.runId,
+    projectRoot: code,
+    planText: "# Implementation plan\n\n## Project paths\n- x\n\n## Tasks\n1. x\n\n## Validation checks\n- true\n\n## Stop conditions\n- none\n\n## Expected artifacts\n- x\n",
+    force: true,
+  });
+  assert.equal(rec.details.ok, true, JSON.stringify(rec.details));
+  const statusPath = join(req.details.dir, "status.json");
+  const status = JSON.parse(await readFile(statusPath, "utf8"));
+  status.phase = "implementation_delivered";
+  await writeFile(statusPath, JSON.stringify(status));
+
+  process.env.DEVELOPMENT_CYCLE_TEST_PINNED_PROJECT_ROOT_READ_READY_FILE = ready;
+  process.env.DEVELOPMENT_CYCLE_TEST_PINNED_PROJECT_ROOT_READ_DELAY_MS = "300";
+  const pending = tool.execute("pcfg-race-3", {
+    action: "run_final_validation",
+    project: "pcfg-race",
+    runId: req.details.runId,
+    projectRoot: code,
+    validationConfigPath: validationPath,
+  });
+  let signaled = false;
+  for (let i = 0; i < 100; i++) {
+    try { await access(ready); signaled = true; break; } catch { await new Promise((r) => setTimeout(r, 10)); }
+  }
+  assert.equal(signaled, true, "projectRoot config read did not reach pinned-root hook");
+  await rename(code, moved);
+  await symlink(outside, code);
+
+  const result = await pending;
+  const validation = JSON.parse(await readFile(result.details.validationResult, "utf8"));
+  assert.equal(validation.config.commandTimeoutMs, 11111, JSON.stringify(validation.config));
+  assert.notEqual(validation.config.commandTimeoutMs, 22222, JSON.stringify(validation.config));
+});

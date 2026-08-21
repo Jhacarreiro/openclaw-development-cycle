@@ -2,11 +2,14 @@
 set -eu
 
 request_path=${1:?usage: command-runner.sh REQUEST_JSON}
-project=$(jq -r '.project' "$request_path")
-run_id=$(jq -r '.runId' "$request_path")
-mode=$(jq -r '.mode' "$request_path")
-results_root=$(jq -r '.resultsRoot' "$request_path")
-prompt_path=$(jq -r '.promptPath' "$request_path")
+get_field() {
+  python3 -c 'import json, sys; print(json.load(open(sys.argv[1])).get(sys.argv[2], ""))' "$request_path" "$1"
+}
+project=$(get_field project)
+run_id=$(get_field runId)
+mode=$(get_field mode)
+results_root=$(get_field resultsRoot)
+prompt_path=$(get_field promptPath)
 
 mkdir -p "$results_root"
 output="$results_root/example-command-adapter-delivery.md"

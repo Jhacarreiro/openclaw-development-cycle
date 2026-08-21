@@ -39,7 +39,6 @@ Experimental `v0.1.0`. The state machine, storage, adapters, shell quoting, and 
 
 - Node.js 22 or newer
 - Python 3
-- `jq`
 - OpenClaw `2026.5.17` or newer
 - an executable implementation adapter
 

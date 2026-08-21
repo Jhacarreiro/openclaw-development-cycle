@@ -10,6 +10,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { ACTIONS, checkActionTransition } from "./core/state-machine.js";
 import { parseFinalDecision } from "./core/decisions.js";
 import { cleanId, newRunId as createRunId } from "./core/ids.js";
+import { nextStallQuietAccounting } from "./core/stall-accounting.js";
 import { loadDevelopmentCycleConfig } from "./config.js";
 import { createFilesystemStore } from "./storage/filesystem.js";
 import { buildImplementationLaunchSpec, jsonShellQuote, renderShellCommand, renderShellEnvironment, shellQuote } from "./adapters/implementation.js";
@@ -1651,8 +1652,26 @@ async function maybeHandleStalledRun(dir: string, status: any, params: any = {})
   if (!activeRoots.length || !activeProviders.length) return null;
   const activity = await latestRunActivityMtime(status);
   if (!activity.latest) return null;
-  const quietMs = Date.now() - activity.latest;
-  if (quietMs < quietSeconds * 1000) return null;
+  const nowMs = Date.now();
+  const heartbeatIntervalSeconds = Number(
+    params.heartbeatIntervalSeconds || status?.heartbeatIntervalSeconds || runnerHeartbeatIntervalSeconds,
+  );
+  const next = nextStallQuietAccounting({
+    nowMs,
+    activityLatestMs: activity.latest,
+    stallQuietAccumMs: Number(status?.stallQuietAccumMs || 0),
+    stallLastCheckAt: Number(status?.stallLastCheckAt || 0),
+    stallLastActivityMtime: Number(status?.stallLastActivityMtime || 0),
+    quietThresholdMs: quietSeconds * 1000,
+    heartbeatIntervalMs: heartbeatIntervalSeconds * 1000,
+  });
+  await cycleStatus(dir, {
+    stallQuietAccumMs: next.stallQuietAccumMs,
+    stallLastCheckAt: next.stallLastCheckAt,
+    stallLastActivityMtime: next.stallLastActivityMtime,
+  });
+  if (!next.shouldStop) return null;
+  const quietMs = next.stallQuietAccumMs;
   const reason = `development_cycle stall detector: provider alive but runner artifacts quiet for ${Math.round(quietMs / 1000)}s (threshold ${quietSeconds}s).`;
   const stopped = await stopLaunchedImplementation(dir, status, reason);
   const validation = await runExternalFinalValidation(dir, stopped.status || status, { ...params, project }, "stalled_provider");

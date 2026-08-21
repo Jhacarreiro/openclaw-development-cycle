@@ -38,6 +38,10 @@ async function helperEvents(logPath) {
 }
 
 async function loadTool(root, { failTerminal = false } = {}) {
+  // main's pinned-root security accepts only projectRoots that look like a
+  // git checkout; hand every test a fake one instead of the bare tmp root.
+  const checkout = join(root, "checkout");
+  await mkdir(join(checkout, ".git"), { recursive: true });
   const helperPath = join(root, "observe-helper.cjs");
   const helperLog = join(root, "observer-helper.log");
   const failFlag = join(root, "fail-terminal.flag");
@@ -78,7 +82,7 @@ async function loadTool(root, { failTerminal = false } = {}) {
       tool = registered;
     },
   });
-  return { tool, helperLog };
+  return { checkout, tool, helperLog };
 }
 
 test("finalizeObserverSessions covers runner-missing and launch-failure terminals", () => {
@@ -106,11 +110,11 @@ test("launch failure finalizes the observer root and persists the result", async
   const root = join(tmpdir(), `development-cycle-observer-launch-${process.pid}-${Date.now()}`);
   t.after(() => rm(root, { recursive: true, force: true }));
   await mkdir(root, { recursive: true });
-  const { tool, helperLog } = await loadTool(root);
+  const { tool, helperLog, checkout } = await loadTool(root);
 
   const project = "launch-fail";
   const runId = "run-launch";
-  const projectRoot = root;
+  const projectRoot = checkout;
   const projectWikiPath = join(root, "docs", project);
   const params = { project, runId, projectRoot, projectWikiPath };
 
@@ -139,11 +143,11 @@ test("unsuccessful observer finalization is persisted on cycle status", async (t
   const root = join(tmpdir(), `development-cycle-observer-surface-${process.pid}-${Date.now()}`);
   t.after(() => rm(root, { recursive: true, force: true }));
   await mkdir(root, { recursive: true });
-  const { tool, helperLog } = await loadTool(root, { failTerminal: true });
+  const { tool, helperLog, checkout } = await loadTool(root, { failTerminal: true });
 
   const project = "surface-fail";
   const runId = "run-surface";
-  const projectRoot = root;
+  const projectRoot = checkout;
   const projectWikiPath = join(root, "docs", project);
   const params = { project, runId, projectRoot, projectWikiPath };
 
@@ -167,11 +171,11 @@ test("runner disappearance finalizes observer roots during reconcile", async (t)
   const root = join(tmpdir(), `development-cycle-observer-missing-${process.pid}-${Date.now()}`);
   t.after(() => rm(root, { recursive: true, force: true }));
   await mkdir(root, { recursive: true });
-  const { tool, helperLog } = await loadTool(root);
+  const { tool, helperLog, checkout } = await loadTool(root);
 
   const project = "runner-missing";
   const runId = "run-missing";
-  const projectRoot = root;
+  const projectRoot = checkout;
   const projectWikiPath = join(root, "docs", project);
   const params = { project, runId, projectRoot, projectWikiPath };
 

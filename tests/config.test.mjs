@@ -12,6 +12,8 @@ test("configuration uses portable, command-first defaults", () => {
   assert.deepEqual(config.implementation.args, []);
   assert.equal(config.implementation.octopusRoot, "");
   assert.equal(config.implementation.octopusSandbox, "workspace-write");
+  assert.equal(config.implementation.loopUntilApproved, true);
+  assert.equal(config.runner.defaultTimeoutSeconds, 0);
   assert.equal(config.notifications.enabled, false);
   assert.equal(config.notifications.channel, "");
   assert.equal(config.notifications.target, "");
@@ -30,6 +32,7 @@ test("configuration accepts command and Octopus adapter overrides", () => {
     DEVELOPMENT_CYCLE_IMPLEMENTATION_ARGS_JSON: '["--format","json"]',
     DEVELOPMENT_CYCLE_OCTOPUS_ROOT: "/opt/octopus",
     DEVELOPMENT_CYCLE_OCTOPUS_SANDBOX: "read-only",
+    DEVELOPMENT_CYCLE_LOOP_UNTIL_APPROVED: "false",
     DEVELOPMENT_CYCLE_HEARTBEAT_INTERVAL_SECONDS: "15",
     DEVELOPMENT_CYCLE_DEFAULT_TIMEOUT_SECONDS: "900",
     DEVELOPMENT_CYCLE_OBSERVER_ENABLED: "true",
@@ -47,6 +50,7 @@ test("configuration accepts command and Octopus adapter overrides", () => {
   assert.deepEqual(config.implementation.args, ["--format", "json"]);
   assert.equal(config.implementation.octopusRoot, "/opt/octopus");
   assert.equal(config.implementation.octopusSandbox, "read-only");
+  assert.equal(config.implementation.loopUntilApproved, false);
   assert.equal(config.runner.heartbeatIntervalSeconds, 15);
   assert.equal(config.runner.defaultTimeoutSeconds, 900);
   assert.equal(config.observer.enabled, true);
@@ -55,4 +59,28 @@ test("configuration accepts command and Octopus adapter overrides", () => {
   assert.equal(config.notifications.target, "channel:C0123456789");
   assert.equal(config.notifications.account, "work");
   assert.equal(config.openclawBin, "/usr/local/bin/openclaw");
+});
+
+
+test("repository delivery is opt-in and configurable", () => {
+  const defaults = loadDevelopmentCycleConfig({ HOME: "/tmp/example-home" });
+  assert.equal(defaults.repositoryDelivery.enabled, false);
+  assert.equal(defaults.repositoryDelivery.command, "");
+  assert.deepEqual(defaults.repositoryDelivery.args, []);
+  assert.equal(defaults.repositoryDelivery.autoMergeSuccessful, true);
+  assert.equal(defaults.repositoryDelivery.baseBranch, "main");
+
+  const configured = loadDevelopmentCycleConfig({
+    HOME: "/tmp/example-home",
+    DEVELOPMENT_CYCLE_REPOSITORY_DELIVERY_ENABLED: "true",
+    DEVELOPMENT_CYCLE_REPOSITORY_DELIVERY_COMMAND: "node",
+    DEVELOPMENT_CYCLE_REPOSITORY_DELIVERY_ARGS_JSON: '["/opt/delivery-runner.mjs"]',
+    DEVELOPMENT_CYCLE_REPOSITORY_DELIVERY_AUTO_MERGE_SUCCESSFUL: "false",
+    DEVELOPMENT_CYCLE_REPOSITORY_DELIVERY_BASE_BRANCH: "trunk",
+  });
+  assert.equal(configured.repositoryDelivery.enabled, true);
+  assert.equal(configured.repositoryDelivery.command, "node");
+  assert.deepEqual(configured.repositoryDelivery.args, ["/opt/delivery-runner.mjs"]);
+  assert.equal(configured.repositoryDelivery.autoMergeSuccessful, false);
+  assert.equal(configured.repositoryDelivery.baseBranch, "trunk");
 });

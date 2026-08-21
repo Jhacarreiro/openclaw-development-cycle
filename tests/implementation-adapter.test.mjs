@@ -4,6 +4,7 @@ import {
   buildImplementationLaunchSpec,
   renderShellCommand,
   renderShellEnvironment,
+  jsonShellQuote,
   shellQuote,
 } from "../dist/adapters/implementation.js";
 
@@ -27,6 +28,7 @@ test("command adapter receives the stable request JSON path", () => {
       args: ["--format", "json"],
       octopusRoot: "",
       octopusSandbox: "workspace-write",
+      loopUntilApproved: true,
     },
     baseInput,
   );
@@ -45,6 +47,7 @@ test("Octopus adapter translates the generic request into orchestrate.sh", () =>
       args: [],
       octopusRoot: "/opt/octopus",
       octopusSandbox: "read-only",
+      loopUntilApproved: true,
     },
     {
       ...baseInput,
@@ -65,8 +68,30 @@ test("Octopus adapter translates the generic request into orchestrate.sh", () =>
   assert.deepEqual(spec.args.slice(0, 5), ["--dir", "/tmp/project", "--timeout", "900", "tangle"]);
   assert.equal(spec.args.at(-1), "Implement the approved plan.");
   assert.equal(spec.env.OCTOPUS_CODEX_SANDBOX, "read-only");
+  assert.equal(spec.env.LOOP_UNTIL_APPROVED, "true");
   assert.equal(spec.env.OCTOPUS_AGENT_ROOT_SESSION_ID, "session-1");
   assert.equal(spec.env.CRABFLEET_ROOT_SESSION_ID, "session-1");
+});
+
+test("Octopus adapter omits timeout when the control plane delegates timeout policy", () => {
+  const spec = buildImplementationLaunchSpec(
+    {
+      adapter: "octopus",
+      command: "",
+      args: [],
+      octopusRoot: "/opt/octopus",
+      octopusSandbox: "workspace-write",
+      loopUntilApproved: false,
+    },
+    {
+      ...baseInput,
+      adapter: "octopus",
+      timeoutSeconds: undefined,
+      command: "tangle",
+    },
+  );
+  assert.deepEqual(spec.args.slice(0, 3), ["--dir", "/tmp/project", "tangle"]);
+  assert.equal(spec.env.LOOP_UNTIL_APPROVED, "false");
 });
 
 test("shell rendering quotes executable, arguments and environment values", () => {
@@ -81,4 +106,11 @@ test("shell rendering quotes executable, arguments and environment values", () =
   });
   assert.equal(command, `'/tmp/my runner' 'a'"'"'b' '$(touch /tmp/nope)'`);
   assert.equal(renderShellEnvironment({ SAFE_NAME: "a'b", "bad-name": "ignored" }), `export SAFE_NAME='a'"'"'b'`);
+});
+
+test("jsonShellQuote encodes JSON then shell-quotes the result", () => {
+  assert.equal(jsonShellQuote(`foo"bar`), `'"foo\\"bar"'`);
+  assert.equal(jsonShellQuote("foo\\bar"), `'"foo\\\\bar"'`);
+  assert.equal(jsonShellQuote("foo\nbar"), `'"foo\\nbar"'`);
+  assert.equal(jsonShellQuote("a'b"), `'"a'"'"'b"'`);
 });

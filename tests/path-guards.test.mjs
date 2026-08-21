@@ -828,3 +828,59 @@ test("stable root open fails closed when a projectRoot parent is swapped before 
   const stored = await readFile(join(req.details.dir, "implementation_plan.md"), "utf8").catch(() => "");
   assert.doesNotMatch(stored, /SECRET_PARENT_SWAP/);
 });
+
+
+test("start_implementation keeps wiki root pinned between containment and plan read", async (t) => {
+  const root = join(tmpdir(), `ocl-wiki-handoff-swap-${process.pid}-${Date.now()}`);
+  t.after(() => rm(root, { recursive: true, force: true }));
+  t.after(() => {
+    delete process.env.DEVELOPMENT_CYCLE_TEST_PINNED_WIKI_HANDOFF_READY_FILE;
+    delete process.env.DEVELOPMENT_CYCLE_TEST_PINNED_WIKI_HANDOFF_DELAY_MS;
+  });
+  const code = join(root, "code");
+  const wiki = join(root, "docs", "wiki-handoff");
+  const moved = join(root, "docs", "wiki-handoff-real");
+  const outside = join(root, "outside");
+  const ready = join(root, "wiki-handoff-ready");
+  const planName = "handoff-plan.md";
+  await mkdir(join(code, ".git"), { recursive: true });
+  await mkdir(wiki, { recursive: true });
+  await mkdir(outside, { recursive: true });
+  await writeFile(join(wiki, planName), "# SAFE_WIKI_HANDOFF_PLAN\n");
+  await writeFile(join(outside, planName), "# SECRET_WIKI_HANDOFF_SWAP\n");
+
+  const tool = await registerPlugin(root);
+  const req = await tool.execute("wiki-handoff-1", { action: "request_plan", project: "wiki-handoff", projectRoot: code, projectWikiPath: wiki });
+  assert.equal(req.details.ok, true, JSON.stringify(req.details));
+  const rec = await tool.execute("wiki-handoff-plan", {
+    action: "record_plan",
+    project: "wiki-handoff",
+    runId: req.details.runId,
+    projectRoot: code,
+    projectWikiPath: wiki,
+    planText: "# Implementation plan\n\n## Project paths\n- code\n- wiki\n\n## Tasks\n1. safe\n\n## Validation checks\n- true\n\n## Stop conditions\n- none\n\n## Expected artifacts\n- safe\n",
+    force: true,
+  });
+  assert.equal(rec.details.ok, true, JSON.stringify(rec.details));
+  process.env.DEVELOPMENT_CYCLE_TEST_PINNED_WIKI_HANDOFF_READY_FILE = ready;
+  process.env.DEVELOPMENT_CYCLE_TEST_PINNED_WIKI_HANDOFF_DELAY_MS = "300";
+  const pending = tool.execute("wiki-handoff-2", {
+    action: "start_implementation",
+    project: "wiki-handoff",
+    runId: req.details.runId,
+    projectRoot: code,
+    projectWikiPath: wiki,
+    planPath: join(wiki, planName),
+  });
+  let signaled = false;
+  for (let i = 0; i < 100; i++) {
+    try { await access(ready); signaled = true; break; } catch { await new Promise((r) => setTimeout(r, 10)); }
+  }
+  assert.equal(signaled, true, "wiki handoff did not reach pinned-root hook");
+  await rename(wiki, moved);
+  await symlink(outside, wiki);
+  await pending;
+  const request = await readFile(join(req.details.dir, "implementation_request.md"), "utf8");
+  assert.match(request, /SAFE_WIKI_HANDOFF_PLAN/);
+  assert.doesNotMatch(request, /SECRET_WIKI_HANDOFF_SWAP/);
+});

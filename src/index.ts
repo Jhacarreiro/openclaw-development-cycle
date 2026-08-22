@@ -435,7 +435,7 @@ async function createImplementationObserverSession(dir: string, params: any) {
     message: `Development cycle Implementation ${params.command || "handoff"} requested for ${params.project || "project"}`,
     control: { type: "process", stopAllowed: true, interruptAllowed: true, messageAllowed: true, correctionAllowed: true, useProcessGroup: true },
     developmentCycle: {
-      enabled: true,
+      enabled: false,
       project: params.project || "",
       runId: params.runId || "",
       projectRoot: params.projectRoot || "",
@@ -464,6 +464,8 @@ async function updateImplementationObserverSession(dir: string, id: string, para
     stderrPath: params.stderrPath,
     summary: params.summary || `Development cycle Implementation ${params.status || "completed"}`,
     message: params.message || `Development cycle Implementation ${params.status || "completed"}`,
+    pid: Number(params.pid || 0) || undefined,
+    processGroup: Number(params.processGroup || 0) || undefined,
     control: { type: "process", stopAllowed: true, interruptAllowed: true, messageAllowed: true, correctionAllowed: true, useProcessGroup: true },
     developmentCycle: {
       enabled: true,
@@ -2282,7 +2284,7 @@ Create or validate the implementation plan only. Do not implement. The plan must
       const next = await cycleStatus(dir, { phase: "implementation_failed", owner: "main", ok: false, nextAction: "Fix direct runner launch blocker, then launch a new clean handoff.", error: launch.error || "direct_runner_launch_failed", projectRoot, projectWikiPath: containedProjectWikiPath, implementationCommand: command, codexSandbox: defaultCodexSandbox, observerObservationId, implementationHandoffRequest: handoffRequest });
       return { ok: false, project, runId, dir, phase: next.phase, error: next.error, observerObservationId };
     }
-    await updateImplementationObserverSession(dir, observerObservationId, { project, runId, command, projectRoot, projectWikiPath: containedProjectWikiPath, stdoutPath: launch.stdoutPath, stderrPath: launch.stderrPath, status: "running", summary: `development_cycle ${command} ${project} running`, message: "Implementation runner launched; observer integration is optional." });
+    await updateImplementationObserverSession(dir, observerObservationId, { project, runId, command, projectRoot, projectWikiPath: containedProjectWikiPath, stdoutPath: launch.stdoutPath, stderrPath: launch.stderrPath, pid: launch.status?.runnerPid, processGroup: launch.status?.processGroupId, status: "running", summary: `development_cycle ${command} ${project} running`, message: "Implementation runner launched and bound to the observer root process." });
     const launchRecord = join(dir, "implementation_launch.json");
     await writeFile(launchRecord, JSON.stringify(launch, null, 2) + "\n");
     const next = await cycleStatus(dir, { phase: "implementation_launched", owner: "implementation", nextAction: "Use development_cycle status to watch the supervised implementation runner.", projectRoot, projectWikiPath: containedProjectWikiPath, implementationAdapter: launch.adapter, implementationCommand: command, codexSandbox: defaultCodexSandbox, implementationSessionId: launch.sessionId, directImplementationStatus: launch.statusPath, directImplementationStdout: launch.stdoutPath, directImplementationStderr: launch.stderrPath, observerObservationId, implementationHandoffRequest: handoffRequest, implementationLaunch: launchRecord, implementationStdout: launch.stdoutPath, implementationStderr: launch.stderrPath });

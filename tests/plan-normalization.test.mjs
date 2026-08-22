@@ -31,12 +31,13 @@ test("record_plan normalizes complete alternate headings", async () => {
 ## Critérios de sucesso
 - npm test
 
-## Riscos e bloqueios
-- Parar e pedir confirmação humana antes de caminhos protegidos.
+## Product rules
+- stop before payment/order placement.
+- forbidden: production credential storage.
 
-## Entregáveis
-- src/App.tsx
-- dist/
+## Required screens
+- current shop screen in src/App.tsx
+- responsive Web App / PWA
 `;
   const result = await record("shop-20260822-normalize", source);
   assert.equal(result.details.ok, true, JSON.stringify(result.details));

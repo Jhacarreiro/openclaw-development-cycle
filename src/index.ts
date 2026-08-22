@@ -1714,8 +1714,11 @@ async function latestFileByMtime(paths: string[]) {
 
 function councilNeedsCorrectionsText(text: string) {
   const t = String(text || "").toLowerCase();
-  if (/\b(no blocking|no blockers|ready to ship|ship as-is|go\b)/i.test(text) && !/conditional go|must fix|blocker|before ship|before deploy|high\s+[—-]|critical\s+[—-]/i.test(text)) return false;
-  return /conditional go|must fix|blocker|before ship|before deploy|do not ship|revise|high\s+[—-]|critical\s+[—-]/i.test(text) || t.includes("corrections required");
+  // A verdict like "no blockers found, ready to ship" is a PASS: the word
+  // "blocker" inside "no blockers" must not flip it into needing corrections.
+  const cleaned = t.replace(/\bno (blocking|blockers?)\b/g, "pass-signal");
+  if (/\b(no blocking|no blockers|ready to ship|ship as-is|go\b)/i.test(cleaned) && !/conditional go|must fix|blocker|before ship|before deploy|high\s+[—-]|critical\s+[—-]/i.test(cleaned)) return false;
+  return /conditional go|must fix|blocker|before ship|before deploy|do not ship|revise|high\s+[—-]|critical\s+[—-]/i.test(cleaned) || cleaned.includes("corrections required");
 }
 
 function extractCouncilFindings(text: string, max = 10) {
@@ -1872,7 +1875,9 @@ async function launchCouncilCorrections(dir: string, status: any, council: any, 
   const projectRoot = String(params.projectRoot || status?.projectRoot || "");
   const projectWikiPath = resolveTrustedProjectWikiPath(project, params.projectWikiPath, status?.projectWikiPath);
   const count = Number(status?.councilCorrectionCount || 0);
-  const max = Number(params.autoCouncilCorrectionsMax || 2);
+  const max = params.autoCouncilCorrectionsMax === undefined || params.autoCouncilCorrectionsMax === null || params.autoCouncilCorrectionsMax === ""
+    ? 2
+    : Math.max(0, Number(params.autoCouncilCorrectionsMax) || 0);
   if (!projectRoot) return { ok: false, error: "projectRoot_required" };
   if (count >= max) {
     const next = await cycleStatus(dir, { phase: "council_review_waiting_human", owner: "main", ok: false, nextAction: "Council requested corrections but auto-correction limit was reached." });

@@ -33,6 +33,8 @@ const ALLOWED_PHASES: Partial<Record<DevelopmentCycleAction, ReadonlySet<string>
     "implementation_delivered",
     "corrections_completed",
     "external_validation_failed",
+    "external_validation_needs_revision",
+    "external_validation_stopped",
   ]),
   record_delivery: new Set(["implementation_launched", "implementation_running", "implementation_failed"]),
   request_final_validation: new Set([
@@ -41,7 +43,7 @@ const ALLOWED_PHASES: Partial<Record<DevelopmentCycleAction, ReadonlySet<string>
     "external_validation_passed",
   ]),
   record_final_validation: new Set(["waiting_final_validation"]),
-  start_corrections: new Set(["needs_corrections"]),
+  start_corrections: new Set(["needs_corrections", "external_validation_needs_revision"]),
   finalize_delivery: new Set([
     "final_validated",
     "needs_corrections",
@@ -50,6 +52,9 @@ const ALLOWED_PHASES: Partial<Record<DevelopmentCycleAction, ReadonlySet<string>
     "council_review_needs_corrections",
     "council_review_failed",
     "external_validation_failed",
+    // A run stopped by external validation must have an exit path through
+    // the delivery endgate instead of dead-ending.
+    "external_validation_stopped",
     "stopped",
     "repository_delivery_failed",
   ]),

@@ -142,6 +142,12 @@ stop
 
 Invalid phase transitions are rejected by the state machine.
 
+### Approved-plan normalization
+
+`record_plan` validates semantic plan requirements separately from formatting. Alternate headings are normalized only when implementation tasks, validation checks, stop conditions, expected artifacts, and relevant project paths are already present. The approved source plan is preserved verbatim under the canonical envelope.
+
+If semantic content is genuinely missing, `record_plan` fails with `plan_incomplete` and reports the missing fields instead of inventing them. `force=true` remains an explicit escape hatch and records unresolved gaps in `status.planValidation`.
+
 ## Implementation adapters
 
 ### Command adapter — default

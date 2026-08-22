@@ -515,32 +515,102 @@ function looksLikePlanRequest(text: string) {
   ];
   return markers.filter((m) => t.includes(m)).length >= 2;
 }
-function looksLikeImplementationPlan(text: string) {
-  const t = String(text || "").toLowerCase();
-  const markers = [
-    "ordered implementation",
-    "implementation tasks",
-    "validation checks",
-    "stop conditions",
-    "expected artifacts",
-    "architecture overview",
-    "test matrix",
-    "shared core",
-    "data models",
-  ];
-  const pathMarkers = [
-    "project paths",
-    "projectroot",
-    "projectwikipath",
-    "project_root_code_checkout",
-    "project docs root",
-    "source checkout",
-    "relevant code paths",
-    "affected files",
-    "output paths",
-  ];
-  return markers.filter((m) => t.includes(m)).length >= 3 && pathMarkers.filter((m) => t.includes(m)).length >= 2;
+function planMatchesAny(text: string, patterns: RegExp[]) {
+  return patterns.some((re) => re.test(String(text || "")));
 }
+
+function analyzeImplementationPlan(text: string, context: any = {}) {
+  const source = String(text || "");
+  const projectRoot = String(context.projectRoot || "").trim();
+  const projectWikiPath = String(context.projectWikiPath || "").trim();
+  const evidence = {
+    implementationTasks: planMatchesAny(source, [
+      /(?:^|\n)#{1,6}\s+.*\b(?:implementation tasks?|ordered implementation|tasks?|phases?|fases?|implementa[cç][aã]o|build order|passos?)\b/im,
+      /(?:^|\n)\s*\d+[.)]\s+\S+/m,
+    ]),
+    validationChecks: planMatchesAny(source, [
+      /validation checks?|validation|acceptance criteria|test matrix/i,
+      /crit[eé]rios?\s+de\s+(?:aceita[cç][aã]o|sucesso)|valida[cç][aã]o|testes?/i,
+      /\b(?:npm test|npm run build|typecheck|lint|pytest|go test|cargo test)\b/i,
+    ]),
+    stopConditions: planMatchesAny(source, [
+      /stop conditions?|blocking conditions?|stop and report|human confirmation|protected or risky|rollback/i,
+      /condi[cç][oõ]es?\s+de\s+paragem|parar|interromper|bloqueio|confirma[cç][aã]o humana|caminhos? protegidos?/i,
+    ]),
+    expectedArtifacts: planMatchesAny(source, [
+      /expected artifacts?|artifacts?|deliverables?|output paths?/i,
+      /artefactos?|entreg[aá]veis|resultados?\s+esperados?|outputs?|ficheiros?\s+(?:gerados|finais?)/i,
+    ]),
+    relevantCodePaths: planMatchesAny(source, [
+      /project paths?|projectroot|projectwikipath|project_root_code_checkout|project docs root|source checkout|relevant code paths?|affected files?|output paths?/i,
+      /(?:^|[\s`])(?:\.{0,2}\/|\/data\/|src\/|tests\/|docs\/|app\/|packages\/)[^\s`]+/im,
+      /\b[\w.-]+\.(?:ts|tsx|js|mjs|cjs|json|md|py|sh|yml|yaml|html|css|scss|go|rs)\b/i,
+    ]),
+    projectRoot: Boolean(projectRoot) || /projectroot|project_root_code_checkout|source checkout/i.test(source),
+    projectWikiPath: Boolean(projectWikiPath) || /projectwikipath|project docs root/i.test(source),
+  };
+  const missing: string[] = [];
+  if (!evidence.implementationTasks) missing.push("implementation_tasks");
+  if (!evidence.validationChecks) missing.push("validation_checks");
+  if (!evidence.stopConditions) missing.push("stop_conditions");
+  if (!evidence.expectedArtifacts) missing.push("expected_artifacts");
+  if (!evidence.relevantCodePaths) missing.push("relevant_code_paths");
+  if (!evidence.projectRoot) missing.push("project_root");
+  if (!evidence.projectWikiPath) missing.push("project_wiki_path");
+  const structurallyConformant =
+    /(?:^|\n)#{1,6}\s+project paths?\s*$/im.test(source)
+    && /(?:^|\n)#{1,6}\s+(?:ordered implementation|implementation tasks?)\b/im.test(source)
+    && /(?:^|\n)#{1,6}\s+validation checks?\s*$/im.test(source)
+    && /(?:^|\n)#{1,6}\s+stop conditions?\s*$/im.test(source)
+    && /(?:^|\n)#{1,6}\s+expected artifacts?\s*$/im.test(source);
+  return { complete: missing.length === 0, missing, evidence, structurallyConformant };
+}
+
+function normalizeImplementationPlan(text: string, context: any, analysis: any) {
+  const projectRoot = String(context.projectRoot || "").trim() || "Declared in the approved source plan below.";
+  const projectWikiPath = String(context.projectWikiPath || "").trim() || "Declared in the approved source plan below.";
+  const source = String(text || "").trim();
+  return `# Canonical implementation plan
+
+> Normalized by Development Cycle from an already approved source plan.
+> This normalization changes structure only: scope, task ordering, validation intent, stop conditions, and deliverables remain defined by the source plan preserved verbatim below.
+
+## Project paths
+
+- projectRoot: ${projectRoot}
+- projectWikiPath: ${projectWikiPath}
+- relevant code paths / affected files: preserved in the approved source plan below
+- expected output paths / artifacts: preserved in the approved source plan below
+- protected or risky paths: preserved in the approved source plan below
+
+## Ordered implementation tasks
+
+Follow the task sequence and phase ordering in the approved source plan below without changing scope.
+
+## Validation checks
+
+Apply the validation and acceptance checks stated in the approved source plan below.
+
+## Stop conditions
+
+Apply the blockers, risky-change gates, rollback rules, and human-confirmation conditions stated in the approved source plan below.
+
+## Expected artifacts
+
+Produce only the deliverables and output artifacts stated in the approved source plan below.
+
+## Development Cycle normalization metadata
+
+- sourceStructurallyConformant: ${Boolean(analysis.structurallyConformant)}
+- normalizationChangedIntent: false
+- unresolvedSemanticGaps: none
+
+## Approved source plan (verbatim)
+
+${source}
+`;
+}
+
 async function readTextIfExists(path: string) {
   try { return await readFile(path, "utf8"); } catch { return ""; }
 }
@@ -2206,17 +2276,38 @@ Create or validate the implementation plan only. Do not implement. The plan must
     if (!params.force && looksLikePlanRequest(String(planText))) {
       return { ok: false, error: "plan_request_not_implementation_plan", project, runId, dir, nextAction: "Ask an external gate or human reviewer to write the actual implementation plan, then call record_plan with that plan. Use force only after explicit human confirmation." };
     }
-    if (!params.force && !looksLikeImplementationPlan(String(planText))) {
-      return { ok: false, error: "implementation_plan_not_validated", project, runId, dir, nextAction: "Provide a concrete implementation plan with a Project paths section including projectWikiPath, projectRoot, relevant code paths/affected files, validation checks, stop conditions, and expected artifacts; or set force=true after explicit human confirmation." };
-    }
     const projectRoot = String(params.projectRoot || status.projectRoot || "");
     const projectWikiPath = resolveTrustedProjectWikiPath(project, params.projectWikiPath, status.projectWikiPath);
+    const planAnalysis = analyzeImplementationPlan(String(planText), { projectRoot, projectWikiPath });
+    if (!params.force && !planAnalysis.complete) {
+      return {
+        ok: false,
+        error: "plan_incomplete",
+        project,
+        runId,
+        dir,
+        missing: planAnalysis.missing,
+        evidence: planAnalysis.evidence,
+        nextAction: "Add the missing semantic content to the approved plan. Development Cycle can normalize alternate headings automatically, but it will not invent tasks, validation, stop conditions, artifacts, or project paths. Use force=true only after explicit human confirmation.",
+      };
+    }
+    const normalized = planAnalysis.complete && !planAnalysis.structurallyConformant;
+    const recordedPlanText = normalized
+      ? normalizeImplementationPlan(String(planText), { projectRoot, projectWikiPath }, planAnalysis)
+      : String(planText);
+    const planValidation = {
+      normalized,
+      forced: params.force === true,
+      sourceStructurallyConformant: planAnalysis.structurallyConformant,
+      unresolved: planAnalysis.missing,
+      evidence: planAnalysis.evidence,
+    };
     const file = join(dir, "implementation_plan.md");
-    await writeFile(file, String(planText));
-    const canonicalPlan = await persistApprovedPlan(project, runId, projectWikiPath, String(planText));
+    await writeFile(file, recordedPlanText);
+    const canonicalPlan = await persistApprovedPlan(project, runId, projectWikiPath, recordedPlanText);
     const canonicalPlanGit = canonicalPlan ? await autoCommitCanonicalPlan(project, runId, canonicalPlan) : { ok: false, skipped: true, reason: "no_canonical_plan" };
-    const next = await cycleStatus(dir, { phase: "plan_ready_for_implementation", owner: "main", nextAction: "Call start_implementation to run the configured adapter on the approved plan.", project, runId, projectRoot, projectWikiPath, plan: file, canonicalPlan: canonicalPlan || null, canonicalPlanGit });
-    return { ok: true, project, runId, dir, phase: next.phase, plan: file, canonicalPlan: canonicalPlan || null, canonicalPlanGit };
+    const next = await cycleStatus(dir, { phase: "plan_ready_for_implementation", owner: "main", nextAction: "Call start_implementation to run the configured adapter on the approved plan.", project, runId, projectRoot, projectWikiPath, plan: file, canonicalPlan: canonicalPlan || null, canonicalPlanGit, planValidation });
+    return { ok: true, project, runId, dir, phase: next.phase, plan: file, canonicalPlan: canonicalPlan || null, canonicalPlanGit, planValidation };
   }
 
   if (action === "start_implementation") {

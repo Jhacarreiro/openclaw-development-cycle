@@ -139,6 +139,74 @@ async function ensureRunnerSupervisor() {
   throw new Error("runner_supervisor_start_failed");
 }
 const cycleDir = filesystemStore.runDir;
+const retentionMs = developmentCycleConfig.retentionDays * 24 * 60 * 60 * 1000;
+
+// Remove run directories whose mtime is older than DEVELOPMENT_CYCLE_RETENTION_DAYS.
+// The config value existed but was never enforced, so run state accumulated forever.
+export async function pruneExpiredRuns() {
+  if (!Number.isFinite(retentionMs) || retentionMs <= 0) return;
+  try {
+    const runsRoot = join(cycleRoot, "runs");
+    const runsRootReal = await realpath(runsRoot).catch(() => resolve(runsRoot));
+    const projects = await readdir(runsRoot).catch(() => []);
+    for (const project of projects) {
+      const projectDir = join(runsRoot, project);
+      // Containment: never follow symlinks. readdir() on a symlinked project
+      // directory lists the target, and rm(recursive) on the joined children
+      // would then delete real directories OUTSIDE the runs root. Reject any
+      // symlinked or escaping entry before touching anything under it.
+      const projectInfo = await lstat(projectDir).catch(() => null);
+      if (!projectInfo?.isDirectory()) continue;
+      const projectReal = await realpath(projectDir).catch(() => "");
+      if (!projectReal.startsWith(runsRootReal + sep)) continue;
+      const names = await readdir(projectDir).catch(() => []);
+      for (const name of names) {
+        const runDir = join(projectDir, name);
+        const runInfo = await lstat(runDir).catch(() => null);
+        if (!runInfo?.isDirectory()) continue;
+        const runReal = await realpath(runDir).catch(() => "");
+        if (!runReal.startsWith(runsRootReal + sep)) continue;
+        const info = await stat(runReal).catch(() => null);
+        if (!info?.isDirectory()) continue;
+        if (Date.now() - info.mtimeMs <= retentionMs) continue;
+        // Dir mtime only bumps on entry create/rename/delete, so a
+        // long-running implementation whose heartbeat file is rewritten
+        // in place never updates the dir mtime - it would look "stale"
+        // and be pruned while still running. Skip runs with a recent
+        // heartbeat (in-place printf rewrite by run-implementation-session.sh).
+        // Corrections runners write to corrections_session/ - check both.
+        const implHeartbeat = await stat(join(runReal, "implementation_session", "heartbeat.json")).catch(() => null);
+        if (implHeartbeat?.isFile() && Date.now() - implHeartbeat.mtimeMs <= retentionMs) continue;
+        const corrHeartbeat = await stat(join(runReal, "corrections_session", "heartbeat.json")).catch(() => null);
+        if (corrHeartbeat?.isFile() && Date.now() - corrHeartbeat.mtimeMs <= retentionMs) continue;
+        // TOCTOU mitigation: re-validate containment before destructive rm.
+        // Between initial validation and rm(), a concurrent writer could replace
+        // projectDir with a symlink to an external tree; rm(runReal) would then
+        // traverse the new symlink. Re-lstat and re-realpath both levels and
+        // ensure the resolved path is unchanged and still inside runsRoot.
+        const projectInfo2 = await lstat(projectDir).catch(() => null);
+        if (!projectInfo2?.isDirectory()) continue;
+        const projectReal2 = await realpath(projectDir).catch(() => "");
+        if (!projectReal2.startsWith(runsRootReal + sep)) continue;
+        const runInfo2 = await lstat(runDir).catch(() => null);
+        if (!runInfo2?.isDirectory()) continue;
+        const runReal2 = await realpath(runDir).catch(() => "");
+        if (!runReal2.startsWith(runsRootReal + sep)) continue;
+        if (runReal2 !== runReal) continue;
+        const info2 = await stat(runReal2).catch(() => null);
+        if (!info2?.isDirectory()) continue;
+        if (Date.now() - info2.mtimeMs <= retentionMs) continue;
+        const implHeartbeat2 = await stat(join(runReal2, "implementation_session", "heartbeat.json")).catch(() => null);
+        if (implHeartbeat2?.isFile() && Date.now() - implHeartbeat2.mtimeMs <= retentionMs) continue;
+        const corrHeartbeat2 = await stat(join(runReal2, "corrections_session", "heartbeat.json")).catch(() => null);
+        if (corrHeartbeat2?.isFile() && Date.now() - corrHeartbeat2.mtimeMs <= retentionMs) continue;
+        await rm(runReal2, { recursive: true, force: true }).catch(() => null);
+      }
+    }
+  } catch {
+    // pruning is best-effort
+  }
+}
 const loadJson = filesystemStore.loadJson;
 const saveJson = filesystemStore.saveJson;
 const cycleStatus = filesystemStore.updateStatus;
@@ -2032,6 +2100,8 @@ async function projectCycle(params: any) {
   const supported = [...ACTIONS];
   const action = params.action || "status";
   if (!supported.includes(action)) return { ok: false, error: "unknown_action", action, supported };
+  // status is documented read-only; pruning runs is a side effect, so skip it there.
+  if (action !== "status") await pruneExpiredRuns();
 
   const project = cleanId(params.project || "default");
   const createRun = action === "request_plan" || action === "record_plan";

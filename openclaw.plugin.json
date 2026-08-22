@@ -2,7 +2,7 @@
   "id": "development-cycle",
   "name": "Development Cycle",
   "description": "Adapter-agnostic supervised development cycles for OpenClaw with durable state, process supervision, validation gates, and correction loops.",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "configSchema": {
     "type": "object",
     "properties": {},

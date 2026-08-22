@@ -534,11 +534,11 @@ function analyzeImplementationPlan(text: string, context: any = {}) {
       /\b(?:npm test|npm run build|typecheck|lint|pytest|go test|cargo test)\b/i,
     ]),
     stopConditions: planMatchesAny(source, [
-      /stop conditions?|blocking conditions?|stop and report|human confirmation|protected or risky|rollback/i,
+      /stop conditions?|blocking conditions?|stop and report|stop before|human confirmation|protected or risky|rollback|forbidden|do not/i,
       /condi[cç][oõ]es?\s+de\s+paragem|parar|interromper|bloqueio|confirma[cç][aã]o humana|caminhos? protegidos?/i,
     ]),
     expectedArtifacts: planMatchesAny(source, [
-      /expected artifacts?|artifacts?|deliverables?|output paths?/i,
+      /expected artifacts?|artifacts?|deliverables?|output paths?|required screens?|required outputs?/i,
       /artefactos?|entreg[aá]veis|resultados?\s+esperados?|outputs?|ficheiros?\s+(?:gerados|finais?)/i,
     ]),
     relevantCodePaths: planMatchesAny(source, [

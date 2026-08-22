@@ -94,6 +94,7 @@ export function buildImplementationLaunchSpec(
       env: {
         ...genericEnv,
         OCTOPUS_CODEX_SANDBOX: config.octopusSandbox,
+        OCTOPUS_PRESERVE_CALLER_PROCESS_GROUP: "true",
         LOOP_UNTIL_APPROVED: config.loopUntilApproved ? "true" : "false",
         OCTOPUS_AGENT_LIFECYCLE_HOOK: input.observer?.agentHookPath || "",
         OCTOPUS_AGENT_LIFECYCLE_HOOK_LOG: input.observer?.hookLogPath || "",

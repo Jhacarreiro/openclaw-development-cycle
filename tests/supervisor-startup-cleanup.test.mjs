@@ -67,7 +67,12 @@ raise SystemExit(1)
   const planText = "# Plan\n\n## Project paths\n\nprojectWikiPath: docs\nprojectRoot: project\nrelevant code paths: none\nvalidation checks: process proof\nstop conditions: startup failure\nexpected artifacts: process proof\n";
   await tool.execute("record", { action: "record_plan", project: "fixture", runId, projectRoot: project, projectWikiPath: join(docs, "fixture"), planText, force: true });
 
-  await assert.rejects(() => tool.execute("fail", { action: "start_implementation", project: "fixture", runId, projectRoot: project }), /runner_supervisor_start_failed/);
+  // Merged onto current main: start_implementation reports supervisor-launch
+  // failure as a structured ok:false result (with the session marked failed)
+  // instead of a raw throw, so the launch-failure state is observable.
+  const failRes = await tool.execute("fail", { action: "start_implementation", project: "fixture", runId, projectRoot: project });
+  assert.equal(failRes.details?.ok, false);
+  assert.match(String(failRes.details?.error || ""), /runner_supervisor_start_failed/);
   const brokenPid = Number((await readFile(pidFile, "utf8")).trim());
   await waitDead(brokenPid);
   const deadPing = spawnSync("python3", [real, "--socket", sock, "ping"], { encoding: "utf8", timeout: 1000 });

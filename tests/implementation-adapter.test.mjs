@@ -77,7 +77,7 @@ test("Octopus adapter translates the generic request into orchestrate.sh", () =>
   assert.equal(spec.env.CRABFLEET_ROOT_SESSION_ID, "session-1");
 });
 
-test("Octopus adapter maps exact role routes into design-review seat identities", () => {
+test("Octopus adapter maps canonical role routes into Octopus review seat identities", () => {
   const previousHome = process.env.HOME;
   const home = mkdtempSync(join(tmpdir(), "development-cycle-octopus-"));
   const configDir = join(home, ".claude-octopus", "config");
@@ -87,10 +87,14 @@ test("Octopus adapter maps exact role routes into design-review seat identities"
     JSON.stringify({
       routing: {
         roles: {
-          implementer: { provider: "commandcode", model: "meta/muse-spark-1.2-contributor" },
-          researcher: { provider: "commandcode", model: "tencent/hy3-paid" },
+          architect: { provider: "claude", model: "claude-opus-5" },
+          strategist: { provider: "commandcode", model: "qwen/qwen3.8-27b" },
+          "security-reviewer": { provider: "claude", model: "claude-opus-5" },
           "code-reviewer": { provider: "codex", model: "gpt-5.6-luna" },
+          implementer: { provider: "commandcode", model: "meta/muse-spark-1.2-contributor" },
+          "implementer-heavy": { provider: "codex", model: "gpt-5.6-sol" },
           synthesizer: { provider: "commandcode", model: "thinkingmachines/inkling-small" },
+          researcher: { provider: "commandcode", model: "tencent/hy3-paid" },
         },
       },
     }),
@@ -123,6 +127,17 @@ test("Octopus adapter maps exact role routes into design-review seat identities"
       spec.env.OCTOPUS_DESIGN_REVIEW_SYNTHESIZER_AGENT,
       "commandcode:thinkingmachines/inkling-small",
     );
+    assert.equal(spec.env.OCTOPUS_REVIEW_LOGIC_AGENT, "codex:gpt-5.6-luna");
+    assert.equal(spec.env.OCTOPUS_REVIEW_SECURITY_AGENT, "claude:claude-opus-5");
+    assert.equal(spec.env.OCTOPUS_REVIEW_ARCHITECTURE_AGENT, "claude:claude-opus-5");
+    assert.equal(spec.env.OCTOPUS_REVIEW_CVE_AGENT, "commandcode:tencent/hy3-paid");
+    assert.equal(spec.env.OCTOPUS_REVIEW_DIVERSITY_AGENT, "commandcode:qwen/qwen3.8-27b");
+    assert.equal(spec.env.OCTOPUS_REVIEW_VERIFIER_AGENT, "codex:gpt-5.6-luna");
+    assert.equal(spec.env.OCTOPUS_REVIEW_DEBATER_AGENT, "commandcode:qwen/qwen3.8-27b");
+    assert.equal(
+      spec.env.OCTOPUS_REVIEW_SYNTHESIZER_AGENT,
+      "commandcode:thinkingmachines/inkling-small",
+    );
   } finally {
     if (previousHome === undefined) delete process.env.HOME;
     else process.env.HOME = previousHome;
@@ -130,7 +145,7 @@ test("Octopus adapter maps exact role routes into design-review seat identities"
   }
 });
 
-test("Octopus adapter does not invent design-review seats for non-exact role routes", () => {
+test("Octopus adapter does not invent routed review seats for non-exact role routes", () => {
   const previousHome = process.env.HOME;
   const home = mkdtempSync(join(tmpdir(), "development-cycle-octopus-"));
   const configDir = join(home, ".claude-octopus", "config");
@@ -163,6 +178,8 @@ test("Octopus adapter does not invent design-review seats for non-exact role rou
 
     assert.equal(spec.env.OCTOPUS_DESIGN_REVIEW_IMPLEMENTER_AGENT, undefined);
     assert.equal(spec.env.OCTOPUS_DESIGN_REVIEW_RESEARCHER_AGENT, undefined);
+    assert.equal(spec.env.OCTOPUS_REVIEW_CVE_AGENT, undefined);
+    assert.equal(spec.env.OCTOPUS_REVIEW_DEBATER_AGENT, undefined);
   } finally {
     if (previousHome === undefined) delete process.env.HOME;
     else process.env.HOME = previousHome;

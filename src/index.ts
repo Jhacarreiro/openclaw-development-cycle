@@ -2421,14 +2421,15 @@ Create or validate the implementation plan only. Do not implement. The plan must
     }
     const launch = await createImplementationRunnerSession(dir, { project, runId, projectRoot, command, prompt, kind: "delivery", implementationAdapter: adapter, planPath: containedPlanPath, timeoutSeconds: Number(params.timeoutSeconds ?? params.timeout_ms ?? 0), observerObservationId, purpose: `development_cycle ${command} ${project}` });
     if (!launch.ok) {
+      const observerFinalization = await finalizeObserverSessions(dir, { ...status, observerObservationId }, "failed");
       // Supervisor-startup failure: the session is already marked
       // launchState:"failed" (no phantom running state), and the run stays in
       // plan_ready_for_implementation so the same handoff can be retried once
       // the supervisor is healthy again - matching the retry contract.
+      // Observer roots are still finalized: nothing is running to attach to.
       if (String(launch.error || "").startsWith("runner_supervisor_start_failed")) {
-        return { ok: false, project, runId, dir, error: launch.error, observerObservationId };
+        return { ok: false, project, runId, dir, error: launch.error, observerObservationId, observerFinalization };
       }
-      const observerFinalization = await finalizeObserverSessions(dir, { ...status, observerObservationId }, "failed");
       const next = await cycleStatus(dir, { phase: "implementation_failed", owner: "main", ok: false, nextAction: "Fix direct runner launch blocker, then launch a new clean handoff.", error: launch.error || "direct_runner_launch_failed", projectRoot, projectWikiPath: containedProjectWikiPath, implementationCommand: command, codexSandbox: defaultCodexSandbox, observerObservationId, observerFinalization, implementationHandoffRequest: handoffRequest });
       return { ok: false, project, runId, dir, phase: next.phase, error: next.error, observerObservationId, observerFinalization };
     }

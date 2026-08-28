@@ -60,8 +60,13 @@ function text(env: NodeJS.ProcessEnv, name: string, fallback = ""): string {
 }
 
 function positiveInteger(env: NodeJS.ProcessEnv, name: string, fallback: number): number {
-  const parsed = Number(env[name]);
-  return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
+  // Decimal-only parse: Number() would accept "0x10" (16), "0b101" (5),
+  // "1e3" (1000) and silently round unsafe integers > 2^53. Operators
+  // writing 0x10 almost certainly mean a decimal config value.
+  const raw = String(env[name] ?? "").trim();
+  if (!/^\d+$/.test(raw)) return fallback;
+  const parsed = Number(raw);
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : fallback;
 }
 
 function stringArray(env: NodeJS.ProcessEnv, name: string): string[] {

@@ -6,6 +6,10 @@ The format is based on Keep a Changelog and the project follows Semantic Version
 
 ## [Unreleased]
 
+### Changed
+
+- Positive integer environment values accept only plain decimal digits that form a JavaScript safe integer. Scientific, hex, and binary `Number()` syntax (`1e3`, `0x10`, `0b101`) and values outside `Number.MAX_SAFE_INTEGER` now fall back to the documented defaults instead of being coerced.
+
 ## [0.1.0] - 2026-07-16
 
 ### Added

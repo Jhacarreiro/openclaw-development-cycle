@@ -49,6 +49,7 @@ async function loadTool(root, { failTerminal = false } = {}) {
   process.env.DEVELOPMENT_CYCLE_PROJECT_DOCS_ROOT = join(root, "docs");
   process.env.DEVELOPMENT_CYCLE_NOTIFICATIONS_ENABLED = "false";
   process.env.DEVELOPMENT_CYCLE_OBSERVER_ENABLED = "true";
+  process.env.DEVELOPMENT_CYCLE_REPOSITORY_DELIVERY_ENABLED = "false";
   process.env.DEVELOPMENT_CYCLE_OBSERVER_HELPER_PATH = helperPath;
   process.env.DEVELOPMENT_CYCLE_IMPLEMENTATION_COMMAND = join(root, "missing-adapter");
 

@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 import {
   buildImplementationLaunchSpec,
@@ -72,6 +75,99 @@ test("Octopus adapter translates the generic request into orchestrate.sh", () =>
   assert.equal(spec.env.LOOP_UNTIL_APPROVED, "true");
   assert.equal(spec.env.OCTOPUS_AGENT_ROOT_SESSION_ID, "session-1");
   assert.equal(spec.env.CRABFLEET_ROOT_SESSION_ID, "session-1");
+});
+
+test("Octopus adapter maps exact role routes into design-review seat identities", () => {
+  const previousHome = process.env.HOME;
+  const home = mkdtempSync(join(tmpdir(), "development-cycle-octopus-"));
+  const configDir = join(home, ".claude-octopus", "config");
+  mkdirSync(configDir, { recursive: true });
+  writeFileSync(
+    join(configDir, "providers.json"),
+    JSON.stringify({
+      routing: {
+        roles: {
+          implementer: { provider: "commandcode", model: "meta/muse-spark-1.2-contributor" },
+          researcher: { provider: "commandcode", model: "tencent/hy3-paid" },
+          "code-reviewer": { provider: "codex", model: "gpt-5.6-luna" },
+          synthesizer: { provider: "commandcode", model: "thinkingmachines/inkling-small" },
+        },
+      },
+    }),
+  );
+
+  try {
+    process.env.HOME = home;
+    const spec = buildImplementationLaunchSpec(
+      {
+        adapter: "octopus",
+        command: "",
+        args: [],
+        octopusRoot: "/opt/octopus",
+        octopusSandbox: "workspace-write",
+        loopUntilApproved: true,
+      },
+      { ...baseInput, adapter: "octopus", command: "tangle" },
+    );
+
+    assert.equal(
+      spec.env.OCTOPUS_DESIGN_REVIEW_IMPLEMENTER_AGENT,
+      "commandcode:meta/muse-spark-1.2-contributor",
+    );
+    assert.equal(
+      spec.env.OCTOPUS_DESIGN_REVIEW_RESEARCHER_AGENT,
+      "commandcode:tencent/hy3-paid",
+    );
+    assert.equal(spec.env.OCTOPUS_DESIGN_REVIEW_CODE_REVIEWER_AGENT, "codex:gpt-5.6-luna");
+    assert.equal(
+      spec.env.OCTOPUS_DESIGN_REVIEW_SYNTHESIZER_AGENT,
+      "commandcode:thinkingmachines/inkling-small",
+    );
+  } finally {
+    if (previousHome === undefined) delete process.env.HOME;
+    else process.env.HOME = previousHome;
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("Octopus adapter does not invent design-review seats for non-exact role routes", () => {
+  const previousHome = process.env.HOME;
+  const home = mkdtempSync(join(tmpdir(), "development-cycle-octopus-"));
+  const configDir = join(home, ".claude-octopus", "config");
+  mkdirSync(configDir, { recursive: true });
+  writeFileSync(
+    join(configDir, "providers.json"),
+    JSON.stringify({
+      routing: {
+        roles: {
+          implementer: "commandcode",
+          researcher: { provider: "commandcode" },
+        },
+      },
+    }),
+  );
+
+  try {
+    process.env.HOME = home;
+    const spec = buildImplementationLaunchSpec(
+      {
+        adapter: "octopus",
+        command: "",
+        args: [],
+        octopusRoot: "/opt/octopus",
+        octopusSandbox: "workspace-write",
+        loopUntilApproved: true,
+      },
+      { ...baseInput, adapter: "octopus", command: "tangle" },
+    );
+
+    assert.equal(spec.env.OCTOPUS_DESIGN_REVIEW_IMPLEMENTER_AGENT, undefined);
+    assert.equal(spec.env.OCTOPUS_DESIGN_REVIEW_RESEARCHER_AGENT, undefined);
+  } finally {
+    if (previousHome === undefined) delete process.env.HOME;
+    else process.env.HOME = previousHome;
+    rmSync(home, { recursive: true, force: true });
+  }
 });
 
 test("Octopus adapter omits timeout when the control plane delegates timeout policy", () => {

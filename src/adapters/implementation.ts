@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
 export type ImplementationAdapterKind = "command" | "octopus";
@@ -54,6 +55,67 @@ function genericEnvironment(input: ImplementationLaunchInput): Record<string, st
   };
 }
 
+const DESIGN_REVIEW_ROLE_ENV: ReadonlyArray<readonly [string, string]> = [
+  ["implementer", "OCTOPUS_DESIGN_REVIEW_IMPLEMENTER_AGENT"],
+  ["researcher", "OCTOPUS_DESIGN_REVIEW_RESEARCHER_AGENT"],
+  ["code-reviewer", "OCTOPUS_DESIGN_REVIEW_CODE_REVIEWER_AGENT"],
+  ["synthesizer", "OCTOPUS_DESIGN_REVIEW_SYNTHESIZER_AGENT"],
+];
+
+/**
+ * Keep Octopus design-review seats aligned with exact role routes when the
+ * caller has selected a role-specific lineup in providers.json.
+ *
+ * Octopus intentionally namespaces design-* roles so they do not accidentally
+ * inherit execution-role model routes. Its supported DESIGN_REVIEW_*_AGENT
+ * overrides accept literal provider:model seat identities.
+ *
+ * Explicit process-level OCTOPUS_DESIGN_REVIEW_*_AGENT values win. If the
+ * Octopus config is missing, malformed, or a role route is not an exact
+ * {provider, model} object, no value is invented and upstream behavior remains
+ * unchanged for that seat.
+ */
+function octopusDesignReviewEnvironment(): Record<string, string> {
+  const env: Record<string, string> = {};
+  const pending: Array<readonly [string, string]> = [];
+
+  for (const [role, envName] of DESIGN_REVIEW_ROLE_ENV) {
+    const explicit = String(process.env[envName] || "").trim();
+    if (explicit) {
+      env[envName] = explicit;
+    } else {
+      pending.push([role, envName]);
+    }
+  }
+
+  if (pending.length === 0) return env;
+
+  const home = String(process.env.HOME || "").trim();
+  if (!home) return env;
+
+  try {
+    const configPath = join(home, ".claude-octopus", "config", "providers.json");
+    const parsed = JSON.parse(readFileSync(configPath, "utf8")) as {
+      routing?: { roles?: Record<string, unknown> };
+    };
+    const roles = parsed?.routing?.roles;
+    if (!roles || typeof roles !== "object") return env;
+
+    for (const [role, envName] of pending) {
+      const route = roles[role];
+      if (!route || typeof route !== "object" || Array.isArray(route)) continue;
+      const target = route as Record<string, unknown>;
+      const provider = typeof target.provider === "string" ? target.provider.trim() : "";
+      const model = typeof target.model === "string" ? target.model.trim() : "";
+      if (provider && model) env[envName] = `${provider}:${model}`;
+    }
+  } catch {
+    // Missing or malformed Octopus config: preserve upstream behavior.
+  }
+
+  return env;
+}
+
 export function buildImplementationLaunchSpec(
   config: ImplementationAdapterConfig,
   input: ImplementationLaunchInput,
@@ -94,6 +156,7 @@ export function buildImplementationLaunchSpec(
       env: {
         ...genericEnv,
         OCTOPUS_CODEX_SANDBOX: config.octopusSandbox,
+        ...octopusDesignReviewEnvironment(),
         OCTOPUS_PRESERVE_CALLER_PROCESS_GROUP: "true",
         LOOP_UNTIL_APPROVED: config.loopUntilApproved ? "true" : "false",
         OCTOPUS_AGENT_LIFECYCLE_HOOK: input.observer?.agentHookPath || "",

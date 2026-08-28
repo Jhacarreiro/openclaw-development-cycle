@@ -55,31 +55,40 @@ function genericEnvironment(input: ImplementationLaunchInput): Record<string, st
   };
 }
 
-const DESIGN_REVIEW_ROLE_ENV: ReadonlyArray<readonly [string, string]> = [
+const OCTOPUS_ROUTED_SEAT_ROLE_ENV: ReadonlyArray<readonly [string, string]> = [
+  // Design Review ceremony.
   ["implementer", "OCTOPUS_DESIGN_REVIEW_IMPLEMENTER_AGENT"],
   ["researcher", "OCTOPUS_DESIGN_REVIEW_RESEARCHER_AGENT"],
   ["code-reviewer", "OCTOPUS_DESIGN_REVIEW_CODE_REVIEWER_AGENT"],
   ["synthesizer", "OCTOPUS_DESIGN_REVIEW_SYNTHESIZER_AGENT"],
+
+  // Contextual code review. These map semantic seats back to the canonical
+  // eight routing roles rather than maintaining a second model table.
+  ["code-reviewer", "OCTOPUS_REVIEW_LOGIC_AGENT"],
+  ["security-reviewer", "OCTOPUS_REVIEW_SECURITY_AGENT"],
+  ["architect", "OCTOPUS_REVIEW_ARCHITECTURE_AGENT"],
+  ["researcher", "OCTOPUS_REVIEW_CVE_AGENT"],
+  ["strategist", "OCTOPUS_REVIEW_DIVERSITY_AGENT"],
+  ["code-reviewer", "OCTOPUS_REVIEW_VERIFIER_AGENT"],
+  ["strategist", "OCTOPUS_REVIEW_DEBATER_AGENT"],
+  ["synthesizer", "OCTOPUS_REVIEW_SYNTHESIZER_AGENT"],
 ];
 
 /**
- * Keep Octopus design-review seats aligned with exact role routes when the
- * caller has selected a role-specific lineup in providers.json.
+ * Keep Octopus ceremony/review seats aligned with the exact canonical role
+ * routes in providers.json. Seat-specific upstream environment variables are
+ * launch-time transport only; providers.json remains the single model source
+ * of truth.
  *
- * Octopus intentionally namespaces design-* roles so they do not accidentally
- * inherit execution-role model routes. Its supported DESIGN_REVIEW_*_AGENT
- * overrides accept literal provider:model seat identities.
- *
- * Explicit process-level OCTOPUS_DESIGN_REVIEW_*_AGENT values win. If the
- * Octopus config is missing, malformed, or a role route is not an exact
- * {provider, model} object, no value is invented and upstream behavior remains
- * unchanged for that seat.
+ * Explicit process-level seat overrides win. If the Octopus config is missing,
+ * malformed, or a role route is not an exact {provider, model} object, no value
+ * is invented and upstream behavior remains unchanged for that seat.
  */
-function octopusDesignReviewEnvironment(): Record<string, string> {
+function octopusRoutedSeatEnvironment(): Record<string, string> {
   const env: Record<string, string> = {};
   const pending: Array<readonly [string, string]> = [];
 
-  for (const [role, envName] of DESIGN_REVIEW_ROLE_ENV) {
+  for (const [role, envName] of OCTOPUS_ROUTED_SEAT_ROLE_ENV) {
     const explicit = String(process.env[envName] || "").trim();
     if (explicit) {
       env[envName] = explicit;
@@ -156,7 +165,7 @@ export function buildImplementationLaunchSpec(
       env: {
         ...genericEnv,
         OCTOPUS_CODEX_SANDBOX: config.octopusSandbox,
-        ...octopusDesignReviewEnvironment(),
+        ...octopusRoutedSeatEnvironment(),
         OCTOPUS_PRESERVE_CALLER_PROCESS_GROUP: "true",
         LOOP_UNTIL_APPROVED: config.loopUntilApproved ? "true" : "false",
         OCTOPUS_AGENT_LIFECYCLE_HOOK: input.observer?.agentHookPath || "",

@@ -85,7 +85,7 @@ export DEVELOPMENT_CYCLE_OCTOPUS_SANDBOX=workspace-write
 
 When the optional observer integration is enabled, the adapter maps generic observer metadata to the Octopus and Crabfleet lifecycle environment expected by that ecosystem.
 
-When Octopus `providers.json` contains exact `{provider, model}` routes for `implementer`, `researcher`, `code-reviewer`, and `synthesizer`, the adapter also maps those routes into the upstream `OCTOPUS_DESIGN_REVIEW_*_AGENT` seat overrides as literal `provider:model` identities. Explicit process-level design-review overrides take precedence; missing, malformed, or non-exact role routes leave upstream Octopus behavior unchanged.
+When Octopus `providers.json` contains exact `{provider, model}` routes, the adapter treats those canonical routing roles as the single source of truth for model selection. It maps them into upstream model-qualified seat overrides at launch time: Design Review uses `implementer`, `researcher`, `code-reviewer`, and `synthesizer`; contextual review maps logic/verifier to `code-reviewer`, security to `security-reviewer`, architecture to `architect`, CVE research to `researcher`, diversity/debate to `strategist`, and synthesis to `synthesizer`. The emitted `OCTOPUS_*_AGENT` values are transport only and are not a second persistent model table. Explicit process-level seat overrides take precedence; missing, malformed, or non-exact role routes leave upstream Octopus behavior unchanged.
 
 Council review and council-driven corrections are adapter-specific capabilities and only run when the active adapter is `octopus`.
 

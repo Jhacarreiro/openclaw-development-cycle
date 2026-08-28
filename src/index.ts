@@ -16,6 +16,25 @@ import { createFilesystemStore } from "./storage/filesystem.js";
 import { buildImplementationLaunchSpec, jsonShellQuote, renderShellCommand, renderShellEnvironment, shellQuote } from "./adapters/implementation.js";
 
 const developmentCycleConfig = loadDevelopmentCycleConfig();
+function envCap(name: string, fallback: number, floor: number): number {
+  const raw = process.env[name];
+  const parsed = raw === undefined || raw === "" ? NaN : Number.parseInt(raw, 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
+  return Math.max(floor, Math.floor(parsed));
+}
+
+const MAX_PROMPT_BYTES = envCap("DEVELOPMENT_CYCLE_MAX_PROMPT_BYTES", 2 * 1024 * 1024, 1024);
+const MAX_RUNNER_TIMEOUT_SECONDS = envCap("DEVELOPMENT_CYCLE_MAX_RUNNER_TIMEOUT_SECONDS", 24 * 60 * 60, 60);
+const MAX_TOOL_TEXT_BYTES = envCap("DEVELOPMENT_CYCLE_MAX_TOOL_TEXT_BYTES", 2 * 1024 * 1024, 1024);
+
+function assertToolText(label: string, value: unknown): { ok: true; text: string } | { ok: false; error: string; maxBytes: number; bytes: number } {
+  const text = String(value ?? "");
+  const bytes = Buffer.byteLength(text, "utf8");
+  if (bytes > MAX_TOOL_TEXT_BYTES) {
+    return { ok: false, error: `${label}_too_large`, maxBytes: MAX_TOOL_TEXT_BYTES, bytes };
+  }
+  return { ok: true, text };
+}
 const secretPath = developmentCycleConfig.externalGate.secretPath;
 const defaultUrl = developmentCycleConfig.externalGate.url;
 const lit = (...xs: string[]) => Type.Union(xs.map((x) => Type.Literal(x)));
@@ -180,10 +199,28 @@ async function createImplementationRunnerSession(dir: string, params: any) {
   const prompt = String(params.prompt || "");
   const command = String(params.command || "implement");
   const mode = String(params.kind || "delivery") === "corrections" ? "corrections" : "delivery";
-  const timeoutSeconds = Number(params.timeoutSeconds ?? 0);
-  const effectiveTimeoutSeconds = timeoutSeconds > 0
-    ? timeoutSeconds
-    : (runnerDefaultTimeoutSeconds > 0 ? runnerDefaultTimeoutSeconds : undefined);
+  const timeoutSeconds = params.timeoutSeconds == null ? 0 : Number(params.timeoutSeconds);
+  if (!Number.isFinite(timeoutSeconds)) {
+    return {
+      ok: false,
+      error: "timeout_not_finite",
+      timeoutSeconds: params.timeoutSeconds,
+      projectRoot,
+      promptBytes: Buffer.byteLength(prompt, "utf8"),
+    };
+  }
+  const effectiveTimeoutSeconds = Math.min(
+    timeoutSeconds > 0 ? timeoutSeconds : runnerDefaultTimeoutSeconds,
+    MAX_RUNNER_TIMEOUT_SECONDS,
+  );
+  if (Buffer.byteLength(prompt, "utf8") > MAX_PROMPT_BYTES) {
+    return {
+      ok: false,
+      error: "prompt_too_large",
+      maxPromptBytes: MAX_PROMPT_BYTES,
+      promptBytes: Buffer.byteLength(prompt, "utf8"),
+    };
+  }
   const observerRootSessionId = String(params.observerObservationId || "");
   if (developmentCycleConfig.observer.enabled && !observerRootSessionId) {
     return { ok: false, error: "observer_root_session_missing" };
@@ -2233,6 +2270,10 @@ async function projectCycle(params: any) {
       return { ok: false, error: "active_run_present", project, runId, dir, phase: livePhase, hint: "Call stop_implementation first, then request a new plan." };
     }
     const direction = String(params.direction || params.objective || "Create or validate the implementation plan for this development cycle.");
+    {
+      const checked = assertToolText("direction", direction);
+      if (!checked.ok) return { ok: false, error: checked.error, maxBytes: checked.maxBytes, bytes: checked.bytes, project, runId, dir };
+    }
     const projectRoot = String(params.projectRoot || status.projectRoot || "");
     const projectWikiPath = resolveTrustedProjectWikiPath(project, params.projectWikiPath, status.projectWikiPath);
     const existingPlanPath = String(params.planPath || "");
@@ -2313,6 +2354,10 @@ Create or validate the implementation plan only. Do not implement. The plan must
       }
     }
     if (!String(planText).trim()) return { ok: false, error: "planText_or_planPath_required", project, runId, dir };
+    {
+      const checked = assertToolText("planText", planText);
+      if (!checked.ok) return { ok: false, error: checked.error, maxBytes: checked.maxBytes, bytes: checked.bytes, project, runId, dir };
+    }
     if (!params.force && looksLikePlanRequest(String(planText))) {
       return { ok: false, error: "plan_request_not_implementation_plan", project, runId, dir, nextAction: "Ask an external gate or human reviewer to write the actual implementation plan, then call record_plan with that plan. Use force only after explicit human confirmation." };
     }
@@ -2414,7 +2459,7 @@ Create or validate the implementation plan only. Do not implement. The plan must
     if (!launch.ok) {
       const observerFinalization = await finalizeObserverSessions(dir, { ...status, observerObservationId }, "failed");
       const next = await cycleStatus(dir, { phase: "implementation_failed", owner: "main", ok: false, nextAction: "Fix direct runner launch blocker, then launch a new clean handoff.", error: launch.error || "direct_runner_launch_failed", projectRoot, projectWikiPath: containedProjectWikiPath, implementationCommand: command, codexSandbox: defaultCodexSandbox, observerObservationId, observerFinalization, implementationHandoffRequest: handoffRequest });
-      return { ok: false, project, runId, dir, phase: next.phase, error: next.error, observerObservationId, observerFinalization };
+      return { ok: false, project, runId, dir, phase: next.phase, error: next.error, observerObservationId, observerFinalization, maxPromptBytes: launch.maxPromptBytes, promptBytes: launch.promptBytes, timeoutSeconds: launch.timeoutSeconds };
     }
     await updateImplementationObserverSession(dir, observerObservationId, { project, runId, command, projectRoot, projectWikiPath: containedProjectWikiPath, stdoutPath: launch.stdoutPath, stderrPath: launch.stderrPath, pid: launch.status?.runnerPid, processGroup: launch.status?.processGroupId, status: "running", summary: `development_cycle ${command} ${project} running`, message: "Implementation runner launched and bound to the observer root process." });
     const launchRecord = join(dir, "implementation_launch.json");
@@ -2446,6 +2491,10 @@ Create or validate the implementation plan only. Do not implement. The plan must
       await projectRootB?.handle.close().catch(() => null);
     }
     if (!String(deliveryText).trim()) return { ok: false, error: "deliveryText_or_deliveryPath_required", project, runId, dir };
+    {
+      const checked = assertToolText("deliveryText", deliveryText);
+      if (!checked.ok) return { ok: false, error: checked.error, maxBytes: checked.maxBytes, bytes: checked.bytes, project, runId, dir };
+    }
     const file = join(dir, "implementation_delivery.md");
     await writeFile(file, String(deliveryText));
     const next = await cycleStatus(dir, { phase: "implementation_delivered", owner: "main", nextAction: "Call request_final_validation.", implementationDelivery: file });
@@ -2495,6 +2544,10 @@ Create or validate the implementation plan only. Do not implement. The plan must
     if (!String(validationText).trim()) return { ok: false, error: "validationText_or_validationPath_required", project, runId, dir };
     const parsedDecision = parseFinalDecision(validationText);
     if (!parsedDecision.ok) return { ok: false, project, runId, dir, ...parsedDecision };
+    {
+      const checked = assertToolText("validationText", validationText);
+      if (!checked.ok) return { ok: false, error: checked.error, maxBytes: checked.maxBytes, bytes: checked.bytes, project, runId, dir };
+    }
     const file = join(dir, "final_validation_response.md");
     await writeFile(file, String(validationText));
     const phase = parsedDecision.decision === "go" ? "final_validated" : parsedDecision.decision === "stop" ? "stopped" : "needs_corrections";
@@ -2551,7 +2604,7 @@ Create or validate the implementation plan only. Do not implement. The plan must
     if (!launch.ok) {
       const observerFinalization = await finalizeObserverSessions(dir, { ...status, observerCorrectionsObservationId: observerObservationId }, "failed");
       const next = await cycleStatus(dir, { phase: "corrections_failed", owner: "main", ok: false, error: launch.error || "direct_runner_launch_failed", projectRoot, codexSandbox: defaultCodexSandbox, observerCorrectionsObservationId: observerObservationId, observerFinalization, implementationCorrectionsRequest: requestPath });
-      return { ok: false, project, runId, dir, phase: next.phase, error: next.error, observerObservationId, observerFinalization };
+      return { ok: false, project, runId, dir, phase: next.phase, error: next.error, observerObservationId, observerFinalization, maxPromptBytes: launch.maxPromptBytes, promptBytes: launch.promptBytes, timeoutSeconds: launch.timeoutSeconds };
     }
     await updateImplementationObserverSession(dir, observerObservationId, { project, runId, command: "corrections", projectRoot, projectWikiPath: status.projectWikiPath || "", stdoutPath: launch.stdoutPath, stderrPath: launch.stderrPath, status: "running", summary: `development_cycle corrections ${project} running`, message: "Corrections runner launched; observer integration is optional." });
     const launchRecord = join(dir, "implementation_corrections_launch.json");

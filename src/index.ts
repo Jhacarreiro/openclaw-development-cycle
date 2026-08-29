@@ -316,6 +316,8 @@ ${commandLine} > ${shellQuote(stdoutPath)} 2> ${shellQuote(stderrPath)}
 `;
   await writeFile(runnerPath, runnerScript, { mode: 0o755 } as any);
 
+  await rm(exitCodePath, { force: true });
+  await rm(exitedAtPath, { force: true });
   const now = new Date().toISOString();
   const status: any = {
     id: sessionId,
@@ -1140,8 +1142,20 @@ async function runRepositoryDeliveryAdapter(dir: string, status: any, params: an
     await saveJson(resultPath, result);
     return { ...result, resultPath };
   }
+  if (!repositoryDeliveryConfig.enabled) {
+    const result = {
+      ok: true,
+      skipped: true,
+      localOnly: true,
+      classification,
+      reason: "repository_delivery_disabled",
+      requestPath,
+      completedAt: new Date().toISOString(),
+    };
+    await saveJson(resultPath, result);
+    return { ...result, resultPath };
+  }
   if (!projectRoot) return { ok: false, classification, error: "projectRoot_missing", requestPath, resultPath };
-  if (!repositoryDeliveryConfig.enabled) return { ok: false, classification, error: "repository_delivery_disabled", requestPath, resultPath };
   if (!repositoryDeliveryConfig.command) return { ok: false, classification, error: "repository_delivery_command_missing", requestPath, resultPath };
   let execResult: any;
   try {
@@ -1178,6 +1192,17 @@ async function runRepositoryDeliveryAdapter(dir: string, status: any, params: an
 
 async function finalizeRepositoryDeliveryState(dir: string, status: any, params: any) {
   const delivery = await runRepositoryDeliveryAdapter(dir, status, params);
+  if (delivery.localOnly) {
+    const phase = delivery.classification === "success" ? "closed_success" : "closed_partial";
+    const next = await cycleStatus(dir, {
+      phase,
+      owner: "main",
+      ok: true,
+      repositoryDelivery: delivery,
+      nextAction: "none",
+    });
+    return { ok: true, phase: next.phase, status: next, delivery };
+  }
   if (!delivery.ok) {
     const phase = delivery.skipped ? "closed_invalid" : "repository_delivery_failed";
     const next = await cycleStatus(dir, {

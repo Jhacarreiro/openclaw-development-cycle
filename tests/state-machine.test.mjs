@@ -44,6 +44,7 @@ test("close cannot bypass repository delivery", () => {
   assert.equal(checkActionTransition("close", "final_validated").ok, false);
   assert.equal(checkActionTransition("close", "stopped").ok, false);
   assert.equal(checkActionTransition("close", "merged").ok, true);
+  assert.equal(checkActionTransition("close", "closed_success").ok, true);
   assert.equal(checkActionTransition("close", "closed_partial").ok, true);
   assert.equal(checkActionTransition("close", "closed_invalid").ok, true);
 });

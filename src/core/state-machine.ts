@@ -55,7 +55,7 @@ const ALLOWED_PHASES: Partial<Record<DevelopmentCycleAction, ReadonlySet<string>
     "stopped",
     "repository_delivery_failed",
   ]),
-  close: new Set(["merged", "closed_partial", "closed_invalid"]),
+  close: new Set(["merged", "closed_success", "closed_partial", "closed_invalid"]),
 };
 
 export type TransitionCheck =

@@ -28,6 +28,8 @@ test("finalize_delivery accepts terminal delivery outcomes", () => {
     "corrections_failed",
     "council_review_needs_corrections",
     "council_review_failed",
+    "council_validated",
+    "council_review_waiting_human",
     "external_validation_failed",
     "stopped",
     "repository_delivery_failed",
@@ -42,6 +44,15 @@ test("close cannot bypass repository delivery", () => {
   assert.equal(checkActionTransition("close", "final_validated").ok, false);
   assert.equal(checkActionTransition("close", "stopped").ok, false);
   assert.equal(checkActionTransition("close", "merged").ok, true);
+  assert.equal(checkActionTransition("close", "closed_success").ok, true);
   assert.equal(checkActionTransition("close", "closed_partial").ok, true);
   assert.equal(checkActionTransition("close", "closed_invalid").ok, true);
+});
+
+test("council corrections can be launched from council_review_needs_corrections", () => {
+  assert.equal(checkActionTransition("start_corrections", "council_review_needs_corrections").ok, true);
+});
+
+test("failed implementation can be retried only through explicit start_implementation", () => {
+  assert.equal(checkActionTransition("start_implementation", "implementation_failed").ok, true);
 });

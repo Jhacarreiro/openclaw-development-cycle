@@ -7,13 +7,19 @@ import { join, relative, resolve, sep } from "node:path";
 import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
 import { setTimeout as sleep } from "node:timers/promises";
+import { randomUUID } from "node:crypto";
 import { ACTIONS, checkActionTransition } from "./core/state-machine.js";
 import { parseFinalDecision } from "./core/decisions.js";
 import { cleanId, newRunId as createRunId } from "./core/ids.js";
 import { nextStallQuietAccounting } from "./core/stall-accounting.js";
+import { councilNeedsCorrectionsText, resolveAutoCouncilCorrectionsMax } from "./core/council-policy.js";
+import { inferDeliveryClassification } from "./core/delivery-classification.js";
 import { loadDevelopmentCycleConfig } from "./config.js";
-import { createFilesystemStore } from "./storage/filesystem.js";
+import { acquireLock, createFilesystemStore } from "./storage/filesystem.js";
 import { buildImplementationLaunchSpec, jsonShellQuote, renderShellCommand, renderShellEnvironment, shellQuote } from "./adapters/implementation.js";
+
+const lifecycleLockHeld = Symbol("developmentCycleLifecycleLockHeld");
+const lifecycleLockTimeoutMs = 30000;
 
 const developmentCycleConfig = loadDevelopmentCycleConfig();
 const secretPath = developmentCycleConfig.externalGate.secretPath;
@@ -190,7 +196,9 @@ async function createImplementationRunnerSession(dir: string, params: any) {
   }
 
   const sessionId = cleanId(params.sessionId || `DC-${params.project || "project"}-${params.runId || Date.now()}-${Date.now()}`);
-  const sessionDir = join(dir, mode === "corrections" ? "corrections_session" : "implementation_session");
+  const attemptId = cleanId(params.attemptId || `${mode}-${Date.now()}-${randomUUID()}`, "attempt");
+  const sessionRootDir = join(dir, mode === "corrections" ? "corrections_session" : "implementation_session");
+  const sessionDir = join(sessionRootDir, "attempts", attemptId);
   const logsDir = join(sessionDir, "logs");
   const statusPath = join(sessionDir, "status.json");
   const payloadPath = join(sessionDir, "payload.json");
@@ -209,6 +217,8 @@ async function createImplementationRunnerSession(dir: string, params: any) {
     project: String(params.project || ""),
     runId: String(params.runId || ""),
     mode,
+    attemptId,
+    sessionId,
     projectRoot,
     projectRootIdentity,
     promptPath,
@@ -314,20 +324,23 @@ ${commandLine} > ${shellQuote(stdoutPath)} 2> ${shellQuote(stderrPath)}
 `;
   await writeFile(runnerPath, runnerScript, { mode: 0o755 } as any);
 
+  await rm(exitCodePath, { force: true });
+  await rm(exitedAtPath, { force: true });
   const now = new Date().toISOString();
   const status: any = {
     id: sessionId,
+    attemptId,
     runtime: "development-cycle-runner",
     adapter: launchSpec.adapter,
     command: `${launchSpec.displayName} ${command}`.trim(),
     owner: observerOwner,
-    status: "running",
-    launchState: "running",
+    status: "starting",
+    launchState: "launching",
     timeoutSeconds: effectiveTimeoutSeconds,
     timeoutPolicy: "bounded-with-heartbeat-stall-detection",
     observerRootSessionId,
     heartbeatPath: join(sessionDir, "heartbeat.json"),
-    message: `Implementation launched through the ${launchSpec.displayName} adapter.`,
+    message: `Implementation launch starting through the ${launchSpec.displayName} adapter.`,
     createdAt: now,
     updatedAt: now,
     projectRoot,
@@ -344,6 +357,7 @@ ${commandLine} > ${shellQuote(stdoutPath)} 2> ${shellQuote(stderrPath)}
   };
   await saveJson(payloadPath, {
     id: sessionId,
+    attemptId,
     project: request.project,
     runId: request.runId,
     mode,
@@ -356,31 +370,104 @@ ${commandLine} > ${shellQuote(stdoutPath)} 2> ${shellQuote(stderrPath)}
     purpose: params.purpose || "development_cycle implementation",
   });
   await saveJson(statusPath, status);
-
-  const supervisor = await ensureRunnerSupervisor();
-  const launched = await execFileAsync("python3", [runnerSupervisorPath, "--socket", runnerSupervisorSocket, "launch", runnerPath, sessionDir], {
-    cwd: sessionDir,
-    env: { ...process.env, HOME: runtimeHome },
-    timeout: 5000,
-    maxBuffer: 64 * 1024,
-  });
-  const launchInfo = JSON.parse(String(launched.stdout || "{}"));
-  const runnerPid = Number(launchInfo?.pid || 0);
-  if (!launchInfo?.ok || !Number.isInteger(runnerPid) || runnerPid <= 1) {
-    throw new Error(`supervised_runner_pid_invalid:${String(launched.stdout || "").trim()}`);
+  let supervisor: any = null;
+  try {
+    supervisor = await ensureRunnerSupervisor();
+    const launched = await execFileAsync("python3", [runnerSupervisorPath, "--socket", runnerSupervisorSocket, "launch", runnerPath, sessionDir], {
+      cwd: sessionDir,
+      env: { ...process.env, HOME: runtimeHome },
+      timeout: 5000,
+      maxBuffer: 64 * 1024,
+    });
+    const launchInfo = JSON.parse(String(launched.stdout || "{}"));
+    const runnerPid = Number(launchInfo?.pid || 0);
+    if (!launchInfo?.ok || !Number.isInteger(runnerPid) || runnerPid <= 1) {
+      throw new Error(`supervised_runner_pid_invalid:${String(launched.stdout || "").trim()}`);
+    }
+    const runningStatus = {
+      ...status,
+      status: "running",
+      launchState: "running",
+      runnerPid,
+      processGroupId: Number(launchInfo?.pgid || runnerPid),
+      runnerSupervisorPid: Number(launchInfo?.supervisorPid || supervisor?.pid || 0) || null,
+      runnerSupervisorSocket,
+      useProcessGroup: true,
+      stopSignalPolicy: "process-group-term-kill",
+      updatedAt: new Date().toISOString(),
+      message: `Implementation launched through the ${launchSpec.displayName} adapter.`,
+    };
+    const persistedBeforeRunning = await readJsonIfExists(statusPath);
+    const persistedAlreadyTerminal = persistedBeforeRunning
+      && (persistedBeforeRunning.launchState === "exited"
+        || ["completed", "failed", "interrupted", "stopped"].includes(String(persistedBeforeRunning.status || "").toLowerCase()));
+    if (persistedAlreadyTerminal) {
+      Object.assign(status, runningStatus, persistedBeforeRunning);
+    } else {
+      Object.assign(status, runningStatus);
+      await saveJson(statusPath, status);
+      const exitText = (await readTextIfExists(exitCodePath)).trim();
+      if (exitText) {
+        const exitCode = Number(exitText);
+        const exitedAt = (await readTextIfExists(exitedAtPath)).trim() || new Date().toISOString();
+        const persistedAfterRunning = await readJsonIfExists(statusPath) || status;
+        const terminalStatus = {
+          ...status,
+          ...persistedAfterRunning,
+          status: exitCode === 0 ? "completed" : "failed",
+          launchState: "exited",
+          exitCode,
+          exitedAt,
+          updatedAt: exitedAt,
+          message: exitCode === 0
+            ? "Implementation direct runner exited successfully."
+            : `Implementation direct runner exited non-zero: ${exitCode}`,
+        };
+        await saveJson(statusPath, terminalStatus);
+        Object.assign(status, terminalStatus);
+      } else {
+        const latestPersisted = await readJsonIfExists(statusPath);
+        if (latestPersisted) Object.assign(status, latestPersisted);
+      }
+    }
+  } catch (error: any) {
+    const failedAt = new Date().toISOString();
+    const failure = String(error?.message || error);
+    const failedStatus = {
+      ...status,
+      status: "failed",
+      launchState: "launch_failed",
+      runnerPid: null,
+      processGroupId: null,
+      error: failure,
+      failedAt,
+      updatedAt: failedAt,
+      message: "Implementation runner failed to launch.",
+    };
+    await saveJson(statusPath, failedStatus);
+    return {
+      ok: false,
+      adapter: launchSpec.adapter,
+      sessionId,
+      attemptId,
+      sessionDir,
+      statusPath,
+      payloadPath,
+      requestPath,
+      runnerPath,
+      promptPath,
+      exitCodePath,
+      stdoutPath,
+      stderrPath,
+      status: failedStatus,
+      error: failure,
+    };
   }
-  status.runnerPid = runnerPid;
-  status.processGroupId = Number(launchInfo?.pgid || runnerPid);
-  status.runnerSupervisorPid = Number(launchInfo?.supervisorPid || supervisor?.pid || 0) || null;
-  status.runnerSupervisorSocket = runnerSupervisorSocket;
-  status.useProcessGroup = true;
-  status.stopSignalPolicy = "process-group-term-kill";
-  status.updatedAt = new Date().toISOString();
-  await saveJson(statusPath, status);
   return {
     ok: true,
     adapter: launchSpec.adapter,
     sessionId,
+    attemptId,
     sessionDir,
     statusPath,
     payloadPath,
@@ -438,6 +525,7 @@ async function createImplementationObserverSession(dir: string, params: any) {
       enabled: false,
       project: params.project || "",
       runId: params.runId || "",
+      attemptId: params.attemptId || "",
       projectRoot: params.projectRoot || "",
       projectWikiPath: params.projectWikiPath || "",
       intervalSeconds: Number(params.watchIntervalSeconds || 60),
@@ -471,6 +559,7 @@ async function updateImplementationObserverSession(dir: string, id: string, para
       enabled: true,
       project: params.project || "",
       runId: params.runId || "",
+      attemptId: params.attemptId || "",
       projectRoot: params.projectRoot || "",
       projectWikiPath: params.projectWikiPath || "",
       intervalSeconds: Number(params.watchIntervalSeconds || 60),
@@ -1026,22 +1115,6 @@ async function execGit(args: string[], cwd = wikiRoot, timeout = 10000) {
   }
 }
 
-function inferDeliveryClassification(phase: string, requested: any) {
-  const raw = String(requested || "").trim().toLowerCase();
-  if (["success", "partial", "invalid"].includes(raw)) return raw;
-  if (phase === "final_validated") return "success";
-  if ([
-    "needs_corrections",
-    "implementation_failed",
-    "corrections_failed",
-    "council_review_needs_corrections",
-    "council_review_failed",
-    "external_validation_failed",
-    "stopped",
-  ].includes(phase)) return "partial";
-  return "invalid";
-}
-
 function repositoryFindings(status: any, max = 12) {
   const raw = [...(status?.councilReviewFindings || [])];
   if (status?.failureRecommendedAction) raw.push(String(status.failureRecommendedAction));
@@ -1083,8 +1156,20 @@ async function runRepositoryDeliveryAdapter(dir: string, status: any, params: an
     await saveJson(resultPath, result);
     return { ...result, resultPath };
   }
+  if (!repositoryDeliveryConfig.enabled) {
+    const result = {
+      ok: true,
+      skipped: true,
+      localOnly: true,
+      classification,
+      reason: "repository_delivery_disabled",
+      requestPath,
+      completedAt: new Date().toISOString(),
+    };
+    await saveJson(resultPath, result);
+    return { ...result, resultPath };
+  }
   if (!projectRoot) return { ok: false, classification, error: "projectRoot_missing", requestPath, resultPath };
-  if (!repositoryDeliveryConfig.enabled) return { ok: false, classification, error: "repository_delivery_disabled", requestPath, resultPath };
   if (!repositoryDeliveryConfig.command) return { ok: false, classification, error: "repository_delivery_command_missing", requestPath, resultPath };
   let execResult: any;
   try {
@@ -1121,6 +1206,17 @@ async function runRepositoryDeliveryAdapter(dir: string, status: any, params: an
 
 async function finalizeRepositoryDeliveryState(dir: string, status: any, params: any) {
   const delivery = await runRepositoryDeliveryAdapter(dir, status, params);
+  if (delivery.localOnly) {
+    const phase = delivery.classification === "success" ? "closed_success" : "closed_partial";
+    const next = await cycleStatus(dir, {
+      phase,
+      owner: "main",
+      ok: true,
+      repositoryDelivery: delivery,
+      nextAction: "none",
+    });
+    return { ok: true, phase: next.phase, status: next, delivery };
+  }
   if (!delivery.ok) {
     const phase = delivery.skipped ? "closed_invalid" : "repository_delivery_failed";
     const next = await cycleStatus(dir, {
@@ -1265,15 +1361,30 @@ async function finalizeObserverSessions(dir: string, status: any, terminal: stri
 async function refreshLaunchedImplementationStatus(dir: string, status: any) {
   const phase = String(status?.phase || "");
   if (!["implementation_launched", "implementation_running", "implementation_failed", "implementation_delivered", "corrections_launched", "corrections_running", "corrections_failed", "corrections_completed"].includes(phase)) return status;
-  const statusPath = status?.directImplementationStatus || status?.directCorrectionsStatus;
+  const isCorrectionsRun = phase.startsWith("corrections_");
+  const statusPath = isCorrectionsRun
+    ? status?.directCorrectionsStatus
+    : status?.directImplementationStatus;
   let session: any = statusPath ? await readJsonIfExists(String(statusPath)) : null;
   if (!session) {
-    const sid = status?.observerSessionId || status?.observerCorrectionsSessionId;
+    const sid = isCorrectionsRun ? status?.observerCorrectionsSessionId : status?.observerSessionId;
     if (sid) session = await readJsonIfExists(join(adapterSessionsRoot, String(sid), "status.json"));
   }
   if (!session) return status;
-  const stdoutPath = session.stdoutPath || session.logs?.stdout || status?.implementationStdout || status?.correctionsStdout;
-  const stderrPath = session.stderrPath || session.logs?.stderr || status?.implementationStderr || status?.correctionsStderr;
+  const activeAttemptId = String(isCorrectionsRun ? (status?.correctionsAttemptId || "") : (status?.implementationAttemptId || ""));
+  const observedAttemptId = String(session?.attemptId || session?.developmentCycle?.attemptId || "");
+  if (activeAttemptId && observedAttemptId !== activeAttemptId) {
+    return await cycleStatus(dir, {
+      runnerAttemptMismatch: {
+        activeAttemptId,
+        observedAttemptId: observedAttemptId || null,
+        statusPath: statusPath || null,
+        detectedAt: new Date().toISOString(),
+      },
+    });
+  }
+  const stdoutPath = session.stdoutPath || session.logs?.stdout || (isCorrectionsRun ? status?.correctionsStdout : status?.implementationStdout);
+  const stderrPath = session.stderrPath || session.logs?.stderr || (isCorrectionsRun ? status?.correctionsStderr : status?.implementationStderr);
   const exitText = session.exitCodePath ? await readTextIfExists(String(session.exitCodePath)) : "";
   const exitCode = exitText.trim() ? Number(exitText.trim()) : null;
   const runnerPid = Number(session.runnerPid || session.pid || 0);
@@ -1286,7 +1397,7 @@ async function refreshLaunchedImplementationStatus(dir: string, status: any) {
     if (!runnerAlive) {
       const interruptedAt = new Date().toISOString();
       if (statusPath) await saveJson(String(statusPath), { ...session, status: 'interrupted', launchState: 'runner_missing', interruptedAt, updatedAt: interruptedAt, message: 'Implementation runner process disappeared without an exit marker.' });
-      const patch = phase.startsWith('implementation_corrections')
+      const patch = isCorrectionsRun
         ? { phase: 'corrections_failed', owner: 'main', ok: false, error: 'implementation_runner_process_missing', correctionsStdout: stdoutPath, correctionsStderr: stderrPath, directCorrectionsStatus: statusPath }
         : { phase: 'implementation_failed', owner: 'main', ok: false, nextAction: 'Inspect Implementation stdout/stderr and agent manifest; reconcile or launch a clean handoff.', error: 'implementation_runner_process_missing', implementationStdout: stdoutPath, implementationStderr: stderrPath, directImplementationStatus: statusPath };
       const observerFinalization = await finalizeObserverSessions(dir, status, "failed");
@@ -1312,13 +1423,13 @@ async function refreshLaunchedImplementationStatus(dir: string, status: any) {
       });
     }
     if (exitCode === 0) {
-      const patch = phase.startsWith("implementation_corrections")
+      const patch = isCorrectionsRun
         ? { phase: "corrections_completed", owner: "main", nextAction: "Run mechanical validation and council code review again for the corrected delivery.", ok: true, correctionsStdout: stdoutPath, correctionsStderr: stderrPath, directCorrectionsStatus: statusPath, externalValidation: "", validationSummary: "", councilReviewSummary: "", councilReviewSynthesis: "", councilReviewNeedsCorrections: null }
         : { phase: "implementation_delivered", owner: "main", nextAction: "Run mechanical final validation, then council code review.", ok: true, implementationStdout: stdoutPath, implementationStderr: stderrPath, directImplementationStatus: statusPath };
       const observerFinalization = await finalizeObserverSessions(dir, status, "completed");
       return await cycleStatus(dir, { ...patch, observerFinalization });
     }
-    const patch = phase.startsWith("implementation_corrections")
+    const patch = isCorrectionsRun
       ? { phase: "corrections_failed", owner: "main", ok: false, error: `Implementation exited non-zero: ${exitCode}`, correctionsStdout: stdoutPath, correctionsStderr: stderrPath, directCorrectionsStatus: statusPath }
       : { phase: "implementation_failed", owner: "main", ok: false, nextAction: "Inspect Implementation stdout/stderr, fix blockers, then launch a new clean handoff.", error: `Implementation exited non-zero: ${exitCode}`, implementationStdout: stdoutPath, implementationStderr: stderrPath, directImplementationStatus: statusPath };
     const observerFinalization = await finalizeObserverSessions(dir, status, "failed");
@@ -1819,12 +1930,6 @@ async function latestFileByMtime(paths: string[]) {
   return rows[0] || null;
 }
 
-function councilNeedsCorrectionsText(text: string) {
-  const t = String(text || "").toLowerCase();
-  if (/\b(no blocking|no blockers|ready to ship|ship as-is|go\b)/i.test(text) && !/conditional go|must fix|blocker|before ship|before deploy|high\s+[—-]|critical\s+[—-]/i.test(text)) return false;
-  return /conditional go|must fix|blocker|before ship|before deploy|do not ship|revise|high\s+[—-]|critical\s+[—-]/i.test(text) || t.includes("corrections required");
-}
-
 function extractCouncilFindings(text: string, max = 10) {
   const lines = String(text || "").split(/\r?\n/);
   const hits = lines.filter((line) => /\b(HIGH|MEDIUM|LOW|CRITICAL|Must fix|Fix before|Blocker|SAFE_MODE|OpenAPI|exitCode|403)\b/i.test(line.trim()))
@@ -1971,6 +2076,37 @@ async function sendCycleMessage(params: any, title: string, text: string) {
   }
 }
 
+async function clearActiveImplementationAttempt(dir: string) {
+  return await cycleStatus(dir, {
+    implementationAttemptId: null,
+    implementationSessionId: null,
+    directImplementationStatus: null,
+    directImplementationStdout: null,
+    directImplementationStderr: null,
+    implementationStdout: null,
+    implementationStderr: null,
+    observerObservationId: null,
+    implementationLaunch: null,
+    implementationAttemptResetAt: new Date().toISOString(),
+  });
+}
+
+async function clearActiveCorrectionsAttempt(dir: string) {
+  return await cycleStatus(dir, {
+    correctionsAttemptId: null,
+    directCorrectionsStatus: null,
+    directCorrectionsStdout: null,
+    directCorrectionsStderr: null,
+    correctionsStdout: null,
+    correctionsStderr: null,
+    observerCorrectionsSessionId: null,
+    observerCorrectionsObservationId: null,
+    implementationCorrectionsSessionId: null,
+    implementationCorrectionsLaunch: null,
+    correctionsAttemptResetAt: new Date().toISOString(),
+  });
+}
+
 async function launchCouncilCorrections(dir: string, status: any, council: any, params: any = {}) {
   const adapter = String(params.implementationAdapter || status?.implementationAdapter || implementationConfig.adapter);
   if (adapter !== "octopus") return { ok: true, skipped: true, reason: "council_corrections_require_octopus_adapter", status };
@@ -1979,7 +2115,7 @@ async function launchCouncilCorrections(dir: string, status: any, council: any, 
   const projectRoot = String(params.projectRoot || status?.projectRoot || "");
   const projectWikiPath = resolveTrustedProjectWikiPath(project, params.projectWikiPath, status?.projectWikiPath);
   const count = Number(status?.councilCorrectionCount || 0);
-  const max = Number(params.autoCouncilCorrectionsMax || 2);
+  const max = resolveAutoCouncilCorrectionsMax(params.autoCouncilCorrectionsMax);
   if (!projectRoot) return { ok: false, error: "projectRoot_required" };
   if (count >= max) {
     const next = await cycleStatus(dir, { phase: "council_review_waiting_human", owner: "main", ok: false, nextAction: "Council requested corrections but auto-correction limit was reached." });
@@ -1996,18 +2132,20 @@ async function launchCouncilCorrections(dir: string, status: any, council: any, 
   await writeFile(requestPath, prompt);
   const stdoutPath = join(dir, "implementation_corrections_stdout.txt");
   const stderrPath = join(dir, "implementation_corrections_stderr.txt");
+  status = await clearActiveCorrectionsAttempt(dir);
   const observerObservationId = await createImplementationObserverSession(dir, { project, runId, command: "council-corrections", projectRoot, projectWikiPath, stdoutPath, stderrPath, status: "running", summary: `development_cycle council corrections ${project}`, message: "Development-cycle queued Octopus council corrections." });
   if (developmentCycleConfig.observer.enabled && !observerObservationId) return { ok: false, error: "observer_root_session_creation_failed" };
   const launch = await createImplementationRunnerSession(dir, { project, runId: `${runId}-council-corrections-${count + 1}`, projectRoot, command: "tangle", prompt, kind: "corrections", implementationAdapter: "octopus", planPath: join(dir, "implementation_plan.md"), validationPath: feedbackPath, timeoutSeconds: Number(params.timeoutSeconds ?? params.timeout_ms ?? 0), observerObservationId, purpose: `development_cycle council corrections ${project}` });
   if (!launch.ok) {
     const observerFinalization = await finalizeObserverSessions(dir, { ...status, observerCorrectionsObservationId: observerObservationId }, "failed");
-    const next = await cycleStatus(dir, { phase: "corrections_failed", owner: "main", ok: false, error: launch.error || "direct_runner_launch_failed", projectRoot, codexSandbox: defaultCodexSandbox, councilCorrectionFeedback: feedbackPath, observerCorrectionsObservationId: observerObservationId, observerFinalization, implementationCorrectionsRequest: requestPath });
-    return { ok: false, error: launch.error, status: next };
+    const failedAttempt = launch.statusPath ? { implementationCorrectionsSessionId: launch.sessionId, correctionsAttemptId: launch.attemptId, directCorrectionsStatus: launch.statusPath, directCorrectionsStdout: launch.stdoutPath, directCorrectionsStderr: launch.stderrPath, correctionsStdout: launch.stdoutPath, correctionsStderr: launch.stderrPath } : {};
+    const next = await cycleStatus(dir, { phase: "corrections_failed", owner: "main", ok: false, error: launch.error || "direct_runner_launch_failed", projectRoot, codexSandbox: defaultCodexSandbox, councilCorrectionFeedback: feedbackPath, observerCorrectionsObservationId: observerObservationId, observerFinalization, implementationCorrectionsRequest: requestPath, ...failedAttempt });
+    return { ok: false, error: launch.error, status: next, ...(launch.statusPath ? { correctionsAttemptId: launch.attemptId, directCorrectionsStatus: launch.statusPath } : {}) };
   }
-  await updateImplementationObserverSession(dir, observerObservationId, { project, runId, command: "council-corrections", projectRoot, projectWikiPath, stdoutPath: launch.stdoutPath, stderrPath: launch.stderrPath, status: "running", summary: `development_cycle council corrections ${project} running`, message: "Octopus council corrections runner launched; observer integration is optional." });
+  await updateImplementationObserverSession(dir, observerObservationId, { project, runId, command: "council-corrections", projectRoot, projectWikiPath, stdoutPath: launch.stdoutPath, stderrPath: launch.stderrPath, attemptId: launch.attemptId, status: "running", summary: `development_cycle council corrections ${project} running`, message: "Octopus council corrections runner launched; observer integration is optional." });
   const launchRecord = join(dir, "implementation_council_corrections_launch.json");
   await writeFile(launchRecord, JSON.stringify(launch, null, 2) + "\n");
-  const next = await cycleStatus(dir, { phase: "corrections_launched", owner: "implementation", implementationAdapter: launch.adapter, ok: false, councilCorrectionCount: count + 1, councilCorrectionFeedback: feedbackPath, nextAction: "Use development_cycle status to watch council corrections. Validation/council will rerun after corrections exit.", projectRoot, projectWikiPath, codexSandbox: defaultCodexSandbox, implementationCorrectionsSessionId: launch.sessionId, directCorrectionsStatus: launch.statusPath, directCorrectionsStdout: launch.stdoutPath, directCorrectionsStderr: launch.stderrPath, observerCorrectionsObservationId: observerObservationId, implementationCorrectionsRequest: requestPath, implementationCorrectionsLaunch: launchRecord, correctionsStdout: launch.stdoutPath, correctionsStderr: launch.stderrPath, externalValidation: "", validationSummary: "", councilReviewSummary: "", councilReviewSynthesis: "", councilReviewNeedsCorrections: null });
+  const next = await cycleStatus(dir, { phase: "corrections_launched", owner: "implementation", implementationAdapter: launch.adapter, ok: false, councilCorrectionCount: count + 1, councilCorrectionFeedback: feedbackPath, nextAction: "Use development_cycle status to watch council corrections. Validation/council will rerun after corrections exit.", projectRoot, projectWikiPath, codexSandbox: defaultCodexSandbox, implementationCorrectionsSessionId: launch.sessionId, correctionsAttemptId: launch.attemptId, directCorrectionsStatus: launch.statusPath, directCorrectionsStdout: launch.stdoutPath, directCorrectionsStderr: launch.stderrPath, observerCorrectionsObservationId: observerObservationId, implementationCorrectionsRequest: requestPath, implementationCorrectionsLaunch: launchRecord, correctionsStdout: launch.stdoutPath, correctionsStderr: launch.stderrPath, externalValidation: "", validationSummary: "", councilReviewSummary: "", councilReviewSynthesis: "", councilReviewNeedsCorrections: null });
   return { ok: true, launch, feedbackPath, status: next };
 }
 
@@ -2152,6 +2290,23 @@ async function projectCycle(params: any) {
   if (!requestedRunId) return { ok: true, project, runId: null, dir: null, status: null, files: [], nextAction: "request_plan or record_plan" };
   const runId = cleanId(requestedRunId);
   const dir = cycleDir(project, runId);
+  if (action !== "status" && params[lifecycleLockHeld] !== true) {
+    await mkdir(dir, { recursive: true });
+    let lifecycleLock: Awaited<ReturnType<typeof acquireLock>>;
+    try {
+      lifecycleLock = await acquireLock(join(dir, ".lifecycle-action.lock"), lifecycleLockTimeoutMs);
+    } catch (err: any) {
+      return { ok: false, error: "lifecycle_action_busy", project, runId, dir, action, detail: String(err?.message || err) };
+    }
+    try {
+      if (!(await lifecycleLock.isHeld())) {
+        return { ok: false, error: "lifecycle_action_lock_lost", project, runId, dir, action };
+      }
+      return await projectCycle({ ...params, project, runId, [lifecycleLockHeld]: true });
+    } finally {
+      await lifecycleLock.release();
+    }
+  }
   const status = await loadJson(join(dir, "status.json"));
 
   if (action === "status") {
@@ -2405,6 +2560,7 @@ Create or validate the implementation plan only. Do not implement. The plan must
     const stdoutPath = join(dir, "implementation_delivery_stdout.txt");
     const stderrPath = join(dir, "implementation_delivery_stderr.txt");
     await writeFile(handoffRequest, prompt);
+    const implementationAttemptBase = await clearActiveImplementationAttempt(dir);
     const observerObservationId = await createImplementationObserverSession(dir, { project, runId, command, projectRoot, projectWikiPath: containedProjectWikiPath, stdoutPath, stderrPath, status: "running", summary: `development_cycle ${command} ${project}`, message: "Development-cycle implementation run queued." });
     if (developmentCycleConfig.observer.enabled && !observerObservationId) {
       const next = await cycleStatus(dir, { phase: "implementation_failed", owner: "main", ok: false, error: "observer_root_session_creation_failed", projectRoot, projectWikiPath: containedProjectWikiPath, implementationCommand: command, implementationHandoffRequest: handoffRequest });
@@ -2412,15 +2568,16 @@ Create or validate the implementation plan only. Do not implement. The plan must
     }
     const launch = await createImplementationRunnerSession(dir, { project, runId, projectRoot, command, prompt, kind: "delivery", implementationAdapter: adapter, planPath: containedPlanPath, timeoutSeconds: Number(params.timeoutSeconds ?? params.timeout_ms ?? 0), observerObservationId, purpose: `development_cycle ${command} ${project}` });
     if (!launch.ok) {
-      const observerFinalization = await finalizeObserverSessions(dir, { ...status, observerObservationId }, "failed");
-      const next = await cycleStatus(dir, { phase: "implementation_failed", owner: "main", ok: false, nextAction: "Fix direct runner launch blocker, then launch a new clean handoff.", error: launch.error || "direct_runner_launch_failed", projectRoot, projectWikiPath: containedProjectWikiPath, implementationCommand: command, codexSandbox: defaultCodexSandbox, observerObservationId, observerFinalization, implementationHandoffRequest: handoffRequest });
-      return { ok: false, project, runId, dir, phase: next.phase, error: next.error, observerObservationId, observerFinalization };
+      const observerFinalization = await finalizeObserverSessions(dir, { ...implementationAttemptBase, observerObservationId }, "failed");
+      const failedAttempt = launch.statusPath ? { implementationSessionId: launch.sessionId, implementationAttemptId: launch.attemptId, directImplementationStatus: launch.statusPath, directImplementationStdout: launch.stdoutPath, directImplementationStderr: launch.stderrPath, implementationStdout: launch.stdoutPath, implementationStderr: launch.stderrPath } : {};
+      const next = await cycleStatus(dir, { phase: "implementation_failed", owner: "main", ok: false, nextAction: "Fix direct runner launch blocker, then launch a new clean handoff.", error: launch.error || "direct_runner_launch_failed", projectRoot, projectWikiPath: containedProjectWikiPath, implementationCommand: command, codexSandbox: defaultCodexSandbox, observerObservationId, observerFinalization, implementationHandoffRequest: handoffRequest, ...failedAttempt });
+      return { ok: false, project, runId, dir, phase: next.phase, error: next.error, observerObservationId, observerFinalization, ...(launch.statusPath ? { implementationSessionId: launch.sessionId, implementationAttemptId: launch.attemptId, directImplementationStatus: launch.statusPath } : {}) };
     }
-    await updateImplementationObserverSession(dir, observerObservationId, { project, runId, command, projectRoot, projectWikiPath: containedProjectWikiPath, stdoutPath: launch.stdoutPath, stderrPath: launch.stderrPath, pid: launch.status?.runnerPid, processGroup: launch.status?.processGroupId, status: "running", summary: `development_cycle ${command} ${project} running`, message: "Implementation runner launched and bound to the observer root process." });
+    await updateImplementationObserverSession(dir, observerObservationId, { project, runId, command, projectRoot, projectWikiPath: containedProjectWikiPath, stdoutPath: launch.stdoutPath, stderrPath: launch.stderrPath, attemptId: launch.attemptId, pid: launch.status?.runnerPid, processGroup: launch.status?.processGroupId, status: "running", summary: `development_cycle ${command} ${project} running`, message: "Implementation runner launched and bound to the observer root process." });
     const launchRecord = join(dir, "implementation_launch.json");
     await writeFile(launchRecord, JSON.stringify(launch, null, 2) + "\n");
-    const next = await cycleStatus(dir, { phase: "implementation_launched", owner: "implementation", nextAction: "Use development_cycle status to watch the supervised implementation runner.", projectRoot, projectWikiPath: containedProjectWikiPath, implementationAdapter: launch.adapter, implementationCommand: command, codexSandbox: defaultCodexSandbox, implementationSessionId: launch.sessionId, directImplementationStatus: launch.statusPath, directImplementationStdout: launch.stdoutPath, directImplementationStderr: launch.stderrPath, observerObservationId, implementationHandoffRequest: handoffRequest, implementationLaunch: launchRecord, implementationStdout: launch.stdoutPath, implementationStderr: launch.stderrPath });
-    return { ok: true, project, runId, dir, phase: next.phase, implementationAdapter: launch.adapter, implementationSessionId: launch.sessionId, observerObservationId, launchState: launch.status?.launchState || null, directImplementationStatus: launch.statusPath };
+    const next = await cycleStatus(dir, { phase: "implementation_launched", owner: "implementation", nextAction: "Use development_cycle status to watch the supervised implementation runner.", projectRoot, projectWikiPath: containedProjectWikiPath, implementationAdapter: launch.adapter, implementationCommand: command, codexSandbox: defaultCodexSandbox, implementationSessionId: launch.sessionId, implementationAttemptId: launch.attemptId, directImplementationStatus: launch.statusPath, directImplementationStdout: launch.stdoutPath, directImplementationStderr: launch.stderrPath, directCorrectionsStatus: null, directCorrectionsStdout: null, directCorrectionsStderr: null, correctionsStdout: null, correctionsStderr: null, observerCorrectionsObservationId: null, implementationCorrectionsSessionId: null, observerObservationId, implementationHandoffRequest: handoffRequest, implementationLaunch: launchRecord, implementationStdout: launch.stdoutPath, implementationStderr: launch.stderrPath });
+    return { ok: true, project, runId, dir, phase: next.phase, implementationAdapter: launch.adapter, implementationSessionId: launch.sessionId, implementationAttemptId: launch.attemptId, observerObservationId, launchState: launch.status?.launchState || null, directImplementationStatus: launch.statusPath };
 
   }
 
@@ -2542,22 +2699,24 @@ Create or validate the implementation plan only. Do not implement. The plan must
     await writeFile(requestPath, prompt);
     const stdoutPath = join(dir, "implementation_corrections_stdout.txt");
     const stderrPath = join(dir, "implementation_corrections_stderr.txt");
-    const observerObservationId = await createImplementationObserverSession(dir, { project, runId, command: "corrections", projectRoot, projectWikiPath: status.projectWikiPath || "", stdoutPath, stderrPath, status: "running", summary: `development_cycle corrections ${project}`, message: "Development-cycle corrections run queued." });
+    const correctionsAttemptBase = await clearActiveCorrectionsAttempt(dir);
+    const observerObservationId = await createImplementationObserverSession(dir, { project, runId, command: "corrections", projectRoot, projectWikiPath: correctionsAttemptBase.projectWikiPath || status.projectWikiPath || "", stdoutPath, stderrPath, status: "running", summary: `development_cycle corrections ${project}`, message: "Development-cycle corrections run queued." });
     if (developmentCycleConfig.observer.enabled && !observerObservationId) {
       const next = await cycleStatus(dir, { phase: "corrections_failed", owner: "main", ok: false, error: "observer_root_session_creation_failed", projectRoot, implementationCorrectionsRequest: requestPath });
       return { ok: false, project, runId, dir, phase: next.phase, error: next.error };
     }
     const launch = await createImplementationRunnerSession(dir, { project, runId: `${runId}-corrections`, projectRoot, command, prompt, kind: "corrections", implementationAdapter: adapter, planPath: String(status.plan || join(dir, "implementation_plan.md")), validationPath: String(status.finalValidation || join(dir, "final_validation_response.md")), timeoutSeconds: Number(params.timeoutSeconds ?? params.timeout_ms ?? 0), observerObservationId, purpose: `development_cycle corrections ${project}` });
     if (!launch.ok) {
-      const observerFinalization = await finalizeObserverSessions(dir, { ...status, observerCorrectionsObservationId: observerObservationId }, "failed");
-      const next = await cycleStatus(dir, { phase: "corrections_failed", owner: "main", ok: false, error: launch.error || "direct_runner_launch_failed", projectRoot, codexSandbox: defaultCodexSandbox, observerCorrectionsObservationId: observerObservationId, observerFinalization, implementationCorrectionsRequest: requestPath });
-      return { ok: false, project, runId, dir, phase: next.phase, error: next.error, observerObservationId, observerFinalization };
+      const observerFinalization = await finalizeObserverSessions(dir, { ...correctionsAttemptBase, observerCorrectionsObservationId: observerObservationId }, "failed");
+      const failedAttempt = launch.statusPath ? { implementationCorrectionsSessionId: launch.sessionId, correctionsAttemptId: launch.attemptId, directCorrectionsStatus: launch.statusPath, directCorrectionsStdout: launch.stdoutPath, directCorrectionsStderr: launch.stderrPath, correctionsStdout: launch.stdoutPath, correctionsStderr: launch.stderrPath } : {};
+      const next = await cycleStatus(dir, { phase: "corrections_failed", owner: "main", ok: false, error: launch.error || "direct_runner_launch_failed", projectRoot, codexSandbox: defaultCodexSandbox, observerCorrectionsObservationId: observerObservationId, observerFinalization, implementationCorrectionsRequest: requestPath, ...failedAttempt });
+      return { ok: false, project, runId, dir, phase: next.phase, error: next.error, observerObservationId, observerFinalization, ...(launch.statusPath ? { implementationCorrectionsSessionId: launch.sessionId, correctionsAttemptId: launch.attemptId, directCorrectionsStatus: launch.statusPath } : {}) };
     }
-    await updateImplementationObserverSession(dir, observerObservationId, { project, runId, command: "corrections", projectRoot, projectWikiPath: status.projectWikiPath || "", stdoutPath: launch.stdoutPath, stderrPath: launch.stderrPath, status: "running", summary: `development_cycle corrections ${project} running`, message: "Corrections runner launched; observer integration is optional." });
+    await updateImplementationObserverSession(dir, observerObservationId, { project, runId, command: "corrections", projectRoot, projectWikiPath: status.projectWikiPath || "", stdoutPath: launch.stdoutPath, stderrPath: launch.stderrPath, attemptId: launch.attemptId, status: "running", summary: `development_cycle corrections ${project} running`, message: "Corrections runner launched; observer integration is optional." });
     const launchRecord = join(dir, "implementation_corrections_launch.json");
     await writeFile(launchRecord, JSON.stringify(launch, null, 2) + "\n");
-    const next = await cycleStatus(dir, { phase: "corrections_launched", owner: "implementation", nextAction: "Use development_cycle status to watch the supervised corrections runner.", projectRoot, implementationAdapter: launch.adapter, implementationCorrectionsSessionId: launch.sessionId, directCorrectionsStatus: launch.statusPath, directCorrectionsStdout: launch.stdoutPath, directCorrectionsStderr: launch.stderrPath, observerCorrectionsObservationId: observerObservationId, implementationCorrectionsRequest: requestPath, implementationCorrectionsLaunch: launchRecord, correctionsStdout: launch.stdoutPath, correctionsStderr: launch.stderrPath });
-    return { ok: true, project, runId, dir, phase: next.phase, implementationAdapter: launch.adapter, implementationCorrectionsSessionId: launch.sessionId, observerObservationId, launchState: launch.status?.launchState || null, directCorrectionsStatus: launch.statusPath };
+    const next = await cycleStatus(dir, { phase: "corrections_launched", owner: "implementation", nextAction: "Use development_cycle status to watch the supervised corrections runner.", projectRoot, implementationAdapter: launch.adapter, implementationCorrectionsSessionId: launch.sessionId, correctionsAttemptId: launch.attemptId, directCorrectionsStatus: launch.statusPath, directCorrectionsStdout: launch.stdoutPath, directCorrectionsStderr: launch.stderrPath, observerCorrectionsObservationId: observerObservationId, implementationCorrectionsRequest: requestPath, implementationCorrectionsLaunch: launchRecord, correctionsStdout: launch.stdoutPath, correctionsStderr: launch.stderrPath });
+    return { ok: true, project, runId, dir, phase: next.phase, implementationAdapter: launch.adapter, implementationCorrectionsSessionId: launch.sessionId, correctionsAttemptId: launch.attemptId, observerObservationId, launchState: launch.status?.launchState || null, directCorrectionsStatus: launch.statusPath };
 
   }
 

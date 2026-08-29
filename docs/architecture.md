@@ -110,9 +110,11 @@ waiting_external_plan
   -> implementation_launched / implementation_running
   -> implementation_delivered
   -> waiting_final_validation
-  -> final_validated | needs_corrections | stopped
-  -> corrections_launched / corrections_running / corrections_completed
-  -> closed
+  -> final_validated | final_revised | stopped
+  -> repository delivery (success or partial)
+  -> merged | delivery_published | closed_partial | closed_invalid
+
+`start_corrections` remains available only for explicit/manual correction workflows; a final `revise` terminates the current plan as a partial delivery instead of automatically entering another correction loop.
 ```
 
 There are no legacy Octopus action or phase aliases in the public contract.

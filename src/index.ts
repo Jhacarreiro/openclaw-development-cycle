@@ -15,8 +15,11 @@ import { nextStallQuietAccounting } from "./core/stall-accounting.js";
 import { councilNeedsCorrectionsText, resolveAutoCouncilCorrectionsMax } from "./core/council-policy.js";
 import { inferDeliveryClassification } from "./core/delivery-classification.js";
 import { loadDevelopmentCycleConfig } from "./config.js";
-import { createFilesystemStore } from "./storage/filesystem.js";
+import { acquireLock, createFilesystemStore } from "./storage/filesystem.js";
 import { buildImplementationLaunchSpec, jsonShellQuote, renderShellCommand, renderShellEnvironment, shellQuote } from "./adapters/implementation.js";
+
+const lifecycleLockHeld = Symbol("developmentCycleLifecycleLockHeld");
+const lifecycleLockTimeoutMs = 30000;
 
 const developmentCycleConfig = loadDevelopmentCycleConfig();
 const secretPath = developmentCycleConfig.externalGate.secretPath;
@@ -2287,6 +2290,23 @@ async function projectCycle(params: any) {
   if (!requestedRunId) return { ok: true, project, runId: null, dir: null, status: null, files: [], nextAction: "request_plan or record_plan" };
   const runId = cleanId(requestedRunId);
   const dir = cycleDir(project, runId);
+  if (action !== "status" && params[lifecycleLockHeld] !== true) {
+    await mkdir(dir, { recursive: true });
+    let lifecycleLock: Awaited<ReturnType<typeof acquireLock>>;
+    try {
+      lifecycleLock = await acquireLock(join(dir, ".lifecycle-action.lock"), lifecycleLockTimeoutMs);
+    } catch (err: any) {
+      return { ok: false, error: "lifecycle_action_busy", project, runId, dir, action, detail: String(err?.message || err) };
+    }
+    try {
+      if (!(await lifecycleLock.isHeld())) {
+        return { ok: false, error: "lifecycle_action_lock_lost", project, runId, dir, action };
+      }
+      return await projectCycle({ ...params, project, runId, [lifecycleLockHeld]: true });
+    } finally {
+      await lifecycleLock.release();
+    }
+  }
   const status = await loadJson(join(dir, "status.json"));
 
   if (action === "status") {

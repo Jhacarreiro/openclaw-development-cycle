@@ -83,3 +83,54 @@ test("repository delivery request uses outputPath while preserving sourceProject
   assert.equal(request.sourceProjectRoot, checkout);
   assert.equal(request.outputPath, output);
 });
+
+
+test("final revise terminates the current plan as a partial delivery instead of launching corrections", async (t) => {
+  const root = join(tmpdir(), `development-cycle-final-revise-${process.pid}-${Date.now()}`);
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const checkout = join(root, "checkout");
+  await mkdir(join(checkout, ".git"), { recursive: true });
+  const tool = await loadTool(root);
+  const project = "final-revise-terminal";
+  const runId = "run-final-revise-terminal";
+  const requested = detailsOf(await tool.execute("request-revise", { action: "request_plan", project, runId, projectRoot: checkout }, undefined, undefined));
+  const statusPath = join(requested.dir, "status.json");
+  const status = JSON.parse(await readFile(statusPath, "utf8"));
+  status.phase = "waiting_final_validation";
+  status.projectRoot = checkout;
+  await writeFile(statusPath, JSON.stringify(status));
+
+  const recorded = detailsOf(await tool.execute("record-revise", {
+    action: "record_final_validation",
+    project,
+    runId,
+    projectRoot: checkout,
+    validationText: "revise\nThe implementation is useful but two residual findings should become follow-up work.",
+  }, undefined, undefined));
+  assert.equal(recorded.ok, true, JSON.stringify(recorded));
+  assert.equal(recorded.phase, "final_revised");
+  const afterRecord = JSON.parse(await readFile(statusPath, "utf8"));
+  assert.equal(afterRecord.phase, "final_revised");
+  assert.match(afterRecord.nextAction, /finalize_delivery/);
+  assert.equal(afterRecord.implementationCorrectionsSessionId ?? null, null);
+
+  const corrections = detailsOf(await tool.execute("corrections-after-revise", {
+    action: "start_corrections",
+    project,
+    runId,
+    projectRoot: checkout,
+  }, undefined, undefined));
+  assert.equal(corrections.ok, false);
+  assert.equal(corrections.error, "invalid_phase_transition");
+
+  const finalized = detailsOf(await tool.execute("finalize-revise", {
+    action: "finalize_delivery",
+    project,
+    runId,
+    projectRoot: checkout,
+  }, undefined, undefined));
+  assert.equal(finalized.ok, true, JSON.stringify(finalized));
+  assert.equal(finalized.phase, "closed_partial");
+  assert.equal(finalized.delivery.classification, "partial");
+  assert.equal(finalized.delivery.reason, "repository_delivery_disabled");
+});

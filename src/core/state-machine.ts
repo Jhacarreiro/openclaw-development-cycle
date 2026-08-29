@@ -44,6 +44,7 @@ const ALLOWED_PHASES: Partial<Record<DevelopmentCycleAction, ReadonlySet<string>
   start_corrections: new Set(["needs_corrections", "council_review_needs_corrections"]),
   finalize_delivery: new Set([
     "final_validated",
+    "final_revised",
     "needs_corrections",
     "implementation_failed",
     "corrections_failed",

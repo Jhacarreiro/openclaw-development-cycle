@@ -123,6 +123,8 @@ revise
 stop
 ```
 
+`go` produces a successful terminal delivery. `revise` is also terminal for the current plan: the implementation is materialized as a partial delivery and unresolved findings become follow-up work (for example repository issues or a new development plan). It does not automatically launch another correction attempt. `stop` materializes a stopped/partial outcome when repository delivery policy permits it.
+
 ## Actions
 
 | Action | Purpose |
@@ -137,7 +139,7 @@ stop
 | `run_final_validation` | Run configured validation commands. |
 | `request_final_validation` | Build the final validation pack. |
 | `record_final_validation` | Record `go`, `revise`, or `stop`. |
-| `start_corrections` | Launch a targeted correction pass after `revise`. |
+| `start_corrections` | Optional/manual targeted correction pass for legacy or explicitly supervised correction workflows. A final `revise` no longer launches corrections automatically. |
 | `close` | Close a validated or stopped cycle. |
 
 Invalid phase transitions are rejected by the state machine.

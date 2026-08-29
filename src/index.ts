@@ -2741,14 +2741,12 @@ Create or validate the implementation plan only. Do not implement. The plan must
     if (!parsedDecision.ok) return { ok: false, project, runId, dir, ...parsedDecision };
     const file = join(dir, "final_validation_response.md");
     await writeFile(file, String(validationText));
-    const phase = parsedDecision.decision === "go" ? "final_validated" : parsedDecision.decision === "stop" ? "stopped" : "needs_corrections";
-    const nextAction = phase === "needs_corrections"
-      ? "Call start_corrections with the final validation feedback."
-      : repositoryDeliveryConfig.enabled
-        ? "Repository delivery will materialize this terminal run outcome."
-        : "Call finalize_delivery to materialize this terminal run outcome.";
+    const phase = parsedDecision.decision === "go" ? "final_validated" : parsedDecision.decision === "stop" ? "stopped" : "final_revised";
+    const nextAction = repositoryDeliveryConfig.enabled
+      ? "Repository delivery will materialize this terminal run outcome."
+      : "Call finalize_delivery to materialize this terminal run outcome.";
     const next = await cycleStatus(dir, { phase, owner: "main", nextAction, finalValidation: file });
-    if (phase !== "needs_corrections" && repositoryDeliveryConfig.enabled) {
+    if (repositoryDeliveryConfig.enabled) {
       const finalized = await finalizeRepositoryDeliveryState(dir, { ...next, project, runId }, params);
       return { ok: finalized.ok, project, runId, dir, phase: finalized.phase, finalValidation: file, delivery: finalized.delivery };
     }

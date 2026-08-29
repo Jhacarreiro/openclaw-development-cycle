@@ -17,6 +17,7 @@ export interface ImplementationLaunchInput {
   adapter?: ImplementationAdapterKind;
   project: string;
   runId: string;
+  attemptId?: string;
   mode: ImplementationMode;
   projectRoot: string;
   requestPath: string;
@@ -47,6 +48,7 @@ function genericEnvironment(input: ImplementationLaunchInput): Record<string, st
   return {
     DEVELOPMENT_CYCLE_PROJECT: input.project,
     DEVELOPMENT_CYCLE_RUN_ID: input.runId,
+    DEVELOPMENT_CYCLE_ATTEMPT_ID: input.attemptId || "",
     DEVELOPMENT_CYCLE_MODE: input.mode,
     DEVELOPMENT_CYCLE_PROJECT_ROOT: input.projectRoot,
     DEVELOPMENT_CYCLE_REQUEST_PATH: input.requestPath,
@@ -150,6 +152,9 @@ export function buildImplementationLaunchSpec(
     if (!config.octopusRoot) {
       throw new Error("octopus_root_not_configured");
     }
+    if (!String(input.attemptId || "").trim()) {
+      throw new Error("octopus_attempt_id_required");
+    }
     const sessionId = input.observer?.sessionId || "";
     return {
       adapter,
@@ -165,6 +170,7 @@ export function buildImplementationLaunchSpec(
       env: {
         ...genericEnv,
         OCTOPUS_CODEX_SANDBOX: config.octopusSandbox,
+        OCTOPUS_TANGLE_RUN_ID: String(input.attemptId),
         ...octopusRoutedSeatEnvironment(),
         OCTOPUS_PRESERVE_CALLER_PROCESS_GROUP: "true",
         LOOP_UNTIL_APPROVED: config.loopUntilApproved ? "true" : "false",

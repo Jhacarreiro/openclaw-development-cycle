@@ -323,13 +323,13 @@ ${commandLine} > ${shellQuote(stdoutPath)} 2> ${shellQuote(stderrPath)}
     adapter: launchSpec.adapter,
     command: `${launchSpec.displayName} ${command}`.trim(),
     owner: observerOwner,
-    status: "running",
-    launchState: "running",
+    status: "starting",
+    launchState: "launching",
     timeoutSeconds: effectiveTimeoutSeconds,
     timeoutPolicy: "bounded-with-heartbeat-stall-detection",
     observerRootSessionId,
     heartbeatPath: join(sessionDir, "heartbeat.json"),
-    message: `Implementation launched through the ${launchSpec.displayName} adapter.`,
+    message: `Implementation launch starting through the ${launchSpec.displayName} adapter.`,
     createdAt: now,
     updatedAt: now,
     projectRoot,
@@ -357,6 +357,7 @@ ${commandLine} > ${shellQuote(stdoutPath)} 2> ${shellQuote(stderrPath)}
     promptPath,
     purpose: params.purpose || "development_cycle implementation",
   });
+  await saveJson(statusPath, status);
   let supervisor: any = null;
   try {
     supervisor = await ensureRunnerSupervisor();
@@ -371,16 +372,52 @@ ${commandLine} > ${shellQuote(stdoutPath)} 2> ${shellQuote(stderrPath)}
     if (!launchInfo?.ok || !Number.isInteger(runnerPid) || runnerPid <= 1) {
       throw new Error(`supervised_runner_pid_invalid:${String(launched.stdout || "").trim()}`);
     }
-    status.status = "running";
-    status.launchState = "running";
-    status.runnerPid = runnerPid;
-    status.processGroupId = Number(launchInfo?.pgid || runnerPid);
-    status.runnerSupervisorPid = Number(launchInfo?.supervisorPid || supervisor?.pid || 0) || null;
-    status.runnerSupervisorSocket = runnerSupervisorSocket;
-    status.useProcessGroup = true;
-    status.stopSignalPolicy = "process-group-term-kill";
-    status.updatedAt = new Date().toISOString();
-    await saveJson(statusPath, status);
+    const runningStatus = {
+      ...status,
+      status: "running",
+      launchState: "running",
+      runnerPid,
+      processGroupId: Number(launchInfo?.pgid || runnerPid),
+      runnerSupervisorPid: Number(launchInfo?.supervisorPid || supervisor?.pid || 0) || null,
+      runnerSupervisorSocket,
+      useProcessGroup: true,
+      stopSignalPolicy: "process-group-term-kill",
+      updatedAt: new Date().toISOString(),
+      message: `Implementation launched through the ${launchSpec.displayName} adapter.`,
+    };
+    const persistedBeforeRunning = await readJsonIfExists(statusPath);
+    const persistedAlreadyTerminal = persistedBeforeRunning
+      && (persistedBeforeRunning.launchState === "exited"
+        || ["completed", "failed", "interrupted", "stopped"].includes(String(persistedBeforeRunning.status || "").toLowerCase()));
+    if (persistedAlreadyTerminal) {
+      Object.assign(status, runningStatus, persistedBeforeRunning);
+    } else {
+      Object.assign(status, runningStatus);
+      await saveJson(statusPath, status);
+      const exitText = (await readTextIfExists(exitCodePath)).trim();
+      if (exitText) {
+        const exitCode = Number(exitText);
+        const exitedAt = (await readTextIfExists(exitedAtPath)).trim() || new Date().toISOString();
+        const persistedAfterRunning = await readJsonIfExists(statusPath) || status;
+        const terminalStatus = {
+          ...status,
+          ...persistedAfterRunning,
+          status: exitCode === 0 ? "completed" : "failed",
+          launchState: "exited",
+          exitCode,
+          exitedAt,
+          updatedAt: exitedAt,
+          message: exitCode === 0
+            ? "Implementation direct runner exited successfully."
+            : `Implementation direct runner exited non-zero: ${exitCode}`,
+        };
+        await saveJson(statusPath, terminalStatus);
+        Object.assign(status, terminalStatus);
+      } else {
+        const latestPersisted = await readJsonIfExists(statusPath);
+        if (latestPersisted) Object.assign(status, latestPersisted);
+      }
+    }
   } catch (error: any) {
     const failedAt = new Date().toISOString();
     const failure = String(error?.message || error);

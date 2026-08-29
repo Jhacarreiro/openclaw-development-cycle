@@ -11,6 +11,8 @@ import { ACTIONS, checkActionTransition } from "./core/state-machine.js";
 import { parseFinalDecision } from "./core/decisions.js";
 import { cleanId, newRunId as createRunId } from "./core/ids.js";
 import { nextStallQuietAccounting } from "./core/stall-accounting.js";
+import { councilNeedsCorrectionsText, resolveAutoCouncilCorrectionsMax } from "./core/council-policy.js";
+import { inferDeliveryClassification } from "./core/delivery-classification.js";
 import { loadDevelopmentCycleConfig } from "./config.js";
 import { createFilesystemStore } from "./storage/filesystem.js";
 import { buildImplementationLaunchSpec, jsonShellQuote, renderShellCommand, renderShellEnvironment, shellQuote } from "./adapters/implementation.js";
@@ -355,28 +357,62 @@ ${commandLine} > ${shellQuote(stdoutPath)} 2> ${shellQuote(stderrPath)}
     promptPath,
     purpose: params.purpose || "development_cycle implementation",
   });
-  await saveJson(statusPath, status);
-
-  const supervisor = await ensureRunnerSupervisor();
-  const launched = await execFileAsync("python3", [runnerSupervisorPath, "--socket", runnerSupervisorSocket, "launch", runnerPath, sessionDir], {
-    cwd: sessionDir,
-    env: { ...process.env, HOME: runtimeHome },
-    timeout: 5000,
-    maxBuffer: 64 * 1024,
-  });
-  const launchInfo = JSON.parse(String(launched.stdout || "{}"));
-  const runnerPid = Number(launchInfo?.pid || 0);
-  if (!launchInfo?.ok || !Number.isInteger(runnerPid) || runnerPid <= 1) {
-    throw new Error(`supervised_runner_pid_invalid:${String(launched.stdout || "").trim()}`);
+  let supervisor: any = null;
+  try {
+    supervisor = await ensureRunnerSupervisor();
+    const launched = await execFileAsync("python3", [runnerSupervisorPath, "--socket", runnerSupervisorSocket, "launch", runnerPath, sessionDir], {
+      cwd: sessionDir,
+      env: { ...process.env, HOME: runtimeHome },
+      timeout: 5000,
+      maxBuffer: 64 * 1024,
+    });
+    const launchInfo = JSON.parse(String(launched.stdout || "{}"));
+    const runnerPid = Number(launchInfo?.pid || 0);
+    if (!launchInfo?.ok || !Number.isInteger(runnerPid) || runnerPid <= 1) {
+      throw new Error(`supervised_runner_pid_invalid:${String(launched.stdout || "").trim()}`);
+    }
+    status.status = "running";
+    status.launchState = "running";
+    status.runnerPid = runnerPid;
+    status.processGroupId = Number(launchInfo?.pgid || runnerPid);
+    status.runnerSupervisorPid = Number(launchInfo?.supervisorPid || supervisor?.pid || 0) || null;
+    status.runnerSupervisorSocket = runnerSupervisorSocket;
+    status.useProcessGroup = true;
+    status.stopSignalPolicy = "process-group-term-kill";
+    status.updatedAt = new Date().toISOString();
+    await saveJson(statusPath, status);
+  } catch (error: any) {
+    const failedAt = new Date().toISOString();
+    const failure = String(error?.message || error);
+    const failedStatus = {
+      ...status,
+      status: "failed",
+      launchState: "launch_failed",
+      runnerPid: null,
+      processGroupId: null,
+      error: failure,
+      failedAt,
+      updatedAt: failedAt,
+      message: "Implementation runner failed to launch.",
+    };
+    await saveJson(statusPath, failedStatus);
+    return {
+      ok: false,
+      adapter: launchSpec.adapter,
+      sessionId,
+      sessionDir,
+      statusPath,
+      payloadPath,
+      requestPath,
+      runnerPath,
+      promptPath,
+      exitCodePath,
+      stdoutPath,
+      stderrPath,
+      status: failedStatus,
+      error: failure,
+    };
   }
-  status.runnerPid = runnerPid;
-  status.processGroupId = Number(launchInfo?.pgid || runnerPid);
-  status.runnerSupervisorPid = Number(launchInfo?.supervisorPid || supervisor?.pid || 0) || null;
-  status.runnerSupervisorSocket = runnerSupervisorSocket;
-  status.useProcessGroup = true;
-  status.stopSignalPolicy = "process-group-term-kill";
-  status.updatedAt = new Date().toISOString();
-  await saveJson(statusPath, status);
   return {
     ok: true,
     adapter: launchSpec.adapter,
@@ -1024,22 +1060,6 @@ async function execGit(args: string[], cwd = wikiRoot, timeout = 10000) {
   } catch (err: any) {
     return { ok: false, stdout: String(err?.stdout || ""), stderr: String(err?.stderr || ""), error: String(err?.message || err) };
   }
-}
-
-function inferDeliveryClassification(phase: string, requested: any) {
-  const raw = String(requested || "").trim().toLowerCase();
-  if (["success", "partial", "invalid"].includes(raw)) return raw;
-  if (phase === "final_validated") return "success";
-  if ([
-    "needs_corrections",
-    "implementation_failed",
-    "corrections_failed",
-    "council_review_needs_corrections",
-    "council_review_failed",
-    "external_validation_failed",
-    "stopped",
-  ].includes(phase)) return "partial";
-  return "invalid";
 }
 
 function repositoryFindings(status: any, max = 12) {
@@ -1819,12 +1839,6 @@ async function latestFileByMtime(paths: string[]) {
   return rows[0] || null;
 }
 
-function councilNeedsCorrectionsText(text: string) {
-  const t = String(text || "").toLowerCase();
-  if (/\b(no blocking|no blockers|ready to ship|ship as-is|go\b)/i.test(text) && !/conditional go|must fix|blocker|before ship|before deploy|high\s+[—-]|critical\s+[—-]/i.test(text)) return false;
-  return /conditional go|must fix|blocker|before ship|before deploy|do not ship|revise|high\s+[—-]|critical\s+[—-]/i.test(text) || t.includes("corrections required");
-}
-
 function extractCouncilFindings(text: string, max = 10) {
   const lines = String(text || "").split(/\r?\n/);
   const hits = lines.filter((line) => /\b(HIGH|MEDIUM|LOW|CRITICAL|Must fix|Fix before|Blocker|SAFE_MODE|OpenAPI|exitCode|403)\b/i.test(line.trim()))
@@ -1979,7 +1993,7 @@ async function launchCouncilCorrections(dir: string, status: any, council: any, 
   const projectRoot = String(params.projectRoot || status?.projectRoot || "");
   const projectWikiPath = resolveTrustedProjectWikiPath(project, params.projectWikiPath, status?.projectWikiPath);
   const count = Number(status?.councilCorrectionCount || 0);
-  const max = Number(params.autoCouncilCorrectionsMax || 2);
+  const max = resolveAutoCouncilCorrectionsMax(params.autoCouncilCorrectionsMax);
   if (!projectRoot) return { ok: false, error: "projectRoot_required" };
   if (count >= max) {
     const next = await cycleStatus(dir, { phase: "council_review_waiting_human", owner: "main", ok: false, nextAction: "Council requested corrections but auto-correction limit was reached." });

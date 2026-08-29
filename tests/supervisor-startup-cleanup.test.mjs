@@ -67,7 +67,10 @@ raise SystemExit(1)
   const planText = "# Plan\n\n## Project paths\n\nprojectWikiPath: docs\nprojectRoot: project\nrelevant code paths: none\nvalidation checks: process proof\nstop conditions: startup failure\nexpected artifacts: process proof\n";
   await tool.execute("record", { action: "record_plan", project: "fixture", runId, projectRoot: project, projectWikiPath: join(docs, "fixture"), planText, force: true });
 
-  await assert.rejects(() => tool.execute("fail", { action: "start_implementation", project: "fixture", runId, projectRoot: project }), /runner_supervisor_start_failed/);
+  const failed = await tool.execute("fail", { action: "start_implementation", project: "fixture", runId, projectRoot: project });
+  assert.equal(failed.details.ok, false);
+  assert.equal(failed.details.phase, "implementation_failed");
+  assert.match(failed.details.status?.error || failed.details.error || "", /runner_supervisor_start_failed/);
   const brokenPid = Number((await readFile(pidFile, "utf8")).trim());
   await waitDead(brokenPid);
   const deadPing = spawnSync("python3", [real, "--socket", sock, "ping"], { encoding: "utf8", timeout: 1000 });

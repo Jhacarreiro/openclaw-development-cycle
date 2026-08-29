@@ -20,7 +20,7 @@ const ALWAYS_ALLOWED = new Set<DevelopmentCycleAction>(["status", "reconcile", "
 
 const ALLOWED_PHASES: Partial<Record<DevelopmentCycleAction, ReadonlySet<string>>> = {
   record_plan: new Set(["", "waiting_external_plan", "plan_ready_for_implementation"]),
-  start_implementation: new Set(["plan_ready_for_implementation"]),
+  start_implementation: new Set(["plan_ready_for_implementation", "implementation_failed"]),
   stop_implementation: new Set([
     "implementation_launched",
     "implementation_running",
@@ -41,7 +41,7 @@ const ALLOWED_PHASES: Partial<Record<DevelopmentCycleAction, ReadonlySet<string>
     "external_validation_passed",
   ]),
   record_final_validation: new Set(["waiting_final_validation"]),
-  start_corrections: new Set(["needs_corrections"]),
+  start_corrections: new Set(["needs_corrections", "council_review_needs_corrections"]),
   finalize_delivery: new Set([
     "final_validated",
     "needs_corrections",
@@ -49,11 +49,13 @@ const ALLOWED_PHASES: Partial<Record<DevelopmentCycleAction, ReadonlySet<string>
     "corrections_failed",
     "council_review_needs_corrections",
     "council_review_failed",
+    "council_validated",
+    "council_review_waiting_human",
     "external_validation_failed",
     "stopped",
     "repository_delivery_failed",
   ]),
-  close: new Set(["merged", "closed_partial", "closed_invalid"]),
+  close: new Set(["merged", "closed_success", "closed_partial", "closed_invalid"]),
 };
 
 export type TransitionCheck =

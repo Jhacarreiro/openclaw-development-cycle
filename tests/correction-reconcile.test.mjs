@@ -88,3 +88,62 @@ for (const [exitCode, expectedPhase] of [[0, "corrections_completed"], [7, "corr
     assert.equal(session.exitCode, exitCode);
   });
 }
+
+
+test("correction launch failure cannot consume stale implementation session", async (t) => {
+  const root = join(tmpdir(), `development-cycle-correction-failure-isolation-${process.pid}-${Date.now()}`);
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const checkout = join(root, "checkout");
+  await mkdir(join(checkout, ".git"), { recursive: true });
+  const tool = await loadTool(root);
+  const project = "correction-failure-isolation";
+  const runId = "run-correction-failure-isolation";
+  const requested = detailsOf(await tool.execute("request", { action: "request_plan", project, runId, projectRoot: checkout }, undefined, undefined));
+  const dir = requested.dir;
+  const statusPath = join(dir, "status.json");
+  const oldImplDir = join(dir, "implementation_session");
+  const oldImplStatusPath = join(oldImplDir, "status.json");
+  const oldImplExitCodePath = join(oldImplDir, "exit-code.txt");
+  await mkdir(oldImplDir, { recursive: true });
+  await writeFile(oldImplExitCodePath, "0\n");
+  await writeFile(oldImplStatusPath, JSON.stringify({
+    status: "completed",
+    launchState: "exited",
+    exitCode: 0,
+    exitCodePath: oldImplExitCodePath,
+    stdoutPath: join(oldImplDir, "stdout.log"),
+    stderrPath: join(oldImplDir, "stderr.log"),
+  }, null, 2));
+  const current = JSON.parse(await readFile(statusPath, "utf8"));
+  await writeFile(statusPath, JSON.stringify({
+    ...current,
+    phase: "corrections_failed",
+    owner: "main",
+    ok: false,
+    error: "implementation_launch_failed:test",
+    directCorrectionsStatus: null,
+    observerCorrectionsSessionId: null,
+    correctionsStdout: null,
+    correctionsStderr: null,
+    directImplementationStatus: oldImplStatusPath,
+    implementationStdout: join(oldImplDir, "stdout.log"),
+    implementationStderr: join(oldImplDir, "stderr.log"),
+  }, null, 2));
+
+  const reconciled = detailsOf(await tool.execute("reconcile", {
+    action: "reconcile",
+    project,
+    runId,
+    projectRoot: checkout,
+    notifyMain: false,
+    autoStopStalled: false,
+    autoRunFinalValidation: false,
+    autoRunCouncilReview: false,
+  }, undefined, undefined));
+
+  assert.equal(reconciled.ok, true);
+  assert.equal(reconciled.status.phase, "corrections_failed");
+  assert.match(reconciled.status.error, /implementation_launch_failed:test/);
+  assert.equal(reconciled.status.directCorrectionsStatus, null);
+  assert.equal(reconciled.status.directImplementationStatus, oldImplStatusPath);
+});

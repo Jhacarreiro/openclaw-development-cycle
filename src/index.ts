@@ -1349,16 +1349,16 @@ async function refreshLaunchedImplementationStatus(dir: string, status: any) {
   if (!["implementation_launched", "implementation_running", "implementation_failed", "implementation_delivered", "corrections_launched", "corrections_running", "corrections_failed", "corrections_completed"].includes(phase)) return status;
   const isCorrectionsRun = phase.startsWith("corrections_");
   const statusPath = isCorrectionsRun
-    ? (status?.directCorrectionsStatus || status?.directImplementationStatus)
-    : (status?.directImplementationStatus || status?.directCorrectionsStatus);
+    ? status?.directCorrectionsStatus
+    : status?.directImplementationStatus;
   let session: any = statusPath ? await readJsonIfExists(String(statusPath)) : null;
   if (!session) {
-    const sid = status?.observerSessionId || status?.observerCorrectionsSessionId;
+    const sid = isCorrectionsRun ? status?.observerCorrectionsSessionId : status?.observerSessionId;
     if (sid) session = await readJsonIfExists(join(adapterSessionsRoot, String(sid), "status.json"));
   }
   if (!session) return status;
-  const stdoutPath = session.stdoutPath || session.logs?.stdout || status?.implementationStdout || status?.correctionsStdout;
-  const stderrPath = session.stderrPath || session.logs?.stderr || status?.implementationStderr || status?.correctionsStderr;
+  const stdoutPath = session.stdoutPath || session.logs?.stdout || (isCorrectionsRun ? status?.correctionsStdout : status?.implementationStdout);
+  const stderrPath = session.stderrPath || session.logs?.stderr || (isCorrectionsRun ? status?.correctionsStderr : status?.implementationStderr);
   const exitText = session.exitCodePath ? await readTextIfExists(String(session.exitCodePath)) : "";
   const exitCode = exitText.trim() ? Number(exitText.trim()) : null;
   const runnerPid = Number(session.runnerPid || session.pid || 0);

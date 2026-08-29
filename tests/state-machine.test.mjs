@@ -23,6 +23,7 @@ test("final validation response requires the human gate phase", () => {
 test("finalize_delivery accepts terminal delivery outcomes", () => {
   for (const phase of [
     "final_validated",
+    "final_revised",
     "needs_corrections",
     "implementation_failed",
     "corrections_failed",
@@ -51,6 +52,7 @@ test("close cannot bypass repository delivery", () => {
 
 test("council corrections can be launched from council_review_needs_corrections", () => {
   assert.equal(checkActionTransition("start_corrections", "council_review_needs_corrections").ok, true);
+  assert.equal(checkActionTransition("start_corrections", "final_revised").ok, false);
 });
 
 test("failed implementation can be retried only through explicit start_implementation", () => {

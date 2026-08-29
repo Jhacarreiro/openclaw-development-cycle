@@ -5,6 +5,7 @@ export function inferDeliveryClassification(phase: string, requested: unknown): 
   if (raw === "success" || raw === "partial" || raw === "invalid") return raw;
   if (phase === "final_validated" || phase === "council_validated") return "success";
   if ([
+    "final_revised",
     "needs_corrections",
     "implementation_failed",
     "corrections_failed",

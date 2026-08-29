@@ -7,5 +7,6 @@ test("council terminal phases map to explicit repository delivery outcomes", () 
   assert.equal(inferDeliveryClassification("council_review_waiting_human"), "partial");
   assert.equal(inferDeliveryClassification("council_review_failed"), "partial");
   assert.equal(inferDeliveryClassification("council_review_needs_corrections"), "partial");
+  assert.equal(inferDeliveryClassification("final_revised"), "partial");
   assert.equal(inferDeliveryClassification("implementation_running"), "invalid");
 });

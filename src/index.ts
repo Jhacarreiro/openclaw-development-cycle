@@ -1347,7 +1347,10 @@ async function finalizeObserverSessions(dir: string, status: any, terminal: stri
 async function refreshLaunchedImplementationStatus(dir: string, status: any) {
   const phase = String(status?.phase || "");
   if (!["implementation_launched", "implementation_running", "implementation_failed", "implementation_delivered", "corrections_launched", "corrections_running", "corrections_failed", "corrections_completed"].includes(phase)) return status;
-  const statusPath = status?.directImplementationStatus || status?.directCorrectionsStatus;
+  const isCorrectionsRun = phase.startsWith("corrections_") || Boolean(status?.directCorrectionsStatus);
+  const statusPath = isCorrectionsRun
+    ? (status?.directCorrectionsStatus || status?.directImplementationStatus)
+    : (status?.directImplementationStatus || status?.directCorrectionsStatus);
   let session: any = statusPath ? await readJsonIfExists(String(statusPath)) : null;
   if (!session) {
     const sid = status?.observerSessionId || status?.observerCorrectionsSessionId;
@@ -1368,7 +1371,7 @@ async function refreshLaunchedImplementationStatus(dir: string, status: any) {
     if (!runnerAlive) {
       const interruptedAt = new Date().toISOString();
       if (statusPath) await saveJson(String(statusPath), { ...session, status: 'interrupted', launchState: 'runner_missing', interruptedAt, updatedAt: interruptedAt, message: 'Implementation runner process disappeared without an exit marker.' });
-      const patch = phase.startsWith('implementation_corrections')
+      const patch = isCorrectionsRun
         ? { phase: 'corrections_failed', owner: 'main', ok: false, error: 'implementation_runner_process_missing', correctionsStdout: stdoutPath, correctionsStderr: stderrPath, directCorrectionsStatus: statusPath }
         : { phase: 'implementation_failed', owner: 'main', ok: false, nextAction: 'Inspect Implementation stdout/stderr and agent manifest; reconcile or launch a clean handoff.', error: 'implementation_runner_process_missing', implementationStdout: stdoutPath, implementationStderr: stderrPath, directImplementationStatus: statusPath };
       const observerFinalization = await finalizeObserverSessions(dir, status, "failed");
@@ -1394,13 +1397,13 @@ async function refreshLaunchedImplementationStatus(dir: string, status: any) {
       });
     }
     if (exitCode === 0) {
-      const patch = phase.startsWith("implementation_corrections")
+      const patch = isCorrectionsRun
         ? { phase: "corrections_completed", owner: "main", nextAction: "Run mechanical validation and council code review again for the corrected delivery.", ok: true, correctionsStdout: stdoutPath, correctionsStderr: stderrPath, directCorrectionsStatus: statusPath, externalValidation: "", validationSummary: "", councilReviewSummary: "", councilReviewSynthesis: "", councilReviewNeedsCorrections: null }
         : { phase: "implementation_delivered", owner: "main", nextAction: "Run mechanical final validation, then council code review.", ok: true, implementationStdout: stdoutPath, implementationStderr: stderrPath, directImplementationStatus: statusPath };
       const observerFinalization = await finalizeObserverSessions(dir, status, "completed");
       return await cycleStatus(dir, { ...patch, observerFinalization });
     }
-    const patch = phase.startsWith("implementation_corrections")
+    const patch = isCorrectionsRun
       ? { phase: "corrections_failed", owner: "main", ok: false, error: `Implementation exited non-zero: ${exitCode}`, correctionsStdout: stdoutPath, correctionsStderr: stderrPath, directCorrectionsStatus: statusPath }
       : { phase: "implementation_failed", owner: "main", ok: false, nextAction: "Inspect Implementation stdout/stderr, fix blockers, then launch a new clean handoff.", error: `Implementation exited non-zero: ${exitCode}`, implementationStdout: stdoutPath, implementationStderr: stderrPath, directImplementationStatus: statusPath };
     const observerFinalization = await finalizeObserverSessions(dir, status, "failed");

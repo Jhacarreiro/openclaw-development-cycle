@@ -91,6 +91,59 @@ test("implementation retry ignores stale terminal markers", async (t) => {
   await assert.rejects(access(join(sessionDir, "exited-at.txt")));
 });
 
+test("same run id implementation restart cannot reuse stale correction session", async (t) => {
+  const root = join(tmpdir(), `development-cycle-stale-correction-pointer-${process.pid}-${Date.now()}`);
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await mkdir(root, { recursive: true });
+  const tool = await loadTool(root);
+  const run = await prepareRun(tool, root, "stale-correction-pointer", "run-stale-correction-pointer");
+  const cycleStatusPath = join(run.dir, "status.json");
+  const staleDir = join(run.dir, "corrections_session");
+  const staleStatusPath = join(staleDir, "status.json");
+  await mkdir(staleDir, { recursive: true });
+  await writeFile(join(staleDir, "exit-code.txt"), "0\n");
+  await writeFile(join(staleDir, "exited-at.txt"), "2000-01-01T00:00:00Z\n");
+  await writeFile(staleStatusPath, JSON.stringify({
+    status: "completed",
+    launchState: "exited",
+    exitCode: 0,
+    exitCodePath: join(staleDir, "exit-code.txt"),
+    exitedAtPath: join(staleDir, "exited-at.txt"),
+  }, null, 2));
+  const cycleStatus = JSON.parse(await readFile(cycleStatusPath, "utf8"));
+  cycleStatus.phase = "implementation_failed";
+  cycleStatus.directCorrectionsStatus = staleStatusPath;
+  cycleStatus.directCorrectionsStdout = join(staleDir, "stdout.log");
+  cycleStatus.directCorrectionsStderr = join(staleDir, "stderr.log");
+  cycleStatus.correctionsStdout = join(staleDir, "stdout.log");
+  cycleStatus.correctionsStderr = join(staleDir, "stderr.log");
+  await writeFile(cycleStatusPath, JSON.stringify(cycleStatus, null, 2));
+
+  const launched = detailsOf(await tool.execute("restart", { action: "start_implementation", ...run, implementationAdapter: "command" }, undefined, undefined));
+  assert.equal(launched.ok, true);
+  const afterLaunch = JSON.parse(await readFile(cycleStatusPath, "utf8"));
+  assert.equal(afterLaunch.phase, "implementation_launched");
+  assert.equal(afterLaunch.directCorrectionsStatus, null);
+  assert.equal(afterLaunch.directCorrectionsStdout, null);
+  assert.equal(afterLaunch.directCorrectionsStderr, null);
+  assert.equal(afterLaunch.correctionsStdout, null);
+  assert.equal(afterLaunch.correctionsStderr, null);
+  assert.equal(afterLaunch.directImplementationStatus, launched.directImplementationStatus);
+
+  const reconciled = detailsOf(await tool.execute("reconcile", {
+    action: "reconcile",
+    ...run,
+    notifyMain: false,
+    autoStopStalled: false,
+    autoRunFinalValidation: false,
+    autoRunCouncilReview: false,
+  }, undefined, undefined));
+  assert.equal(reconciled.ok, true);
+  assert.notEqual(reconciled.status.phase, "corrections_completed");
+  assert.notEqual(reconciled.status.phase, "corrections_failed");
+  assert.match(reconciled.status.phase, /^implementation_/);
+});
+
 test("corrections relaunch ignores stale terminal markers", async (t) => {
   const root = join(tmpdir(), `development-cycle-corrections-markers-${process.pid}-${Date.now()}`);
   t.after(() => rm(root, { recursive: true, force: true }));

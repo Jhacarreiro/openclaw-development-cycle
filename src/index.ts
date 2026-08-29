@@ -1347,7 +1347,7 @@ async function finalizeObserverSessions(dir: string, status: any, terminal: stri
 async function refreshLaunchedImplementationStatus(dir: string, status: any) {
   const phase = String(status?.phase || "");
   if (!["implementation_launched", "implementation_running", "implementation_failed", "implementation_delivered", "corrections_launched", "corrections_running", "corrections_failed", "corrections_completed"].includes(phase)) return status;
-  const isCorrectionsRun = phase.startsWith("corrections_") || Boolean(status?.directCorrectionsStatus);
+  const isCorrectionsRun = phase.startsWith("corrections_");
   const statusPath = isCorrectionsRun
     ? (status?.directCorrectionsStatus || status?.directImplementationStatus)
     : (status?.directImplementationStatus || status?.directCorrectionsStatus);
@@ -2498,7 +2498,7 @@ Create or validate the implementation plan only. Do not implement. The plan must
     await updateImplementationObserverSession(dir, observerObservationId, { project, runId, command, projectRoot, projectWikiPath: containedProjectWikiPath, stdoutPath: launch.stdoutPath, stderrPath: launch.stderrPath, pid: launch.status?.runnerPid, processGroup: launch.status?.processGroupId, status: "running", summary: `development_cycle ${command} ${project} running`, message: "Implementation runner launched and bound to the observer root process." });
     const launchRecord = join(dir, "implementation_launch.json");
     await writeFile(launchRecord, JSON.stringify(launch, null, 2) + "\n");
-    const next = await cycleStatus(dir, { phase: "implementation_launched", owner: "implementation", nextAction: "Use development_cycle status to watch the supervised implementation runner.", projectRoot, projectWikiPath: containedProjectWikiPath, implementationAdapter: launch.adapter, implementationCommand: command, codexSandbox: defaultCodexSandbox, implementationSessionId: launch.sessionId, directImplementationStatus: launch.statusPath, directImplementationStdout: launch.stdoutPath, directImplementationStderr: launch.stderrPath, observerObservationId, implementationHandoffRequest: handoffRequest, implementationLaunch: launchRecord, implementationStdout: launch.stdoutPath, implementationStderr: launch.stderrPath });
+    const next = await cycleStatus(dir, { phase: "implementation_launched", owner: "implementation", nextAction: "Use development_cycle status to watch the supervised implementation runner.", projectRoot, projectWikiPath: containedProjectWikiPath, implementationAdapter: launch.adapter, implementationCommand: command, codexSandbox: defaultCodexSandbox, implementationSessionId: launch.sessionId, directImplementationStatus: launch.statusPath, directImplementationStdout: launch.stdoutPath, directImplementationStderr: launch.stderrPath, directCorrectionsStatus: null, directCorrectionsStdout: null, directCorrectionsStderr: null, correctionsStdout: null, correctionsStderr: null, observerCorrectionsObservationId: null, implementationCorrectionsSessionId: null, observerObservationId, implementationHandoffRequest: handoffRequest, implementationLaunch: launchRecord, implementationStdout: launch.stdoutPath, implementationStderr: launch.stderrPath });
     return { ok: true, project, runId, dir, phase: next.phase, implementationAdapter: launch.adapter, implementationSessionId: launch.sessionId, observerObservationId, launchState: launch.status?.launchState || null, directImplementationStatus: launch.statusPath };
 
   }

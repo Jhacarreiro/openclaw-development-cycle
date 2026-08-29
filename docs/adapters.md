@@ -67,6 +67,8 @@ chmod +x examples/command-runner.sh
 export DEVELOPMENT_CYCLE_IMPLEMENTATION_COMMAND="$PWD/examples/command-runner.sh"
 ```
 
+Direct implementation and corrections runners use immutable per-attempt directories under `implementation_session/attempts/<attemptId>/` and `corrections_session/attempts/<attemptId>/`. The cycle persists the active attempt id and exact status path; retries must never reuse terminal markers, logs, or `status.json` from an earlier attempt, and reconciliation ignores state whose attempt id does not match the active cycle attempt.
+
 ## Octopus adapter
 
 The optional Octopus adapter translates the generic request into:

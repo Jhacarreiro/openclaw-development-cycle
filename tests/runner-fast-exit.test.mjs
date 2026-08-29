@@ -72,7 +72,8 @@ test("immediate runner exit cannot be resurrected as running", async (t) => {
 
   assert.equal(launched.ok, true, JSON.stringify(launched));
   assert.equal(launched.launchState, "exited");
-  const session = JSON.parse(await readFile(join(launched.dir, "implementation_session", "status.json"), "utf8"));
+  assert.ok(launched.directImplementationStatus);
+  const session = JSON.parse(await readFile(launched.directImplementationStatus, "utf8"));
   assert.equal(session.status, "completed");
   assert.equal(session.launchState, "exited");
   assert.equal(session.exitCode, 0);

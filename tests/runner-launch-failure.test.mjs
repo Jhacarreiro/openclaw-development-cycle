@@ -69,7 +69,8 @@ test("invalid supervisor pid persists a terminal failed implementation session",
 
   assert.equal(launched.ok, false);
   assert.equal(launched.phase, "implementation_failed");
-  const session = JSON.parse(await readFile(join(launched.dir, "implementation_session", "status.json"), "utf8"));
+  assert.ok(launched.directImplementationStatus);
+  const session = JSON.parse(await readFile(launched.directImplementationStatus, "utf8"));
   assert.equal(session.status, "failed");
   assert.equal(session.launchState, "launch_failed");
   assert.equal(session.runnerPid, null);

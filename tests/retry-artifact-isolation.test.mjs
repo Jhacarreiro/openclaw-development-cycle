@@ -84,11 +84,14 @@ test("implementation retry ignores stale terminal markers", async (t) => {
   const launched = detailsOf(await tool.execute("retry", { action: "start_implementation", ...run, implementationAdapter: "command" }, undefined, undefined));
   assert.equal(launched.ok, true);
   assert.equal(launched.launchState, "running");
-  const session = JSON.parse(await readFile(join(sessionDir, "status.json"), "utf8"));
+  assert.ok(launched.directImplementationStatus);
+  assert.match(launched.directImplementationStatus, /implementation_session\/attempts\//);
+  const session = JSON.parse(await readFile(launched.directImplementationStatus, "utf8"));
   assert.equal(session.status, "running");
   assert.equal(session.launchState, "running");
-  await assert.rejects(access(join(sessionDir, "exit-code.txt")));
-  await assert.rejects(access(join(sessionDir, "exited-at.txt")));
+  assert.equal(session.attemptId, launched.implementationAttemptId);
+  assert.equal(await readFile(join(sessionDir, "exit-code.txt"), "utf8"), "1\n");
+  assert.equal(await readFile(join(sessionDir, "exited-at.txt"), "utf8"), "2000-01-01T00:00:00Z\n");
 });
 
 test("same run id implementation restart cannot reuse stale correction session", async (t) => {
@@ -163,9 +166,12 @@ test("corrections relaunch ignores stale terminal markers", async (t) => {
   const launched = detailsOf(await tool.execute("corrections", { action: "start_corrections", ...run, implementationAdapter: "command", feedbackText: "must fix the remaining issue" }, undefined, undefined));
   assert.equal(launched.ok, true);
   assert.equal(launched.launchState, "running");
-  const session = JSON.parse(await readFile(join(sessionDir, "status.json"), "utf8"));
+  assert.ok(launched.directCorrectionsStatus);
+  assert.match(launched.directCorrectionsStatus, /corrections_session\/attempts\//);
+  const session = JSON.parse(await readFile(launched.directCorrectionsStatus, "utf8"));
   assert.equal(session.status, "running");
   assert.equal(session.launchState, "running");
-  await assert.rejects(access(join(sessionDir, "exit-code.txt")));
-  await assert.rejects(access(join(sessionDir, "exited-at.txt")));
+  assert.equal(session.attemptId, launched.correctionsAttemptId);
+  assert.equal(await readFile(join(sessionDir, "exit-code.txt"), "utf8"), "0\n");
+  assert.equal(await readFile(join(sessionDir, "exited-at.txt"), "utf8"), "2000-01-01T00:00:00Z\n");
 });

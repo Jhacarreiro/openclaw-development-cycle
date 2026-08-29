@@ -56,3 +56,30 @@ for (const [sourcePhase, expectedPhase, classification] of [
     assert.equal(closed.phase, "closed");
   });
 }
+
+
+test("repository delivery request uses outputPath while preserving sourceProjectRoot", async (t) => {
+  const root = join(tmpdir(), `development-cycle-local-delivery-output-${process.pid}-${Date.now()}`);
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const checkout = join(root, "checkout");
+  const output = join(root, "output");
+  await mkdir(join(checkout, ".git"), { recursive: true });
+  await mkdir(join(output, ".git"), { recursive: true });
+  const tool = await loadTool(root);
+  const project = "delivery-output-root";
+  const runId = "run-delivery-output-root";
+  const requested = detailsOf(await tool.execute("request-output", { action: "request_plan", project, runId, projectRoot: checkout }, undefined, undefined));
+  const statusPath = join(requested.dir, "status.json");
+  const status = JSON.parse(await readFile(statusPath, "utf8"));
+  status.phase = "council_validated";
+  status.projectRoot = checkout;
+  status.outputPath = output;
+  await writeFile(statusPath, JSON.stringify(status));
+
+  const finalized = detailsOf(await tool.execute("finalize-output", { action: "finalize_delivery", project, runId, projectRoot: checkout }, undefined, undefined));
+  assert.equal(finalized.ok, true, JSON.stringify(finalized));
+  const request = JSON.parse(await readFile(join(requested.dir, "repository_delivery_request.json"), "utf8"));
+  assert.equal(request.projectRoot, output);
+  assert.equal(request.sourceProjectRoot, checkout);
+  assert.equal(request.outputPath, output);
+});

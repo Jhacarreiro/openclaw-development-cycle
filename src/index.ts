@@ -236,6 +236,7 @@ async function createImplementationRunnerSession(dir: string, params: any) {
       adapter: params.implementationAdapter,
       project: request.project,
       runId: request.runId,
+      attemptId,
       mode,
       projectRoot,
       requestPath,
@@ -1115,6 +1116,59 @@ async function execGit(args: string[], cwd = wikiRoot, timeout = 10000) {
   }
 }
 
+function effectiveImplementationRoot(status: any, params: any = {}) {
+  return String(status?.outputPath || params?.projectRoot || status?.projectRoot || "").trim();
+}
+
+async function resolveOctopusAttemptOutput(projectRoot: string, attemptId: string) {
+  const safeAttemptId = cleanId(attemptId || "", "attempt");
+  const manifestPath = join(runtimeHome, ".claude-octopus", "results", `.tangle-${safeAttemptId}-git.json`);
+  if (!safeAttemptId) return { ok: false, error: "octopus_attempt_id_missing", manifestPath };
+  const manifest = await readJsonIfExists(manifestPath);
+  if (!manifest) return { ok: false, error: "octopus_output_manifest_missing", manifestPath, attemptId: safeAttemptId };
+
+  const manifestSource = String(manifest.sourceRepository || "").trim();
+  const runWorktree = String(manifest.runWorktree || "").trim();
+  const runBranch = String(manifest.runBranch || "").trim();
+  const expectedBranch = `octopus/run/${safeAttemptId}/integration`;
+  if (!manifestSource || !runWorktree || !runBranch) {
+    return { ok: false, error: "octopus_output_manifest_incomplete", manifestPath, attemptId: safeAttemptId };
+  }
+
+  const sourcePinned = await pinTrustedProjectRoot(projectRoot);
+  const manifestSourcePinned = await pinTrustedProjectRoot(manifestSource);
+  const outputPinned = await pinTrustedProjectRoot(runWorktree);
+  try {
+    if (!sourcePinned || !manifestSourcePinned || !outputPinned) {
+      return { ok: false, error: "octopus_output_manifest_untrusted_checkout", manifestPath, attemptId: safeAttemptId };
+    }
+    if (sourcePinned.realPath !== manifestSourcePinned.realPath) {
+      return { ok: false, error: "octopus_output_source_mismatch", manifestPath, attemptId: safeAttemptId, expectedSource: sourcePinned.realPath, manifestSource: manifestSourcePinned.realPath };
+    }
+    if (runBranch !== expectedBranch) {
+      return { ok: false, error: "octopus_output_branch_mismatch", manifestPath, attemptId: safeAttemptId, expectedBranch, manifestBranch: runBranch };
+    }
+    const top = await execGit(["rev-parse", "--show-toplevel"], outputPinned.procPath, 10000);
+    const branch = await execGit(["symbolic-ref", "--quiet", "--short", "HEAD"], outputPinned.procPath, 10000);
+    if (!top.ok || !branch.ok) {
+      return { ok: false, error: "octopus_output_git_probe_failed", manifestPath, attemptId: safeAttemptId };
+    }
+    const topReal = await realpath(String(top.stdout || "").trim()).catch(() => "");
+    const actualBranch = String(branch.stdout || "").trim();
+    if (!topReal || topReal !== outputPinned.realPath) {
+      return { ok: false, error: "octopus_output_worktree_mismatch", manifestPath, attemptId: safeAttemptId, expectedWorktree: outputPinned.realPath, gitTopLevel: topReal || null };
+    }
+    if (actualBranch !== runBranch) {
+      return { ok: false, error: "octopus_output_checked_out_branch_mismatch", manifestPath, attemptId: safeAttemptId, manifestBranch: runBranch, actualBranch };
+    }
+    return { ok: true, attemptId: safeAttemptId, manifestPath, outputPath: outputPinned.realPath, sourceRepository: sourcePinned.realPath, sourceCommit: String(manifest.sourceCommit || "").trim() || null, runBranch };
+  } finally {
+    await sourcePinned?.handle.close().catch(() => null);
+    await manifestSourcePinned?.handle.close().catch(() => null);
+    await outputPinned?.handle.close().catch(() => null);
+  }
+}
+
 function repositoryFindings(status: any, max = 12) {
   const raw = [...(status?.councilReviewFindings || [])];
   if (status?.failureRecommendedAction) raw.push(String(status.failureRecommendedAction));
@@ -1131,7 +1185,8 @@ function repositoryFindings(status: any, max = 12) {
 async function runRepositoryDeliveryAdapter(dir: string, status: any, params: any) {
   const project = cleanId(params.project || status?.project || "default");
   const runId = cleanId(params.runId || status?.runId || "run");
-  const projectRoot = String(params.projectRoot || status?.projectRoot || "");
+  const projectRoot = effectiveImplementationRoot(status, params);
+  const sourceProjectRoot = String(params.projectRoot || status?.projectRoot || "");
   const sourcePhase = String(status?.phase || "");
   const classification = inferDeliveryClassification(sourcePhase, params.deliveryClassification || status?.repositoryDelivery?.classification);
   const requestPath = join(dir, "repository_delivery_request.json");
@@ -1142,6 +1197,8 @@ async function runRepositoryDeliveryAdapter(dir: string, status: any, params: an
     project,
     runId,
     projectRoot,
+    sourceProjectRoot,
+    outputPath: status?.outputPath || null,
     sourcePhase,
     classification,
     baseBranch: String(params.repositoryBaseBranch || repositoryDeliveryConfig.baseBranch || "main"),
@@ -1423,9 +1480,34 @@ async function refreshLaunchedImplementationStatus(dir: string, status: any) {
       });
     }
     if (exitCode === 0) {
+      let outputHandoff: any = null;
+      if (!isCorrectionsRun && String(session?.adapter || status?.implementationAdapter || "") === "octopus") {
+        outputHandoff = await resolveOctopusAttemptOutput(String(status?.projectRoot || session?.projectRoot || ""), observedAttemptId || activeAttemptId);
+      }
       const patch = isCorrectionsRun
         ? { phase: "corrections_completed", owner: "main", nextAction: "Run mechanical validation and council code review again for the corrected delivery.", ok: true, correctionsStdout: stdoutPath, correctionsStderr: stderrPath, directCorrectionsStatus: statusPath, externalValidation: "", validationSummary: "", councilReviewSummary: "", councilReviewSynthesis: "", councilReviewNeedsCorrections: null }
-        : { phase: "implementation_delivered", owner: "main", nextAction: "Run mechanical final validation, then council code review.", ok: true, implementationStdout: stdoutPath, implementationStderr: stderrPath, directImplementationStatus: statusPath };
+        : outputHandoff && !outputHandoff.ok
+          ? {
+              phase: "implementation_failed",
+              owner: "main",
+              nextAction: "Fix the Octopus output handoff before retrying implementation.",
+              ok: false,
+              error: "octopus_output_handoff_failed",
+              implementationStdout: stdoutPath,
+              implementationStderr: stderrPath,
+              directImplementationStatus: statusPath,
+              implementationOutputHandoff: outputHandoff,
+            }
+          : {
+              phase: "implementation_delivered",
+              owner: "main",
+              nextAction: "Run mechanical final validation, then council code review.",
+              ok: true,
+              implementationStdout: stdoutPath,
+              implementationStderr: stderrPath,
+              directImplementationStatus: statusPath,
+              ...(outputHandoff?.ok ? { outputPath: outputHandoff.outputPath, implementationOutputHandoff: outputHandoff } : {}),
+            };
       const observerFinalization = await finalizeObserverSessions(dir, status, "completed");
       return await cycleStatus(dir, { ...patch, observerFinalization });
     }
@@ -1552,7 +1634,7 @@ async function writeRichRuntimeObservation(dir: string, status: any, sessions: a
   const stderrTail = await textTail(stderrPath);
   const timeline = runtimeTimelineFromText("stdout", stdoutTail).concat(runtimeTimelineFromText("stderr", stderrTail)).slice(-300);
   const process = await runtimeProcessSnapshot(status, sessions);
-  const git = await runtimeGitSnapshot(String(status?.projectRoot || ""));
+  const git = await runtimeGitSnapshot(effectiveImplementationRoot(status));
   const artifacts = await runtimeArtifacts(dir, status, stdoutTail, stderrTail);
   const alerts = runtimeAlerts(status, process, git, timeline, artifacts);
   const observation = { generatedAt: new Date().toISOString(), phase: status?.phase || null, owner: status?.owner || null, nextAction: status?.nextAction || null, process, git, artifacts, timelineTail: timeline.slice(-80), alerts };
@@ -1573,21 +1655,22 @@ async function cycleRuntimeSummary(dir: string, status: any) {
 }
 async function readTextSection(path: string, max = 6000) { const t = await readTextIfExists(path); return t.trim() ? excerpt(t, max) : "not present"; }
 async function writeFinalValidationPack(dir: string, project: string, runId: string, status: any) {
-  const projectRoot = String(status?.projectRoot || "");
-  const gitStatus = projectRoot ? await execSummary("git", ["status", "--short", "--branch"], projectRoot) : "projectRoot not supplied";
-  const gitDiffStat = projectRoot ? await execSummary("git", ["diff", "--stat"], projectRoot) : "projectRoot not supplied";
+  const sourceProjectRoot = String(status?.projectRoot || "");
+  const implementationRoot = effectiveImplementationRoot(status);
+  const gitStatus = implementationRoot ? await execSummary("git", ["status", "--short", "--branch"], implementationRoot) : "implementation root not supplied";
+  const gitDiffStat = implementationRoot ? await execSummary("git", ["diff", "--stat"], implementationRoot) : "implementation root not supplied";
   const sessions = await collectObserverSessions(status || {});
   const files = (await readdir(dir).catch(() => [])).sort();
   const manifest: any[] = [];
   for (const name of files) { const path = join(dir, name); const st = await stat(path).catch(() => null); if (st?.isFile()) manifest.push({ name, path, size: st.size, mtimeMs: st.mtimeMs }); }
   const deliverySummary = join(dir, "delivery_summary.md");
-  await writeFile(deliverySummary, `# Delivery summary\n\nProject: ${project}\nRun: ${runId}\nPhase: ${status?.phase || "unknown"}\nOwner: ${status?.owner || "unknown"}\nNext action: ${status?.nextAction || "unknown"}\n\n## Paths\n\n- projectRoot: ${projectRoot || "not supplied"}\n- projectWikiPath: ${status?.projectWikiPath || "not supplied"}\n- plan: ${status?.plan || "not supplied"}\n- canonicalPlan: ${status?.canonicalPlan || "not supplied"}\n- outputPath: ${status?.outputPath || "not supplied"}\n\n## Implementation evidence\n\n- stdout: ${status?.implementationStdout || status?.correctionsStdout || "not supplied"}\n- stderr: ${status?.implementationStderr || status?.correctionsStderr || "not supplied"}\n- observerSessionId: ${status?.observerSessionId || "not supplied"}\n- observerCorrectionsSessionId: ${status?.observerCorrectionsSessionId || "not supplied"}\n\n## Git status\n\n\`\`\`text\n${excerpt(gitStatus, 6000)}\n\`\`\`\n\n## Git diff stat\n\n\`\`\`text\n${excerpt(gitDiffStat, 4000)}\n\`\`\`\n`);
+  await writeFile(deliverySummary, `# Delivery summary\n\nProject: ${project}\nRun: ${runId}\nPhase: ${status?.phase || "unknown"}\nOwner: ${status?.owner || "unknown"}\nNext action: ${status?.nextAction || "unknown"}\n\n## Paths\n\n- projectRoot: ${sourceProjectRoot || "not supplied"}\n- projectWikiPath: ${status?.projectWikiPath || "not supplied"}\n- plan: ${status?.plan || "not supplied"}\n- canonicalPlan: ${status?.canonicalPlan || "not supplied"}\n- outputPath: ${status?.outputPath || "not supplied"}\n- effectiveImplementationRoot: ${implementationRoot || "not supplied"}\n\n## Implementation evidence\n\n- stdout: ${status?.implementationStdout || status?.correctionsStdout || "not supplied"}\n- stderr: ${status?.implementationStderr || status?.correctionsStderr || "not supplied"}\n- observerSessionId: ${status?.observerSessionId || "not supplied"}\n- observerCorrectionsSessionId: ${status?.observerCorrectionsSessionId || "not supplied"}\n\n## Git status\n\n\`\`\`text\n${excerpt(gitStatus, 6000)}\n\`\`\`\n\n## Git diff stat\n\n\`\`\`text\n${excerpt(gitDiffStat, 4000)}\n\`\`\`\n`);
   const artifactManifest = join(dir, "artifact_manifest.json");
   await writeFile(artifactManifest, JSON.stringify({ project, runId, generatedAt: new Date().toISOString(), files: manifest }, null, 2) + "\n");
   const observerSessions = join(dir, "observer_sessions.json");
   await writeFile(observerSessions, JSON.stringify({ project, runId, generatedAt: new Date().toISOString(), sessions }, null, 2) + "\n");
   const testEvidence = join(dir, "test_evidence.md");
-  await writeFile(testEvidence, `# Test evidence\n\n## Detected package scripts\n\n${projectRoot ? await packageScriptsBrief(projectRoot) : "projectRoot not supplied"}\n\n## Implementation stdout excerpt\n\n\`\`\`text\n${await readTextSection(String(status?.implementationStdout || status?.correctionsStdout || join(dir, "implementation_delivery_stdout.txt")), 10000)}\n\`\`\`\n\n## Implementation stderr excerpt\n\n\`\`\`text\n${await readTextSection(String(status?.implementationStderr || status?.correctionsStderr || join(dir, "implementation_delivery_stderr.txt")), 6000)}\n\`\`\`\n`);
+  await writeFile(testEvidence, `# Test evidence\n\n## Detected package scripts\n\n${implementationRoot ? await packageScriptsBrief(implementationRoot) : "implementation root not supplied"}\n\n## Implementation stdout excerpt\n\n\`\`\`text\n${await readTextSection(String(status?.implementationStdout || status?.correctionsStdout || join(dir, "implementation_delivery_stdout.txt")), 10000)}\n\`\`\`\n\n## Implementation stderr excerpt\n\n\`\`\`text\n${await readTextSection(String(status?.implementationStderr || status?.correctionsStderr || join(dir, "implementation_delivery_stderr.txt")), 6000)}\n\`\`\`\n`);
   const riskChecklist = join(dir, "risk_checklist.md");
   await writeFile(riskChecklist, `# Final validation risk checklist\n\nReturn GO only if all relevant checks pass.\n\n- [ ] Approved plan was followed; no unrelated scope expansion.\n- [ ] projectRoot is the real code checkout, not only a wiki/docs folder.\n- [ ] No secrets/auth/env/cookie/OAuth files were exposed or edited.\n- [ ] No protected OpenClaw config/state file was edited without explicit authorization.\n- [ ] No third-party/upstream runtime patch was left as architecture without PR-style handling.\n- [ ] Worktree state is understood; unexpected dirty files are explained.\n- [ ] Validation commands/smokes were run or blockers are documented.\n- [ ] Required wiki/runbook/state documentation was updated.\n- [ ] Restart/recreate/persistence survival was considered where relevant.\n- [ ] Observer parent/child session state is coherent enough to audit.\n\nDecision must be exactly one of: go | revise | stop.\n`);
   return { deliverySummary, artifactManifest, observerSessions, testEvidence, riskChecklist };
@@ -1794,12 +1877,15 @@ async function existingForbiddenPathCheck(projectRoot: string, config: any) {
 async function runExternalFinalValidation(dir: string, status: any, params: any = {}, reason = "manual") {
   const project = cleanId(params.project || status?.project || "default");
   const runId = cleanId(params.runId || status?.runId || "run");
-  const requestedProjectRoot = String(params.projectRoot || status?.projectRoot || "");
-  const pinnedProjectRoot = await pinTrustedProjectRoot(requestedProjectRoot);
-  const projectRoot = pinnedProjectRoot?.realPath || requestedProjectRoot;
-  const validationRoot = pinnedProjectRoot?.procPath || "";
-  const loaded = pinnedProjectRoot
-    ? await loadProjectValidationConfig(project, status, params, pinnedProjectRoot)
+  const requestedSourceProjectRoot = String(params.projectRoot || status?.projectRoot || "");
+  const requestedImplementationRoot = effectiveImplementationRoot(status, params);
+  const pinnedSourceProjectRoot = await pinTrustedProjectRoot(requestedSourceProjectRoot);
+  const pinnedImplementationRoot = await pinTrustedProjectRoot(requestedImplementationRoot);
+  const projectRoot = pinnedSourceProjectRoot?.realPath || requestedSourceProjectRoot;
+  const implementationRoot = pinnedImplementationRoot?.realPath || requestedImplementationRoot;
+  const validationRoot = pinnedImplementationRoot?.procPath || "";
+  const loaded = pinnedSourceProjectRoot
+    ? await loadProjectValidationConfig(project, status, { ...params, projectRoot: requestedSourceProjectRoot }, pinnedSourceProjectRoot)
     : { config: defaultValidationConfig(), path: "default", rejectedValidationConfigPath: null, error: "project_root_not_trusted_git_checkout" };
   const config = loaded.config;
   await mkdir(dir, { recursive: true });
@@ -1813,7 +1899,7 @@ async function runExternalFinalValidation(dir: string, status: any, params: any 
 
   try {
   const rootStat = validationRoot ? await stat(validationRoot).catch(() => null) : null;
-  if (!rootStat?.isDirectory()) failures.push({ check: "projectRoot", severity: "stop", reason: "projectRoot must be an existing trusted Git checkout on a supported Linux host", projectRoot: requestedProjectRoot });
+  if (!rootStat?.isDirectory()) failures.push({ check: "implementationRoot", severity: "stop", reason: "implementation root must be an existing trusted Git checkout on a supported Linux host", projectRoot, implementationRoot: requestedImplementationRoot });
   if (rootStat?.isDirectory()) {
     const readyFile = String(process.env.DEVELOPMENT_CYCLE_TEST_VALIDATION_ROOT_READY_FILE || "").trim();
     if (readyFile) await writeFile(readyFile, "ready\n");
@@ -1840,7 +1926,7 @@ async function runExternalFinalValidation(dir: string, status: any, params: any 
   const stop = failures.some((f) => f.severity === "stop");
   const ok = failures.length === 0;
   const decision = ok ? "go" : stop ? "stop" : "revise";
-  const result = { ok, decision, reason, project, runId, generatedAt: new Date().toISOString(), projectRoot, validationConfigPath: loaded.path, rejectedValidationConfigPath: loaded.rejectedValidationConfigPath || null, error: loaded.error || null, config, preservedDiff, commandResults, failures };
+  const result = { ok, decision, reason, project, runId, generatedAt: new Date().toISOString(), projectRoot, outputPath: status?.outputPath || null, implementationRoot, validationConfigPath: loaded.path, rejectedValidationConfigPath: loaded.rejectedValidationConfigPath || null, error: loaded.error || null, config, preservedDiff, commandResults, failures };
   await saveJson(resultPath, result);
   await writeFile(stdoutPath, commandResults.map((r) => `# ${r.command}\n\n${r.stdout || ""}`).join("\n\n---\n\n"));
   await writeFile(stderrPath, commandResults.map((r) => `# ${r.command}\n\n${r.stderr || r.error || ""}`).join("\n\n---\n\n"));
@@ -1850,7 +1936,8 @@ async function runExternalFinalValidation(dir: string, status: any, params: any 
   const next = await cycleStatus(dir, { phase, owner: "main", ok, externalValidationDecision: decision, externalValidation: resultPath, validationSummary: summaryPath, validationStdout: stdoutPath, validationStderr: stderrPath, validationConfigPath: loaded.path, rejectedValidationConfigPath: loaded.rejectedValidationConfigPath || null, validationConfigError: loaded.error || null, nextAction });
   return { ok, decision, project, runId, dir, phase: next.phase, validationResult: resultPath, validationSummary: summaryPath, validationStdout: stdoutPath, validationStderr: stderrPath, failures, commandResults: commandResults.map((r) => ({ command: r.command, ok: r.ok, exitCode: r.exitCode, timedOut: r.timedOut || false, durationMs: r.durationMs })), preservedDiff, rejectedValidationConfigPath: loaded.rejectedValidationConfigPath || null, validationConfigError: loaded.error || null, status: next };
   } finally {
-    await pinnedProjectRoot?.handle.close().catch(() => null);
+    await pinnedImplementationRoot?.handle.close().catch(() => null);
+    await pinnedSourceProjectRoot?.handle.close().catch(() => null);
   }
 }
 async function latestRunActivityMtime(status: any) {
@@ -1939,7 +2026,7 @@ function extractCouncilFindings(text: string, max = 10) {
 }
 
 async function buildCouncilCodeReviewTask(dir: string, project: string, runId: string, status: any) {
-  const projectRoot = String(status?.projectRoot || "");
+  const projectRoot = effectiveImplementationRoot(status);
   const validationSummary = await readTextIfExists(String(status?.validationSummary || join(dir, "validation_summary.md")));
   const plan = await readTextIfExists(join(dir, "implementation_plan.md"));
   const gitStatus = projectRoot ? await execSummary("git", ["status", "--short", "--branch"], projectRoot, 15000) : "projectRoot not supplied";
@@ -1969,8 +2056,8 @@ async function runCouncilCodeReview(dir: string, status: any, params: any = {}) 
   if (adapter !== "octopus") return { ok: true, skipped: true, reason: "council_requires_octopus_adapter", status };
   const project = cleanId(params.project || status?.project || "default");
   const runId = cleanId(params.runId || status?.runId || "run");
-  const projectRoot = String(params.projectRoot || status?.projectRoot || "");
-  if (!projectRoot) return { ok: false, skipped: true, reason: "projectRoot_missing" };
+  const projectRoot = effectiveImplementationRoot(status, params);
+  if (!projectRoot) return { ok: false, skipped: true, reason: "implementation_root_missing" };
   if (status?.councilReviewSummary && await stat(String(status.councilReviewSummary)).catch(() => null)) return { ok: true, skipped: true, reason: "council_review_already_done", summaryPath: status.councilReviewSummary, status };
   const input = await buildCouncilCodeReviewTask(dir, project, runId, { ...status, projectRoot });
   const outputRoot = join(dir, "council-code-review");

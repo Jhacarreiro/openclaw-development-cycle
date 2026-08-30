@@ -3,7 +3,7 @@ import { Type } from "typebox";
 import { defineToolPlugin } from "openclaw/plugin-sdk/tool-plugin";
 import { lstat, mkdir, open, readFile, readdir, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
 import { constants as fsConstants } from "node:fs";
-import { join, relative, resolve, sep } from "node:path";
+import { join, relative, resolve, sep, basename, dirname } from "node:path";
 import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -2382,11 +2382,21 @@ async function stopLaunchedImplementation(dir: string, status: any, reason: stri
 }
 
 async function latestRunId(project: string) {
-  const names = [];
+  const entries: Array<{ name: string; mtime: number }> = [];
   for (const dirName of idPathCandidates(project)) {
-    try { names.push(...await readdir(join(cycleRoot, "runs", dirName))); } catch {}
+    const base = join(cycleRoot, "runs", dirName);
+    let ents: Array<{ name: string; isDirectory: () => boolean }> = [];
+    try { ents = await readdir(base, { withFileTypes: true }); } catch { continue; }
+    for (const ent of ents) {
+      if (!ent.isDirectory() || !ent.name || ent.name.startsWith(".")) continue;
+      const full = join(base, ent.name);
+      let mtime = 0;
+      try { mtime = (await stat(full)).mtimeMs; } catch { continue; }
+      entries.push({ name: ent.name, mtime });
+    }
   }
-  return names.filter((x) => x && !x.startsWith(".")).sort().at(-1) || "";
+  entries.sort((a, b) => a.mtime - b.mtime || a.name.localeCompare(b.name));
+  return entries.at(-1)?.name || "";
 }
 
 const LIVE_RUN_PHASES = ["implementation_launched", "implementation_running", "corrections_launched", "corrections_running"];
@@ -2407,7 +2417,7 @@ async function projectCycle(params: any) {
   if (!supported.includes(action)) return { ok: false, error: "unknown_action", action, supported };
 
   const rawProject = params.project || "default";
-  const project = cleanId(rawProject);
+  let project = cleanId(rawProject);
   const createRun = action === "request_plan" || action === "record_plan";
   // cleanId("") falls back to "run", which would turn a "no run exists yet"
   // latestRunId result into a phantom run directory. Check the raw value for
@@ -2416,6 +2426,7 @@ async function projectCycle(params: any) {
   if (!requestedRunId) return { ok: true, project, runId: null, dir: null, status: null, files: [], nextAction: "request_plan or record_plan" };
   const runId = cleanId(requestedRunId);
   const dir = cycleDir(rawProject, runId);
+  project = basename(dirname(dir));
   if (action !== "status" && params[lifecycleLockHeld] !== true) {
     await mkdir(dir, { recursive: true });
     let lifecycleLock: Awaited<ReturnType<typeof acquireLock>>;

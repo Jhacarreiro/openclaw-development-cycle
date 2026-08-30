@@ -8,9 +8,9 @@ test("cleanId rejects path traversal tokens", () => {
   assert.notEqual(cleanId(".."), "..");
   assert.notEqual(cleanId("."), ".");
   assert.notEqual(cleanId("..."), "...");
-  assert.match(cleanId(".."), /^run-[0-9a-f]{64}$/);
-  assert.match(cleanId("."), /^run-[0-9a-f]{64}$/);
-  assert.match(cleanId("..."), /^run-[0-9a-f]{64}$/);
+  assert.equal(cleanId(".."), "run");
+  assert.equal(cleanId("."), "run");
+  assert.equal(cleanId("..."), "run");
   assert.equal(cleanId("ok-project"), "ok-project");
   const root = "/tmp/ocl-state";
   const dir = join(root, "runs", cleanId(".."), cleanId("rid"));

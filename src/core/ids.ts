@@ -28,9 +28,12 @@ export function cleanId(input: unknown, fallback = "run", maxLength = CLEAN_ID_M
     .slice(0, maxLength);
   // path.join treats "." / ".." as traversal; never emit them as directory names.
   const dotToken = /^\.+$/.test(sanitized);
-  const base = sanitized && !dotToken ? sanitized : fallback;
+  // Match current main: ".", "..", and pure-dot tokens map to the stable
+  // fallback so existing runs/run state stay discoverable after upgrade.
+  if (dotToken) return fallback;
+  const base = sanitized ? sanitized : fallback;
   const emptyInput = !trimmed;
-  const needsIdentity = !emptyInput && (raw !== sanitized || dotToken || !sanitized || raw.length > maxLength);
+  const needsIdentity = !emptyInput && (raw !== sanitized || !sanitized || raw.length > maxLength);
   if (!needsIdentity) return base;
 
   const digest = identityDigest(raw);

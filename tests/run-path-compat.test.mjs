@@ -51,6 +51,17 @@ test("request_plan uses canonical paths and status finds legacy sanitized runs",
   );
   assert.equal(upgraded.details.ok, true);
   assert.equal(upgraded.details.dir, legacyDir);
+  assert.equal(upgraded.details.project, "Legacy-Name");
   assert.equal(upgraded.details.runId, cleanId(legacyRunId));
   assert.equal(upgraded.details.status.phase, "planned");
+
+  const roundTrip = await registered.execute(
+    "run-path-roundtrip",
+    { action: "status", project: upgraded.details.project },
+    undefined,
+    undefined,
+  );
+  assert.equal(roundTrip.details.ok, true);
+  assert.equal(roundTrip.details.dir, legacyDir);
+  assert.equal(roundTrip.details.project, "Legacy-Name");
 });

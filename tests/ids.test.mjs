@@ -46,7 +46,9 @@ test("cleanId does not emit path traversal tokens", () => {
   assert.notEqual(cleanId("."), ".");
   assert.notEqual(cleanId(".."), "..");
   assert.notEqual(cleanId("..."), "...");
-  assert.notEqual(cleanId("."), cleanId(".."));
+  assert.equal(cleanId("."), "run");
+  assert.equal(cleanId(".."), "run");
+  assert.equal(cleanId("..."), "run");
   const root = "/tmp/ocl-state";
   const dir = join(root, "runs", cleanId(".."), cleanId("rid"));
   const rel = relative(join(root, "runs"), dir);
@@ -56,7 +58,7 @@ test("cleanId does not emit path traversal tokens", () => {
 test("idPathCandidates preserve the pre-digest sanitized name", () => {
   assert.deepEqual(idPathCandidates("alpha"), ["alpha"]);
   assert.deepEqual(idPathCandidates("Project / One"), [cleanId("Project / One"), "Project-One"]);
-  assert.deepEqual(idPathCandidates(".."), [cleanId("..")]);
+  assert.deepEqual(idPathCandidates(".."), ["run"]);
 });
 
 test("newRunId is deterministic with an injected clock", () => {

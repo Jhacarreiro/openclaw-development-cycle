@@ -84,3 +84,26 @@ test("repository delivery is opt-in and configurable", () => {
   assert.equal(configured.repositoryDelivery.autoMergeSuccessful, false);
   assert.equal(configured.repositoryDelivery.baseBranch, "trunk");
 });
+
+test("retention days treats 0 as the documented disabled opt-out", () => {
+  const config = loadDevelopmentCycleConfig({
+    HOME: "/tmp/example-home",
+    DEVELOPMENT_CYCLE_RETENTION_DAYS: "0",
+  });
+  assert.equal(config.retentionDays, 0, "0 means retention disabled, not fallback");
+});
+
+test("retention days falls back for unset or invalid values", () => {
+  const unset = loadDevelopmentCycleConfig({ HOME: "/tmp/example-home" });
+  assert.equal(unset.retentionDays, 30);
+  const invalid = loadDevelopmentCycleConfig({
+    HOME: "/tmp/example-home",
+    DEVELOPMENT_CYCLE_RETENTION_DAYS: "abc",
+  });
+  assert.equal(invalid.retentionDays, 30);
+  const negative = loadDevelopmentCycleConfig({
+    HOME: "/tmp/example-home",
+    DEVELOPMENT_CYCLE_RETENTION_DAYS: "-1",
+  });
+  assert.equal(negative.retentionDays, 30);
+});

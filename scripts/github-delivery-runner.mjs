@@ -158,10 +158,10 @@ if (req.classification === "partial") {
   }
 }
 
-let merged = false;
+let merged = pullRequest?.state === "MERGED";
 let mergeQueued = false;
-if (req.classification === "success" && req.autoMerge) {
-  run("gh", ["pr", "merge", String(pullRequest.number), "--squash", "--auto", "--delete-branch"]);
+if (req.classification === "success" && req.autoMerge && !merged) {
+  run("gh", ["pr", "merge", String(pullRequest.number), "--squash", "--auto"]);
   mergeQueued = true;
   try {
     const after = JSON.parse(run("gh", ["pr", "view", String(pullRequest.number), "--json", "state,mergedAt"]));

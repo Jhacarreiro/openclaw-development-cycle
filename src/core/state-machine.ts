@@ -33,6 +33,7 @@ const ALLOWED_PHASES: Partial<Record<DevelopmentCycleAction, ReadonlySet<string>
     "implementation_delivered",
     "corrections_completed",
     "external_validation_failed",
+    "external_validation_needs_revision",
   ]),
   record_delivery: new Set(["implementation_launched", "implementation_running", "implementation_failed"]),
   request_final_validation: new Set([

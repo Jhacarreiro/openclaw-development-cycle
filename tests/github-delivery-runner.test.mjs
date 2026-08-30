@@ -68,7 +68,7 @@ test("partial delivery opens normal PR and residual issues without merge", async
   assert.doesNotMatch(gh, /"pr","merge"/);
 });
 
-test("successful delivery queues GitHub auto-merge", async () => {
+test("successful delivery queues GitHub auto-merge without local branch deletion", async () => {
   const f = await fixture();
   const out = await runFixture(f, { classification:"success", autoMerge:true, findings:[] });
   assert.equal(out.ok, true);
@@ -77,6 +77,18 @@ test("successful delivery queues GitHub auto-merge", async () => {
   const gh = await readFile(join(f.state, "gh.log"), "utf8");
   assert.match(gh, /"pr","merge"/);
   assert.match(gh, /"--auto"/);
+  assert.doesNotMatch(gh, /"--delete-branch"/);
+});
+
+test("retry recognizes an already merged PR without invoking merge again", async () => {
+  const f = await fixture("");
+  await writeFile(join(f.state, "pr"), "1");
+  const out = await runFixture(f, { classification:"success", autoMerge:true, findings:[] }, { TEST_PR_MERGED:"1" });
+  assert.equal(out.ok, true);
+  assert.equal(out.merged, true);
+  assert.equal(out.mergeQueued, false);
+  const gh = await readFile(join(f.state, "gh.log"), "utf8");
+  assert.doesNotMatch(gh, /"pr","merge"/);
 });
 
 test("git push uses ephemeral GIT_ASKPASS without putting the token in argv", async () => {

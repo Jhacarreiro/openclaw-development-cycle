@@ -95,22 +95,27 @@ try {
   pullRequest = JSON.parse(run("gh", ["pr", "view", branch, "--json", "number,url,state"]));
 } catch {}
 if (!pullRequest || pullRequest.state === "CLOSED") {
-  const bodyPath = join(cwd, ".git", `development-cycle-${safe(req.runId)}-pr.md`);
-  await writeFile(bodyPath, [
-    `Development-cycle run: ${req.runId}`,
-    `Classification: ${req.classification}`,
-    `Source phase: ${req.sourcePhase}`,
-    "",
-    "This PR is the materialized output of the supervised development cycle.",
-  ].join("\n"));
-  const url = run("gh", [
-    "pr", "create",
-    "--base", safe(req.baseBranch || "main"),
-    "--head", branch,
-    "--title", `${req.project}: ${req.classification} delivery ${req.runId}`,
-    "--body-file", bodyPath,
-  ]);
-  pullRequest = JSON.parse(run("gh", ["pr", "view", url, "--json", "number,url,state"]));
+  const bodyDir = await mkdtemp(join(tmpdir(), "development-cycle-pr-body-"));
+  const bodyPath = join(bodyDir, `development-cycle-${safe(req.runId)}-pr.md`);
+  try {
+    await writeFile(bodyPath, [
+      `Development-cycle run: ${req.runId}`,
+      `Classification: ${req.classification}`,
+      `Source phase: ${req.sourcePhase}`,
+      "",
+      "This PR is the materialized output of the supervised development cycle.",
+    ].join("\n"));
+    const url = run("gh", [
+      "pr", "create",
+      "--base", safe(req.baseBranch || "main"),
+      "--head", branch,
+      "--title", `${req.project}: ${req.classification} delivery ${req.runId}`,
+      "--body-file", bodyPath,
+    ]);
+    pullRequest = JSON.parse(run("gh", ["pr", "view", url, "--json", "number,url,state"]));
+  } finally {
+    await rm(bodyDir, { recursive: true, force: true });
+  }
 }
 
 const issues = [];

@@ -22,7 +22,7 @@ test("runner finalization reaps heartbeat and cleans live process-group members"
 });
 
 test("terminal state is persisted before residual process cleanup", () => {
-  const statusWrite = source.indexOf('mv \"$status_tmp\" \"$STATUS_FILE\"');
+  const statusWrite = source.indexOf("python3 -c 'import json, os, sys;");
   const cleanupCall = source.indexOf("cleanup_process_group", statusWrite);
   assert.ok(statusWrite >= 0);
   assert.ok(cleanupCall > statusWrite);

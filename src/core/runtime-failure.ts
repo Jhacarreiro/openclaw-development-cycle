@@ -8,7 +8,6 @@ export function transientRuntimeObservationRecoveryPatch(status: any, currentCla
     : phase === "corrections_launched"
       ? "Continue observing the supervised corrections; no current runtime observation blocker is detected."
       : null;
-  if (!nextAction) return null;
 
   return {
     failureClass: null,
@@ -20,6 +19,6 @@ export function transientRuntimeObservationRecoveryPatch(status: any, currentCla
     failureMatched: null,
     failureDetectedAt: null,
     failureClearedAt: new Date().toISOString(),
-    nextAction,
+    ...(nextAction ? { nextAction } : {}),
   };
 }

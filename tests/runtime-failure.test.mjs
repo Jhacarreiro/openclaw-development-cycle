@@ -25,3 +25,15 @@ test("does not clear the blocker while a current classification still exists", (
     failureClass: "runtime_observation_blocker",
   }, { failureClass: "runtime_observation_blocker" }), null);
 });
+
+
+test("clears a stale blocker after implementation delivery without overwriting the delivery next action", () => {
+  const patch = transientRuntimeObservationRecoveryPatch({
+    phase: "implementation_delivered",
+    failureClass: "runtime_observation_blocker",
+    nextAction: "Run mechanical final validation, then council code review.",
+  }, null);
+  assert.equal(patch.failureClass, null);
+  assert.equal(Object.hasOwn(patch, "nextAction"), false);
+  assert.ok(patch.failureClearedAt);
+});

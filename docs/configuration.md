@@ -145,4 +145,8 @@ The observer is disabled by default. Enabling it requires a compatible process-o
 
 ## Parsing rules
 
-Boolean values accept `1`, `true`, `yes`, or `on`, and `0`, `false`, `no`, or `off`, case-insensitively. Positive integers fall back to defaults when invalid. `DEVELOPMENT_CYCLE_IMPLEMENTATION_ARGS_JSON` must be a JSON array containing only strings; invalid input becomes an empty array.
+Boolean values accept `1`, `true`, `yes`, or `on`, and `0`, `false`, `no`, or `off`, case-insensitively.
+
+Positive integers (`DEVELOPMENT_CYCLE_RETENTION_DAYS`, `DEVELOPMENT_CYCLE_HEARTBEAT_INTERVAL_SECONDS`, `DEVELOPMENT_CYCLE_DEFAULT_TIMEOUT_SECONDS`) must be a non-empty string of decimal digits that forms a JavaScript safe integer greater than zero. Surrounding whitespace is trimmed. Scientific, hexadecimal, and binary `Number()` syntax (`1e3`, `0x10`, `0b101`), `0`, negatives, fractions, and integers larger than `Number.MAX_SAFE_INTEGER` fall back to the documented defaults. Earlier loaders accepted those `Number()` forms; rewrite any such environment values as plain decimal digits before upgrading.
+
+`DEVELOPMENT_CYCLE_IMPLEMENTATION_ARGS_JSON` must be a JSON array containing only strings; invalid input becomes an empty array.

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, writeFile, rm, access, symlink, rename, readdir } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, writeFile, rm, access, symlink, rename, readdir, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import test from "node:test";
 import { execFileSync } from "node:child_process";
 
@@ -1097,4 +1097,49 @@ test("pathWithin accepts the same existing entry across NFC/NFD only when inodes
   } else {
     assert.equal(await exists(nfdDir), false, "Linux must not treat a missing NFD alias as the NFC entry");
   }
+});
+
+test("record_plan does not persist into the shared docs root", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "dc-wiki-shared-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const code = join(root, "code");
+  await mkdir(code, { recursive: true });
+  await mkdir(join(code, ".git"));
+  const docsRoot = join(root, "docs");
+  await mkdir(docsRoot, { recursive: true });
+  const tool = await registerPlugin(root);
+  const planReq = await tool.execute(
+    "pg-shared-wiki",
+    {
+      action: "request_plan",
+      project: "fixture-shared-wiki",
+      projectRoot: code,
+      projectWikiPath: docsRoot,
+      direction: "keep wiki per project",
+    },
+    undefined,
+    undefined,
+  );
+  assert.equal(planReq.details.ok, true, JSON.stringify(planReq.details));
+  const wiki = planReq.details.projectWikiPath || planReq.details.status?.projectWikiPath || "";
+  if (wiki) {
+    assert.notEqual(resolve(wiki), resolve(docsRoot));
+  }
+  await assert.rejects(access(join(docsRoot, "plans")));
+  const recorded = await tool.execute(
+    "pg-shared-wiki-record",
+    {
+      action: "record_plan",
+      project: "fixture-shared-wiki",
+      runId: planReq.details.runId,
+      projectRoot: code,
+      projectWikiPath: docsRoot,
+      planText: "# plan\n\nObjective\n",
+      force: true,
+    },
+    undefined,
+    undefined,
+  );
+  assert.equal(recorded.details.ok, true, JSON.stringify(recorded.details));
+  await assert.rejects(access(join(docsRoot, "plans")));
 });

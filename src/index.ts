@@ -805,7 +805,7 @@ function resolveTrustedProjectWikiPath(project: string, ...candidates: Array<str
   for (const c of candidates) {
     if (!c) continue;
     const abs = resolve(String(c));
-    if (pathWithin(projectsWikiRoot, abs)) return abs;
+    if (pathWithin(projectsWikiRoot, abs) && abs !== resolve(projectsWikiRoot)) return abs;
   }
   return fallback;
 }
@@ -814,8 +814,12 @@ function resolveTrustedProjectWikiPath(project: string, ...candidates: Array<str
 // (from fix/pathwithin-nfc-normalize); same call contract as the lexical version.
 function pathWithin(root: string, candidate: string) {
   if (!root || !candidate) return false;
-  const rel = relative(resolve(root), resolve(candidate)).replace(/\\/g, "/");
-  return Boolean(rel) && rel !== ".." && !rel.startsWith("../") && !rel.startsWith("/") || nfcPathWithin(root, candidate);
+  const a = resolve(root);
+  const b = resolve(candidate);
+  // Descendant-only: the shared wiki/docs root (and NFC/NFD aliases of it)
+  // must not count as a project wiki destination.
+  if (a === b || a.normalize("NFC") === b.normalize("NFC")) return false;
+  return nfcPathWithin(a, b);
 }
 
 /** True if candidate resolves inside any allowed root (or equals a root). */

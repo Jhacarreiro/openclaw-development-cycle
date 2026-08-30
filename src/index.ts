@@ -1120,6 +1120,18 @@ function effectiveImplementationRoot(status: any, params: any = {}) {
   return String(status?.outputPath || params?.projectRoot || status?.projectRoot || "").trim();
 }
 
+function octopusDeliveryRequiresOutputPath(status: any) {
+  return String(status?.implementationAdapter || "").trim() === "octopus";
+}
+
+function hasMaterializedImplementationOutput(status: any) {
+  return Boolean(String(status?.outputPath || "").trim());
+}
+
+function repositoryDeliveryMissingRequiredOutput(status: any) {
+  return octopusDeliveryRequiresOutputPath(status) && !hasMaterializedImplementationOutput(status);
+}
+
 async function resolveOctopusAttemptOutput(projectRoot: string, attemptId: string) {
   const safeAttemptId = cleanId(attemptId || "", "attempt");
   const manifestPath = join(runtimeHome, ".claude-octopus", "results", `.tangle-${safeAttemptId}-git.json`);
@@ -1185,10 +1197,13 @@ function repositoryFindings(status: any, max = 12) {
 async function runRepositoryDeliveryAdapter(dir: string, status: any, params: any) {
   const project = cleanId(params.project || status?.project || "default");
   const runId = cleanId(params.runId || status?.runId || "run");
-  const projectRoot = effectiveImplementationRoot(status, params);
+  const missingRequiredOutput = repositoryDeliveryMissingRequiredOutput(status);
+  const projectRoot = missingRequiredOutput ? "" : effectiveImplementationRoot(status, params);
   const sourceProjectRoot = String(params.projectRoot || status?.projectRoot || "");
   const sourcePhase = String(status?.phase || "");
-  const classification = inferDeliveryClassification(sourcePhase, params.deliveryClassification || status?.repositoryDelivery?.classification);
+  const classification = missingRequiredOutput
+    ? "invalid"
+    : inferDeliveryClassification(sourcePhase, params.deliveryClassification || status?.repositoryDelivery?.classification);
   const requestPath = join(dir, "repository_delivery_request.json");
   const resultPath = join(dir, "repository_delivery.json");
   const request = {
@@ -1209,7 +1224,7 @@ async function runRepositoryDeliveryAdapter(dir: string, status: any, params: an
   };
   await saveJson(requestPath, request);
   if (classification === "invalid") {
-    const result = { ok: false, skipped: true, classification, reason: "delivery_classified_invalid", requestPath, projectRoot };
+    const result = { ok: false, skipped: true, classification, reason: missingRequiredOutput ? "octopus_output_path_missing" : "delivery_classified_invalid", requestPath, projectRoot, sourceProjectRoot, outputPath: status?.outputPath || null };
     await saveJson(resultPath, result);
     return { ...result, resultPath };
   }
@@ -1511,9 +1526,29 @@ async function refreshLaunchedImplementationStatus(dir: string, status: any) {
       const observerFinalization = await finalizeObserverSessions(dir, status, "completed");
       return await cycleStatus(dir, { ...patch, observerFinalization });
     }
+    let failedOutputHandoff: any = null;
+    if (!isCorrectionsRun && String(session?.adapter || status?.implementationAdapter || "") === "octopus") {
+      failedOutputHandoff = await resolveOctopusAttemptOutput(String(status?.projectRoot || session?.projectRoot || ""), observedAttemptId || activeAttemptId);
+    }
     const patch = isCorrectionsRun
       ? { phase: "corrections_failed", owner: "main", ok: false, error: `Implementation exited non-zero: ${exitCode}`, correctionsStdout: stdoutPath, correctionsStderr: stderrPath, directCorrectionsStatus: statusPath }
-      : { phase: "implementation_failed", owner: "main", ok: false, nextAction: "Inspect Implementation stdout/stderr, fix blockers, then launch a new clean handoff.", error: `Implementation exited non-zero: ${exitCode}`, implementationStdout: stdoutPath, implementationStderr: stderrPath, directImplementationStatus: statusPath };
+      : {
+          phase: "implementation_failed",
+          owner: "main",
+          ok: false,
+          nextAction: failedOutputHandoff?.ok
+            ? "A validated partial Octopus output is available for repository delivery."
+            : "Inspect Implementation stdout/stderr, fix blockers, then launch a new clean handoff.",
+          error: `Implementation exited non-zero: ${exitCode}`,
+          implementationStdout: stdoutPath,
+          implementationStderr: stderrPath,
+          directImplementationStatus: statusPath,
+          ...(failedOutputHandoff?.ok
+            ? { outputPath: failedOutputHandoff.outputPath, implementationOutputHandoff: failedOutputHandoff }
+            : failedOutputHandoff
+              ? { implementationOutputHandoff: failedOutputHandoff }
+              : {}),
+        };
     const observerFinalization = await finalizeObserverSessions(dir, status, "failed");
     return await cycleStatus(dir, { ...patch, observerFinalization });
   }
@@ -2436,7 +2471,17 @@ async function projectCycle(params: any) {
     const failurePolicy = await dcPersistFailure(dir, effectiveStatus, runtimeEvent);
     effectiveStatus = failurePolicy.status || effectiveStatus;
     let automaticRepositoryDelivery: any = null;
-    if (repositoryDeliveryConfig.enabled && ["implementation_failed", "corrections_failed", "stopped"].includes(String(effectiveStatus?.phase || ""))) {
+    const failureDeliveryPhase = ["implementation_failed", "corrections_failed", "stopped"].includes(String(effectiveStatus?.phase || ""));
+    if (repositoryDeliveryConfig.enabled && failureDeliveryPhase && repositoryDeliveryMissingRequiredOutput(effectiveStatus)) {
+      effectiveStatus = await cycleStatus(dir, {
+        repositoryDeliverySuppressed: {
+          reason: "octopus_output_path_missing",
+          phase: String(effectiveStatus?.phase || ""),
+          suppressedAt: new Date().toISOString(),
+        },
+        nextAction: "No deliverable Octopus output exists for this attempt. Start a new clean plan/implementation handoff after fixing the blocker.",
+      });
+    } else if (repositoryDeliveryConfig.enabled && failureDeliveryPhase) {
       automaticRepositoryDelivery = await finalizeRepositoryDeliveryState(dir, { ...effectiveStatus, project, runId }, params);
       effectiveStatus = automaticRepositoryDelivery.status || effectiveStatus;
     }

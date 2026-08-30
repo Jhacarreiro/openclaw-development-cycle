@@ -1,7 +1,8 @@
 #!/usr/bin/env node
-import { readFile, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { execFileSync } from "node:child_process";
 import { join } from "node:path";
+import { tmpdir } from "node:os";
 
 const requestPath = process.argv[2];
 if (!requestPath) throw new Error("usage: github-delivery-runner.mjs REQUEST_JSON");
@@ -9,14 +10,38 @@ const req = JSON.parse(await readFile(requestPath, "utf8"));
 const cwd = String(req.projectRoot || "");
 if (!cwd) throw new Error("projectRoot_missing");
 
-const runRaw = (cmd, args) =>
+const runRaw = (cmd, args, options = {}) =>
   String(execFileSync(cmd, args, {
     cwd,
     encoding: "utf8",
     stdio: ["ignore", "pipe", "pipe"],
     maxBuffer: 4 * 1024 * 1024,
+    ...options,
   }) || "");
-const run = (cmd, args) => runRaw(cmd, args).trim();
+const run = (cmd, args, options = {}) => runRaw(cmd, args, options).trim();
+
+async function pushWithGitHubToken(branch) {
+  const token = String(process.env.GH_TOKEN || "").trim();
+  if (!token) throw new Error("GH_TOKEN_missing_for_git_push");
+  const dir = await mkdtemp(join(tmpdir(), "development-cycle-git-askpass-"));
+  const askpass = join(dir, "askpass.sh");
+  await writeFile(askpass, [
+    "#!/bin/sh",
+    'case "$1" in',
+    '  *Username*) echo x-access-token ;;',
+    '  *Password*) echo "$GH_TOKEN" ;;',
+    "esac",
+    "",
+  ].join("\n"), { mode: 0o700 });
+  await chmod(askpass, 0o700);
+  try {
+    return run("git", ["push", "-u", "origin", branch], {
+      env: { ...process.env, GIT_ASKPASS: askpass, GIT_TERMINAL_PROMPT: "0" },
+    });
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+}
 const safe = (value) => String(value || "").replace(/[\r\n]+/g, " ").trim();
 
 
@@ -62,7 +87,7 @@ if (porcelain) {
   }
 }
 const commit = run("git", ["rev-parse", "HEAD"]);
-run("git", ["push", "-u", "origin", branch]);
+await pushWithGitHubToken(branch);
 
 const repository = run("gh", ["repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"]);
 let pullRequest = null;

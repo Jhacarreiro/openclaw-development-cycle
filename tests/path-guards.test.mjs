@@ -8,7 +8,7 @@ import { execFileSync } from "node:child_process";
 async function registerPlugin(root) {
   process.env.DEVELOPMENT_CYCLE_STATE_ROOT = join(root, "state");
   process.env.DEVELOPMENT_CYCLE_PROJECT_DOCS_ROOT = join(root, "docs");
-  process.env.DEVELOPMENT_CYCLE_NOTIFICATIONS_ENABLED = "false";
+ process.env.DEVELOPMENT_CYCLE_NOTIFICATIONS_ENABLED = "false";
   process.env.DEVELOPMENT_CYCLE_OBSERVER_ENABLED = "false";
   const { default: plugin } = await import(`../dist/index.js?pathguard=${Date.now()}-${Math.random()}`);
   let registered;
@@ -46,7 +46,7 @@ test("record_plan rejects planPath outside allowed roots", async (t) => {
       runId,
       projectRoot: join(root, "code"),
       planPath: secret,
-      force: true,
+     force: true,
     },
     undefined,
     undefined,
@@ -1049,4 +1049,52 @@ test("run_final_validation keeps the checkout pinned after config load", async (
   assert.equal(await readFile(join(moved, "SAFE_VALIDATION_RAN"), "utf8"), "safe");
   await assert.rejects(access(join(outside, "EVIL_VALIDATION_RAN")));
   await assert.rejects(access(join(outside, "SAFE_VALIDATION_RAN")));
+});
+
+// --- NFC/NFD containment semantics (from fix/pathwithin-nfc-normalize) ---
+import { pathWithin } from "../dist/core/paths.js";
+const NFC = "caf\u00e9";
+const NFD = "cafe\u0301";
+function codes(name) {
+  return [...String(name)].map((c) => c.codePointAt(0).toString(16)).join(" ");
+}
+async function sameEntry(left, right) {
+  try {
+    const a = await stat(left);
+    const b = await stat(right);
+    return a.dev === b.dev && a.ino === b.ino;
+  } catch {
+    return false;
+  }
+}
+async function exists(path) {
+  try {
+    await access(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+test("pathWithin accepts the same existing entry across NFC/NFD only when inodes match", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "dc-path-same-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const nfcDir = join(root, NFC);
+  const nfdDir = join(root, NFD);
+  await mkdir(nfcDir);
+
+  assert.equal(pathWithin(nfcDir, nfcDir), true);
+  assert.equal(NFC.normalize("NFC"), NFD.normalize("NFC"));
+
+  const unified = await sameEntry(nfcDir, nfdDir);
+  assert.equal(
+    pathWithin(nfcDir, nfdDir),
+    unified,
+    `same-entry nfc=[${codes(NFC)}] nfd=[${codes(NFD)}] unified=${unified}`,
+  );
+  if (unified) {
+    const child = join(nfdDir, "plans");
+    assert.equal(pathWithin(nfcDir, child), true, "macOS-style same inode must accept NFD child");
+  } else {
+    assert.equal(await exists(nfdDir), false, "Linux must not treat a missing NFD alias as the NFC entry");
+  }
 });

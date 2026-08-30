@@ -11,6 +11,7 @@ import { randomUUID } from "node:crypto";
 import { ACTIONS, checkActionTransition } from "./core/state-machine.js";
 import { parseFinalDecision } from "./core/decisions.js";
 import { cleanId, newRunId as createRunId } from "./core/ids.js";
+import { pathWithin as nfcPathWithin } from "./core/paths.js";
 import { nextStallQuietAccounting } from "./core/stall-accounting.js";
 import { councilNeedsCorrectionsText, resolveAutoCouncilCorrectionsMax } from "./core/council-policy.js";
 import { inferDeliveryClassification } from "./core/delivery-classification.js";
@@ -809,10 +810,12 @@ function resolveTrustedProjectWikiPath(project: string, ...candidates: Array<str
   return fallback;
 }
 
+// NFC-aware containment with inode verification for Unicode-form aliases
+// (from fix/pathwithin-nfc-normalize); same call contract as the lexical version.
 function pathWithin(root: string, candidate: string) {
   if (!root || !candidate) return false;
   const rel = relative(resolve(root), resolve(candidate)).replace(/\\/g, "/");
-  return Boolean(rel) && rel !== ".." && !rel.startsWith("../") && !rel.startsWith("/");
+  return Boolean(rel) && rel !== ".." && !rel.startsWith("../") && !rel.startsWith("/") || nfcPathWithin(root, candidate);
 }
 
 /** True if candidate resolves inside any allowed root (or equals a root). */

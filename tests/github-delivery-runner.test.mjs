@@ -16,6 +16,7 @@ async function fixture(status = " M src/app.ts\n") {
   const git = `#!/usr/bin/env node
 const fs=require("fs"), a=process.argv.slice(2), d=process.env.TEST_STATE_DIR;
 fs.appendFileSync(d+"/git.log",JSON.stringify(a)+"\\n");
+if(a[0]==="push") fs.writeFileSync(d+"/git-push-env.json",JSON.stringify({askpass:process.env.GIT_ASKPASS||"",terminal:process.env.GIT_TERMINAL_PROMPT||"",tokenVisible:Boolean(process.env.GH_TOKEN)}));
 if(a[0]==="status") process.stdout.write(process.env.TEST_GIT_STATUS||"");
 else if(a[0]==="branch") process.stdout.write(process.env.TEST_BRANCH||"feat/test");
 else if(a[0]==="diff"&&a.includes("--cached")) process.stdout.write("src/app.ts\\n");
@@ -47,7 +48,7 @@ else if(a[0]==="issue"&&a[1]==="create") {
 async function runFixture(f, request, extraEnv = {}) {
   const requestPath = join(f.root, "request.json");
   await writeFile(requestPath, JSON.stringify({ project:"demo", runId:"run-1", projectRoot:f.repo, baseBranch:"main", ...request }));
-  const env = { ...process.env, PATH:`${f.bin}:${process.env.PATH}`, TEST_STATE_DIR:f.state, TEST_GIT_STATUS:f.status, TEST_BRANCH:"feat/test", ...extraEnv };
+  const env = { ...process.env, GH_TOKEN:"test-token", PATH:`${f.bin}:${process.env.PATH}`, TEST_STATE_DIR:f.state, TEST_GIT_STATUS:f.status, TEST_BRANCH:"feat/test", ...extraEnv };
   const stdout = execFileSync(process.execPath, [runner, requestPath], { encoding:"utf8", env });
   return JSON.parse(stdout);
 }
@@ -74,6 +75,18 @@ test("successful delivery queues GitHub auto-merge", async () => {
   const gh = await readFile(join(f.state, "gh.log"), "utf8");
   assert.match(gh, /"pr","merge"/);
   assert.match(gh, /"--auto"/);
+});
+
+test("git push uses ephemeral GIT_ASKPASS without putting the token in argv", async () => {
+  const f = await fixture();
+  const out = await runFixture(f, { classification:"success", autoMerge:false, findings:[] });
+  assert.equal(out.ok, true);
+  const pushEnv = JSON.parse(await readFile(join(f.state, "git-push-env.json"), "utf8"));
+  assert.match(pushEnv.askpass, /development-cycle-git-askpass-/);
+  assert.equal(pushEnv.terminal, "0");
+  assert.equal(pushEnv.tokenVisible, true);
+  const git = await readFile(join(f.state, "git.log"), "utf8");
+  assert.doesNotMatch(git, /test-token/);
 });
 
 test("delivery runner refuses sensitive changed paths", async () => {

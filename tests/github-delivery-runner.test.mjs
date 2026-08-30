@@ -7,12 +7,14 @@ import { execFileSync } from "node:child_process";
 
 const runner = resolve("scripts/github-delivery-runner.mjs");
 
-async function fixture(status = " M src/app.ts\n") {
+async function fixture(status = " M src/app.ts\n", { worktreeGitFile = false } = {}) {
   const root = await mkdtemp(join(tmpdir(), "dc-delivery-"));
   const bin = join(root, "bin");
   const repo = join(root, "repo");
   const state = join(root, "state");
-  await mkdir(bin); await mkdir(repo); await mkdir(join(repo, ".git")); await mkdir(state);
+  await mkdir(bin); await mkdir(repo); await mkdir(state);
+  if (worktreeGitFile) await writeFile(join(repo, ".git"), "gitdir: /tmp/fake-worktree-gitdir\n");
+  else await mkdir(join(repo, ".git"));
   const git = `#!/usr/bin/env node
 const fs=require("fs"), a=process.argv.slice(2), d=process.env.TEST_STATE_DIR;
 fs.appendFileSync(d+"/git.log",JSON.stringify(a)+"\\n");
@@ -87,6 +89,16 @@ test("git push uses ephemeral GIT_ASKPASS without putting the token in argv", as
   assert.equal(pushEnv.tokenVisible, true);
   const git = await readFile(join(f.state, "git.log"), "utf8");
   assert.doesNotMatch(git, /test-token/);
+});
+
+test("PR body creation works when .git is a worktree pointer file", async () => {
+  const f = await fixture(" M src/app.ts\n", { worktreeGitFile:true });
+  const out = await runFixture(f, { classification:"success", autoMerge:false, findings:[] });
+  assert.equal(out.ok, true);
+  assert.equal(out.pullRequest.number, 42);
+  const gh = await readFile(join(f.state, "gh.log"), "utf8");
+  assert.match(gh, /"pr","create"/);
+  assert.match(gh, /development-cycle-pr-body-/);
 });
 
 test("delivery runner refuses sensitive changed paths", async () => {

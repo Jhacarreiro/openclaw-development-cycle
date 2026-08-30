@@ -32,6 +32,7 @@ test("finalize_delivery accepts terminal delivery outcomes", () => {
     "council_validated",
     "council_review_waiting_human",
     "external_validation_failed",
+    "external_validation_stopped",
     "stopped",
     "repository_delivery_failed",
   ]) {
@@ -63,4 +64,38 @@ test("failed implementation can be retried only through explicit start_implement
 test("mechanical validation can be rerun after a revise result", () => {
   const transition = checkActionTransition("run_final_validation", "external_validation_needs_revision");
   assert.equal(transition.ok, true);
+});
+
+test("mechanical revision outcome routes into the corrections path", () => {
+  assert.equal(checkActionTransition("start_corrections", "external_validation_needs_revision").ok, true);
+  assert.equal(checkActionTransition("start_corrections", "external_validation_needs_revision").error, undefined);
+});
+
+test("mechanical revisions allow rerunning final validation and finalizing the stopped gate", () => {
+  assert.equal(checkActionTransition("run_final_validation", "external_validation_needs_revision").ok, true);
+  assert.equal(checkActionTransition("run_final_validation", "external_validation_stopped").ok, true);
+  // Merged onto current main: the delivery endgate (finalize_delivery) is the
+  // exit action for a stopped gate; close only archives terminal outcomes.
+  assert.equal(checkActionTransition("finalize_delivery", "external_validation_stopped").ok, true);
+});
+
+test("state machine tests cover every new phase entry", () => {
+  // Exhaustively assert the new phase entries added by the fix
+  const cases = [
+    ["run_final_validation", "external_validation_needs_revision", true],
+    ["run_final_validation", "external_validation_stopped", true],
+    ["start_corrections", "external_validation_needs_revision", true],
+    ["start_corrections", "needs_corrections", true],
+    ["finalize_delivery", "external_validation_stopped", true],
+    ["finalize_delivery", "final_validated", true],
+    ["finalize_delivery", "stopped", true],
+    // Negatives: should stay blocked
+    ["start_corrections", "external_validation_passed", false],
+    ["close", "external_validation_passed", false],
+    ["finalize_delivery", "external_validation_passed", false],
+  ];
+  for (const [action, phase, shouldPass] of cases) {
+    const res = checkActionTransition(action, phase);
+    assert.equal(res.ok, shouldPass, `${action} from ${phase} expected ok=${shouldPass} but got ${res.ok}`);
+  }
 });

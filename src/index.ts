@@ -41,14 +41,11 @@ async function loadConfig() {
   return { url: (cfg.EXTERNAL_GATE_URL || defaultUrl).replace(/\/$/, ""), token: cfg.EXTERNAL_GATE_TOKEN || "" };
 }
 
-function buildQuery(params: Record<string, any>) {
-  const qs = new URLSearchParams();
-  for (const [key, value] of Object.entries(params || {})) {
-    if (value === undefined || value === null || value === "") continue;
-    qs.set(key, String(value));
-  }
-  const s = qs.toString();
-  return s ? `?${s}` : "";
+function redactRemoteCredentials(text: string) {
+  // Strip userinfo (user:token@) from remote URLs before they reach context packs / external gates.
+  // Consume ALL userinfo segments (userinfo may itself contain '@') so no credential material leaks past the last '@' before the host.
+  // Bound to URL authority (stop at first '/' / whitespace) so a repository path like /org/repo@branch.git is not treated as userinfo.
+  return String(text || "").replace(/([a-zA-Z][a-zA-Z0-9+.-]*:\/\/)[^\/\s]*@/g, "$1***@");
 }
 
 async function request(path: string, options: any = {}) {
@@ -303,11 +300,8 @@ finalize() {
   printf '%s\n' "$exited_at" > ${JSON.stringify(exitedAtPath)}
   terminal_status=completed
   [ "$rc" -eq 0 ] || terminal_status=failed
-  status_tmp="\${STATUS_FILE}.tmp.$$"
-  if jq --arg status "$terminal_status" --arg launchState exited --argjson exitCode "$rc" --arg exitedAt "$exited_at" --arg updatedAt "$exited_at" '.status = $status | .launchState = $launchState | .exitCode = $exitCode | .exitedAt = $exitedAt | .updatedAt = $updatedAt' "$STATUS_FILE" > "$status_tmp"; then
-    mv "$status_tmp" "$STATUS_FILE"
-  else
-    rm -f "$status_tmp"
+  if python3 -c 'import json, os, sys; p = sys.argv[1]; d = json.load(open(p)) if os.path.exists(p) else {}; d.update(status=sys.argv[2], launchState=sys.argv[3], exitCode=int(sys.argv[4]), exitedAt=sys.argv[5], updatedAt=sys.argv[5]); tmp = p + ".tmp-" + str(os.getpid()); open(tmp, "w").write(json.dumps(d, indent=2) + "\n"); os.replace(tmp, p)' "$STATUS_FILE" "$terminal_status" exited "$rc" "$exited_at" 2>/dev/null; then
+    :
   fi
   cleanup_process_group
 }
@@ -780,7 +774,7 @@ async function writePlanningPack(dir: string, params: any) {
   }
   const pinnedProjectPath = pinnedProjectRoot?.procPath || "";
   const gitStatus = rootStat?.isDirectory() ? await execSummary("git", ["status", "--short", "--branch"], pinnedProjectPath) : "projectRoot missing or not supplied";
-  const gitRemote = rootStat?.isDirectory() ? await execSummary("git", ["remote", "-v"], pinnedProjectPath) : "projectRoot missing or not supplied";
+  const gitRemote = rootStat?.isDirectory() ? redactRemoteCredentials(await execSummary("git", ["remote", "-v"], pinnedProjectPath)) : "projectRoot missing or not supplied";
   const gitDiffStat = rootStat?.isDirectory() ? await execSummary("git", ["diff", "--stat"], pinnedProjectPath) : "projectRoot missing or not supplied";
   const rootEntries = rootStat?.isDirectory() ? (await safeDirEntries(pinnedProjectPath)).join("\n") : "projectRoot missing or not supplied";
   const packageScripts = rootStat?.isDirectory() ? await packageScriptsBrief(pinnedProjectPath) : "projectRoot missing or not supplied";
@@ -1969,7 +1963,7 @@ async function runExternalFinalValidation(dir: string, status: any, params: any 
   await writeFile(stderrPath, commandResults.map((r) => `# ${r.command}\n\n${r.stderr || r.error || ""}`).join("\n\n---\n\n"));
   await writeFile(summaryPath, `# Mechanical final validation\n\nProject: ${project}\nRun: ${runId}\nReason: ${reason}\nDecision: ${decision}\nOK: ${ok}\nGenerated: ${result.generatedAt}\nConfig: ${loaded.path}\nRejected config: ${loaded.rejectedValidationConfigPath || "none"}${loaded.error ? `\nConfig error: ${loaded.error}` : ""}\n\n## Commands\n\n${commandResults.map((r) => `- ${r.ok ? "PASS" : "FAIL"}: ${r.command}${r.timedOut ? " (timed out)" : ""}`).join("\n") || "none"}\n\n## Failures\n\n${failures.length ? failures.map((f) => `- [${f.severity || "revise"}] ${f.check}: ${f.reason || f.path || f.command}`).join("\n") : "none"}\n\n## Preserved diff\n\n${preservedDiff ? `- worktree: ${preservedDiff.worktreePatch} (${preservedDiff.worktreeBytes} bytes)\n- index: ${preservedDiff.indexPatch} (${preservedDiff.indexBytes} bytes)` : "not preserved"}\n`);
   const phase = ok ? "external_validation_passed" : decision === "stop" ? "external_validation_stopped" : "external_validation_needs_revision";
-  const nextAction = ok ? "Mechanical validation passed; human/AI final review may record go or close when appropriate." : decision === "stop" ? "Stop and report the validation blocker to the operator." : "Send delta-only corrections to Implementation or apply a minimal manual fix, then rerun run_final_validation.";
+  const nextAction = ok ? "Mechanical validation passed; human/AI final review may record go or close when appropriate." : decision === "stop" ? "Stop and report the validation blocker to the operator." : "Mechanical validation needs revision; call start_corrections with the validation feedback to launch delta-only corrections.";
   const next = await cycleStatus(dir, { phase, owner: "main", ok, externalValidationDecision: decision, externalValidation: resultPath, validationSummary: summaryPath, validationStdout: stdoutPath, validationStderr: stderrPath, validationConfigPath: loaded.path, rejectedValidationConfigPath: loaded.rejectedValidationConfigPath || null, validationConfigError: loaded.error || null, nextAction });
   return { ok, decision, project, runId, dir, phase: next.phase, validationResult: resultPath, validationSummary: summaryPath, validationStdout: stdoutPath, validationStderr: stderrPath, failures, commandResults: commandResults.map((r) => ({ command: r.command, ok: r.ok, exitCode: r.exitCode, timedOut: r.timedOut || false, durationMs: r.durationMs })), preservedDiff, rejectedValidationConfigPath: loaded.rejectedValidationConfigPath || null, validationConfigError: loaded.error || null, status: next };
   } finally {
@@ -2837,7 +2831,22 @@ Create or validate the implementation plan only. Do not implement. The plan must
       const next = await cycleStatus(dir, { phase: "corrections_failed", owner: "main", ok: false, error: "observer_root_session_creation_failed", projectRoot, implementationCorrectionsRequest: requestPath });
       return { ok: false, project, runId, dir, phase: next.phase, error: next.error };
     }
-    const launch = await createImplementationRunnerSession(dir, { project, runId: `${runId}-corrections`, projectRoot, command, prompt, kind: "corrections", implementationAdapter: adapter, planPath: String(status.plan || join(dir, "implementation_plan.md")), validationPath: String(status.finalValidation || join(dir, "final_validation_response.md")), timeoutSeconds: Number(params.timeoutSeconds ?? params.timeout_ms ?? 0), observerObservationId, purpose: `development_cycle corrections ${project}` });
+    // Align validationPath with the effective feedback. When both the
+    // mechanical summary and a human-recorded response exist, pick whichever
+    // was written LAST (mtime) so corrections always consume the freshest
+    // gate feedback regardless of whether the human step ran before or after
+    // the mechanical pass.
+    let effectiveValidationPath = String(params.feedbackPath || "");
+    if (!effectiveValidationPath) {
+      const mechPath = join(dir, "validation_summary.md");
+      const humanPath = String(status.finalValidation || join(dir, "final_validation_response.md"));
+      const mechText = await readTextIfExists(mechPath);
+      const mechStat = mechText.trim() ? await stat(mechPath).catch(() => null) : null;
+      const humanStat = await stat(humanPath).catch(() => null);
+      if (mechStat && (!humanStat || (mechStat.mtimeMs >= humanStat.mtimeMs))) effectiveValidationPath = mechPath;
+      else effectiveValidationPath = humanPath;
+    }
+    const launch = await createImplementationRunnerSession(dir, { project, runId: `${runId}-corrections`, projectRoot, command, prompt, kind: "corrections", implementationAdapter: adapter, planPath: String(status.plan || join(dir, "implementation_plan.md")), validationPath: effectiveValidationPath, timeoutSeconds: Number(params.timeoutSeconds ?? params.timeout_ms ?? 0), observerObservationId, purpose: `development_cycle corrections ${project}` });
     if (!launch.ok) {
       const observerFinalization = await finalizeObserverSessions(dir, { ...correctionsAttemptBase, observerCorrectionsObservationId: observerObservationId }, "failed");
       const failedAttempt = launch.statusPath ? { implementationCorrectionsSessionId: launch.sessionId, correctionsAttemptId: launch.attemptId, directCorrectionsStatus: launch.statusPath, directCorrectionsStdout: launch.stdoutPath, directCorrectionsStderr: launch.stderrPath, correctionsStdout: launch.stdoutPath, correctionsStderr: launch.stderrPath } : {};

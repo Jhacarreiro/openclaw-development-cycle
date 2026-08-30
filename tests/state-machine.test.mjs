@@ -58,3 +58,9 @@ test("council corrections can be launched from council_review_needs_corrections"
 test("failed implementation can be retried only through explicit start_implementation", () => {
   assert.equal(checkActionTransition("start_implementation", "implementation_failed").ok, true);
 });
+
+
+test("mechanical validation can be rerun after a revise result", () => {
+  const transition = checkActionTransition("run_final_validation", "external_validation_needs_revision");
+  assert.equal(transition.ok, true);
+});

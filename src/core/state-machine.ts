@@ -42,7 +42,7 @@ const ALLOWED_PHASES: Partial<Record<DevelopmentCycleAction, ReadonlySet<string>
     "external_validation_passed",
   ]),
   record_final_validation: new Set(["waiting_final_validation"]),
-  start_corrections: new Set(["needs_corrections", "council_review_needs_corrections"]),
+  start_corrections: new Set(["needs_corrections", "council_review_needs_corrections", "external_validation_needs_revision"]),
   finalize_delivery: new Set([
     "final_validated",
     "final_revised",

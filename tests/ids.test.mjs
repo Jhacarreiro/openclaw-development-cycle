@@ -11,10 +11,10 @@ const EXAMPLE_PROJECT_DIGEST = createHash("sha256").update("Example Project").di
 test("cleanId produces bounded path-safe identifiers", () => {
   assert.equal(cleanId("alpha"), "alpha");
   assert.equal(cleanId("alpha-beta"), "alpha-beta");
-  assert.equal(cleanId(ALPHA_BETA_RAW), `alpha-beta-${ALPHA_BETA_DIGEST}`);
-  assert.equal(cleanId("***", "fallback"), `fallback-${createHash("sha256").update("***").digest("hex")}`);
+  assert.equal(cleanId(ALPHA_BETA_RAW), `alpha-beta-id-${ALPHA_BETA_DIGEST}`);
+  assert.equal(cleanId("***", "fallback"), `fallback-id-${createHash("sha256").update("***").digest("hex")}`);
   assert.equal(cleanId("x".repeat(200)).length, 120);
-  assert.match(cleanId("x".repeat(200)), /^x{55}-[0-9a-f]{64}$/);
+  assert.match(cleanId("x".repeat(200)), /^x{52}-id-[0-9a-f]{64}$/);
 });
 
 test("cleanId disambiguates colliding sanitized inputs", () => {
@@ -38,8 +38,8 @@ test("cleanId distinguishes the eight-hex digest collision class", () => {
   assert.equal(createHash("sha256").update(a).digest("hex").slice(0, 8), "01df1767");
   assert.equal(createHash("sha256").update(b).digest("hex").slice(0, 8), "01df1767");
   assert.notEqual(cleanId(a), cleanId(b));
-  assert.equal(cleanId(a), `foo-${createHash("sha256").update(a).digest("hex")}`);
-  assert.equal(cleanId(b), `foo-${createHash("sha256").update(b).digest("hex")}`);
+  assert.equal(cleanId(a), `foo-id-${createHash("sha256").update(a).digest("hex")}`);
+  assert.equal(cleanId(b), `foo-id-${createHash("sha256").update(b).digest("hex")}`);
 });
 
 test("cleanId does not emit path traversal tokens", () => {
@@ -64,7 +64,7 @@ test("idPathCandidates preserve the pre-digest sanitized name", () => {
 test("newRunId is deterministic with an injected clock", () => {
   const now = new Date("2026-07-16T12:34:56.000Z");
   const id = newRunId("Example Project", now);
-  assert.ok(id.startsWith(`Example-Project-${EXAMPLE_PROJECT_DIGEST}-20260716123456000-`));
+  assert.ok(id.startsWith(`Example-Project-id-${EXAMPLE_PROJECT_DIGEST}-20260716123456000-`));
   const id2 = newRunId("", now);
   assert.ok(id2.startsWith("run-20260716123456000-"));
 });
@@ -82,4 +82,13 @@ test("newRunId stays within the bounded path contract", () => {
   assert.ok(id.length <= 120, id);
   assert.equal(cleanId(id), id);
   assert.match(id, /20260716123456000-[0-9a-z]{6}$/);
+});
+
+test("cleanId digest namespace does not collide with a clean lookalike", () => {
+  const hashed = cleanId("foo ");
+  assert.match(hashed, /-id-[0-9a-f]{64}$/);
+  assert.equal(cleanId(hashed), hashed);
+  const lookalike = `foo-${createHash("sha256").update("foo ").digest("hex")}`;
+  assert.notEqual(cleanId(lookalike), hashed);
+  assert.equal(cleanId(lookalike), lookalike);
 });

@@ -6,12 +6,6 @@ The format is based on Keep a Changelog and the project follows Semantic Version
 
 ## [Unreleased]
 
-### Fixed
-
-- Sanitized project and run directory names use a full SHA-256 identity suffix instead of an 8-hex digest.
-- Existing pre-upgrade sanitized directories remain readable when the canonical name is absent.
-- Generated run IDs stay within the 120-character path contract after a second `cleanId` pass.
-
 ## [0.1.0] - 2026-07-16
 
 ### Added

@@ -19,6 +19,9 @@ function identityDigest(raw: string): string {
   return createHash("sha256").update(raw).digest("hex");
 }
 
+const DIGEST_MARK = "-id-";
+const DIGEST_PATTERN = /-id-[0-9a-f]{64}$/;
+
 export function cleanId(input: unknown, fallback = "run", maxLength = CLEAN_ID_MAX_LENGTH): string {
   const raw = String(input ?? "");
   const trimmed = raw.trim();
@@ -33,13 +36,16 @@ export function cleanId(input: unknown, fallback = "run", maxLength = CLEAN_ID_M
   if (dotToken) return fallback;
   const base = sanitized ? sanitized : fallback;
   const emptyInput = !trimmed;
+  const alreadyReserved = DIGEST_PATTERN.test(base);
   const needsIdentity = !emptyInput && (raw !== sanitized || !sanitized || raw.length > maxLength);
   if (!needsIdentity) return base;
 
   const digest = identityDigest(raw);
-  const prefixLength = maxLength - digest.length - 1;
+  const suffix = `${DIGEST_MARK}${digest}`;
+  const prefixLength = maxLength - suffix.length;
   if (prefixLength < 1) return digest.slice(0, maxLength);
-  return `${base.slice(0, prefixLength)}-${digest}`;
+  const prefix = (alreadyReserved ? base.replace(DIGEST_PATTERN, "") : base).slice(0, prefixLength);
+  return `${prefix}${suffix}`;
 }
 
 export function idPathCandidates(input: unknown, fallback = "run", maxLength = CLEAN_ID_MAX_LENGTH): string[] {

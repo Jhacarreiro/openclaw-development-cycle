@@ -2,7 +2,7 @@
 import { Type } from "typebox";
 import { defineToolPlugin } from "openclaw/plugin-sdk/tool-plugin";
 import { lstat, mkdir, open, readFile, readdir, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
-import { constants as fsConstants } from "node:fs";
+import { constants as fsConstants, existsSync } from "node:fs";
 import { join, relative, resolve, sep, basename, dirname } from "node:path";
 import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
@@ -796,15 +796,20 @@ async function writePlanningPack(dir: string, params: any) {
 
 /** Prefer caller-supplied wiki path only when it stays under projectsWikiRoot. */
 function resolveTrustedProjectWikiPath(project: string, ...candidates: Array<string | null | undefined>): string {
-  let fallback = resolve(join(projectsWikiRoot, cleanId(project || "default")));
-  // Dot-tokens (`.` / `..`) survive cleanId and would make the fallback the wiki root or its parent.
-  if (!pathWithin(projectsWikiRoot, fallback) || fallback === resolve(projectsWikiRoot)) {
-    fallback = resolve(join(projectsWikiRoot, "default"));
-  }
+  const wikiRootAbs = resolve(projectsWikiRoot);
   for (const c of candidates) {
     if (!c) continue;
     const abs = resolve(String(c));
-    if (pathWithin(projectsWikiRoot, abs)) return abs;
+    if (pathWithin(projectsWikiRoot, abs) && abs !== wikiRootAbs) return abs;
+  }
+  for (const id of idPathCandidates(project || "default")) {
+    const candidate = resolve(join(projectsWikiRoot, id));
+    if (candidate === wikiRootAbs || !pathWithin(projectsWikiRoot, candidate)) continue;
+    if (existsSync(candidate)) return candidate;
+  }
+  let fallback = resolve(join(projectsWikiRoot, cleanId(project || "default")));
+  if (!pathWithin(projectsWikiRoot, fallback) || fallback === wikiRootAbs) {
+    fallback = resolve(join(projectsWikiRoot, "default"));
   }
   return fallback;
 }
@@ -1062,7 +1067,7 @@ async function writePinnedFile(dir: string, root: string, name: string, content:
 
 async function pinContainedWikiDir(project: string, projectWikiPath: string) {
   const raw = String(projectWikiPath || "").trim();
-  const target = raw ? resolve(raw) : resolveTrustedProjectWikiPath(project, "");
+  const target = raw ? resolve(raw) : resolveTrustedProjectWikiPath(project);
   const pinned = await openPinnedContainedDir(target, projectsWikiRoot, true);
   if (!pinned) return null;
   try {
@@ -1746,7 +1751,7 @@ function mergeValidationConfig(base: any, extra: any) {
 }
 
 async function loadProjectValidationConfig(project: string, status: any, params: any = {}, borrowedProjectRoot: any = null) {
-  const lexicalProjectWikiPath = resolveTrustedProjectWikiPath(project, params.projectWikiPath, status?.projectWikiPath);
+  const lexicalProjectWikiPath = resolveTrustedProjectWikiPath(params.project || status?.project || project, params.projectWikiPath, status?.projectWikiPath);
   const pinnedProjectWiki = await pinContainedWikiDir(project, lexicalProjectWikiPath);
   const projectWikiPath = pinnedProjectWiki?.realPath || "";
   const ownsProjectRoot = !borrowedProjectRoot;
@@ -2237,7 +2242,7 @@ async function launchCouncilCorrections(dir: string, status: any, council: any, 
   const project = cleanId(params.project || status?.project || "default");
   const runId = cleanId(params.runId || status?.runId || "run");
   const projectRoot = String(params.projectRoot || status?.projectRoot || "");
-  const projectWikiPath = resolveTrustedProjectWikiPath(project, params.projectWikiPath, status?.projectWikiPath);
+  const projectWikiPath = resolveTrustedProjectWikiPath(params.project || status?.project || project, params.projectWikiPath, status?.projectWikiPath);
   const count = Number(status?.councilCorrectionCount || 0);
   const max = resolveAutoCouncilCorrectionsMax(params.autoCouncilCorrectionsMax);
   if (!projectRoot) return { ok: false, error: "projectRoot_required" };
@@ -2382,20 +2387,28 @@ async function stopLaunchedImplementation(dir: string, status: any, reason: stri
 }
 
 async function latestRunId(project: string) {
-  const entries: Array<{ name: string; mtime: number }> = [];
+  const entries: Array<{ name: string; mtime: number; ts: string }> = [];
   for (const dirName of idPathCandidates(project)) {
     const base = join(cycleRoot, "runs", dirName);
     let ents: Array<{ name: string; isDirectory: () => boolean }> = [];
     try { ents = await readdir(base, { withFileTypes: true }); } catch { continue; }
     for (const ent of ents) {
-      if (!ent.isDirectory() || !ent.name || ent.name.startsWith(".")) continue;
+      if (!ent.isDirectory() || !ent.name || ent.name === "." || ent.name === "..") continue;
+      if (ent.name === ".git" || ent.name.includes(".lock")) continue;
       const full = join(base, ent.name);
       let mtime = 0;
       try { mtime = (await stat(full)).mtimeMs; } catch { continue; }
-      entries.push({ name: ent.name, mtime });
+      const tsMatch = ent.name.match(/-(\d{14,17})(?:-[a-z0-9]+)?$/i);
+      entries.push({ name: ent.name, mtime, ts: tsMatch ? tsMatch[1].padEnd(17, "0") : "" });
     }
   }
-  entries.sort((a, b) => a.mtime - b.mtime || a.name.localeCompare(b.name));
+  entries.sort((a, b) => {
+    if (a.ts && b.ts && a.ts !== b.ts) return a.ts.localeCompare(b.ts);
+    if (a.ts && !b.ts) return 1;
+    if (!a.ts && b.ts) return -1;
+    if (a.mtime !== b.mtime) return a.mtime - b.mtime;
+    return a.name.localeCompare(b.name);
+  });
   return entries.at(-1)?.name || "";
 }
 
@@ -2536,7 +2549,7 @@ async function projectCycle(params: any) {
     }
     const direction = String(params.direction || params.objective || "Create or validate the implementation plan for this development cycle.");
     const projectRoot = String(params.projectRoot || status.projectRoot || "");
-    const projectWikiPath = resolveTrustedProjectWikiPath(project, params.projectWikiPath, status.projectWikiPath);
+    const projectWikiPath = resolveTrustedProjectWikiPath(rawProject, params.projectWikiPath, status.projectWikiPath);
     const existingPlanPath = String(params.planPath || "");
     const planningPack = await writePlanningPack(dir, { project, runId, projectRoot, projectWikiPath, direction, existingPlanPath });
     const text = `# Development plan request for external gate
@@ -2619,7 +2632,7 @@ Create or validate the implementation plan only. Do not implement. The plan must
       return { ok: false, error: "plan_request_not_implementation_plan", project, runId, dir, nextAction: "Ask an external gate or human reviewer to write the actual implementation plan, then call record_plan with that plan. Use force only after explicit human confirmation." };
     }
     const projectRoot = String(params.projectRoot || status.projectRoot || "");
-    const projectWikiPath = resolveTrustedProjectWikiPath(project, params.projectWikiPath, status.projectWikiPath);
+    const projectWikiPath = resolveTrustedProjectWikiPath(rawProject, params.projectWikiPath, status.projectWikiPath);
     const planAnalysis = analyzeImplementationPlan(String(planText), { projectRoot, projectWikiPath });
     if (!params.force && !planAnalysis.complete) {
       return {
@@ -2654,7 +2667,7 @@ Create or validate the implementation plan only. Do not implement. The plan must
 
   if (action === "start_implementation") {
     const requestedProjectRoot = String(params.projectRoot || status.projectRoot || "");
-    const projectWikiPath = resolveTrustedProjectWikiPath(project, params.projectWikiPath, status.projectWikiPath);
+    const projectWikiPath = resolveTrustedProjectWikiPath(rawProject, params.projectWikiPath, status.projectWikiPath);
     const pinnedProjectWiki = await pinContainedWikiDir(project, projectWikiPath);
     const containedProjectWikiPath = pinnedProjectWiki?.realPath || "";
     if (pinnedProjectWiki) {

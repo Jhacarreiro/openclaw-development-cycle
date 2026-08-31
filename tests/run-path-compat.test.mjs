@@ -65,3 +65,30 @@ test("request_plan uses canonical paths and status finds legacy sanitized runs",
   assert.equal(roundTrip.details.dir, legacyDir);
   assert.equal(roundTrip.details.project, "Legacy-Name");
 });
+
+test("request_plan reuses a legacy project-documentation directory", async (t) => {
+  const root = join(tmpdir(), `development-cycle-wiki-path-${process.pid}-${Date.now()}`);
+  t.after(() => rm(root, { recursive: true, force: true }));
+  process.env.DEVELOPMENT_CYCLE_STATE_ROOT = join(root, "state");
+  process.env.DEVELOPMENT_CYCLE_PROJECT_DOCS_ROOT = join(root, "docs");
+  process.env.DEVELOPMENT_CYCLE_NOTIFICATIONS_ENABLED = "false";
+  process.env.DEVELOPMENT_CYCLE_OBSERVER_ENABLED = "false";
+  const legacyWiki = join(root, "docs", "Project-One");
+  await mkdir(legacyWiki, { recursive: true });
+  await writeFile(join(legacyWiki, "README.md"), "legacy wiki\n");
+  const { default: plugin } = await import(`../dist/index.js?wikipath=${Date.now()}`);
+  let registered;
+  plugin.register({ pluginConfig: {}, registerTool(tool) { registered = tool; } });
+  const planned = await registered.execute(
+    "wiki-path-legacy",
+    { action: "request_plan", project: "Project / One", projectRoot: process.cwd() },
+    undefined,
+    undefined,
+  );
+  assert.equal(planned.details.ok, true, JSON.stringify(planned.details));
+  await access(legacyWiki);
+  const canonicalWiki = join(root, "docs", cleanId("Project / One"));
+  if (canonicalWiki !== legacyWiki) {
+    await assert.rejects(access(canonicalWiki));
+  }
+});

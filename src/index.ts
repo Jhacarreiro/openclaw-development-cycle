@@ -11,7 +11,7 @@ import { randomUUID } from "node:crypto";
 import { ACTIONS, checkActionTransition } from "./core/state-machine.js";
 import { parseFinalDecision } from "./core/decisions.js";
 import { cleanId, newRunId as createRunId } from "./core/ids.js";
-import { pathWithin as nfcPathWithin } from "./core/paths.js";
+import { pathWithin as nfcPathWithin, containedRelativePath } from "./core/paths.js";
 import { nextStallQuietAccounting } from "./core/stall-accounting.js";
 import { councilNeedsCorrectionsText, resolveAutoCouncilCorrectionsMax } from "./core/council-policy.js";
 import { inferDeliveryClassification } from "./core/delivery-classification.js";
@@ -996,10 +996,9 @@ async function openPinnedContainedDir(target: string, root: string, create = fal
   const pinnedRoot = create ? await openOrCreateStableDirectory(absRoot) : await openStableDirectory(absRoot);
   if (!pinnedRoot) return null;
   const realRoot = pinnedRoot.realPath;
-  let targetRel = "";
-  if (absTarget === absRoot || pathWithin(absRoot, absTarget)) targetRel = relative(absRoot, absTarget).replace(/\\/g, "/");
-  else if (absTarget === realRoot || pathWithin(realRoot, absTarget)) targetRel = relative(realRoot, absTarget).replace(/\\/g, "/");
-  else {
+  let targetRel = containedRelativePath(absRoot, absTarget);
+  if (targetRel == null) targetRel = containedRelativePath(realRoot, absTarget);
+  if (targetRel == null) {
     await pinnedRoot.handle.close().catch(() => null);
     return null;
   }

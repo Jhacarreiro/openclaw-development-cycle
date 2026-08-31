@@ -51,3 +51,26 @@ export function pathWithin(root: string, candidate: string): boolean {
   const ancestor = unicodeMatchingAncestor(b, nfcA);
   return ancestor !== null && sameFilesystemIdentity(a, ancestor);
 }
+
+/**
+ * Descendant-only relative path from root to candidate.
+ * For NFC/NFD aliases, walks from the inode-matched ancestor so the
+ * result never contains `..` segments.
+ */
+export function containedRelativePath(root: string, candidate: string): string | null {
+  if (!pathWithin(root, candidate)) return null;
+  const a = resolve(root);
+  const b = resolve(candidate);
+  if (a === b) return "";
+  const rel = relative(a, b).replace(/\\/g, "/");
+  if (containedRelative(rel)) return rel;
+  const nfcA = a.normalize("NFC");
+  if (a.normalize("NFC") === b.normalize("NFC") && sameFilesystemIdentity(a, b)) return "";
+  const ancestor = unicodeMatchingAncestor(b, nfcA);
+  if (ancestor && sameFilesystemIdentity(a, ancestor)) {
+    const inner = relative(ancestor, b).replace(/\\/g, "/");
+    if (inner === "") return "";
+    if (containedRelative(inner)) return inner;
+  }
+  return null;
+}

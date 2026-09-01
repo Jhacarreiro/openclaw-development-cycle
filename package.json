@@ -8,7 +8,8 @@
     "plugin:validate": "npm run build && openclaw plugins validate --entry ./dist/index.js",
     "test": "npm run build && node --test tests/*.test.mjs",
     "audit:public": "node scripts/audit-public.mjs",
-    "check": "npm test && npm run audit:public && npm run plugin:validate"
+    "check": "npm test && npm run audit:public && npm run plugin:validate",
+    "postinstall": "node scripts/apply-dependency-overrides.mjs"
   },
   "files": [
     "dist",
@@ -30,8 +31,12 @@
   },
   "devDependencies": {
     "@types/node": "^26.1.2",
+    "brace-expansion": "5.0.9",
+    "fast-uri": "3.1.5",
+    "ip-address": "10.4.0",
     "openclaw": "2026.7.1",
-    "typescript": "^7.0.2"
+    "typescript": "^7.0.2",
+    "undici": "8.10.0"
   },
   "openclaw": {
     "extensions": [
@@ -55,6 +60,12 @@
     "brace-expansion": "5.0.9",
     "fast-uri": "3.1.5",
     "ip-address": "10.4.0",
-    "undici": "8.10.0"
+    "undici": "8.10.0",
+    "openclaw": {
+      "brace-expansion": "5.0.9",
+      "fast-uri": "3.1.5",
+      "ip-address": "10.4.0",
+      "undici": "8.10.0"
+    }
   }
 }

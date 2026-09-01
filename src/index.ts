@@ -208,6 +208,8 @@ export async function pruneExpiredRuns() {
         if (implHeartbeat2?.isFile() && Date.now() - implHeartbeat2.mtimeMs <= retentionMs) continue;
         const corrHeartbeat2 = await stat(join(runReal2, "corrections_session", "heartbeat.json")).catch(() => null);
         if (corrHeartbeat2?.isFile() && Date.now() - corrHeartbeat2.mtimeMs <= retentionMs) continue;
+        // Deletion is path-based. Exclusive ownership of DEVELOPMENT_CYCLE_STATE_ROOT
+        // is the deployment contract that closes the remaining check/use window.
         await rm(runReal2, { recursive: true, force: true }).catch(() => null);
       }
     }

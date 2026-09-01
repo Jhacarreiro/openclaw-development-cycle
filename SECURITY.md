@@ -23,6 +23,7 @@ This plugin coordinates tools that can modify source checkouts. Its safety depen
 Operators should:
 
 - run with the least privileges required;
+- grant exclusive ownership of `DEVELOPMENT_CYCLE_STATE_ROOT` to the plugin process owner (no other user or process may create, replace, or delete entries under that root; retention pruning assumes this contract);
 - use disposable or backed-up checkouts for initial testing;
 - review sandbox and protected-path policies;
 - keep notifications and external services disabled until configured;

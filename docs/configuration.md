@@ -6,7 +6,7 @@ Configuration is read from environment variables when the plugin loads. Empty va
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `DEVELOPMENT_CYCLE_STATE_ROOT` | `$HOME/.openclaw/development-cycle` | Durable run state and artifacts. |
+| `DEVELOPMENT_CYCLE_STATE_ROOT` | `$HOME/.openclaw/development-cycle` | Durable run state and artifacts. Exclusive ownership is required: only the plugin process owner may create, replace, or delete entries under this root. Retention pruning deletes stale run directories and is not race-safe against a concurrent writer of that tree. |
 | `DEVELOPMENT_CYCLE_PROJECT_DOCS_ROOT` | `<state-root>/projects` | Per-project documentation root. |
 | `DEVELOPMENT_CYCLE_PROJECT_DOCS_GIT_ROOT` | empty | Optional Git checkout containing project documentation. Enables scoped plan commits. |
 | `DEVELOPMENT_CYCLE_RETENTION_DAYS` | `30` | Remove run directories older than this many days; `0` disables retention cleanup. Pruning runs before every non-`status` action (`status` is read-only); a recent `implementation_session/heartbeat.json` or `corrections_session/heartbeat.json` preserves the run; upgrading may remove runs older than 30 days on the next non-`status` action. |

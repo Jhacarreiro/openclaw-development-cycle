@@ -146,9 +146,19 @@ test("concurrent observer observations produce distinct files and are processed 
     logs.push(sidecarText);
     // Also verify the JSON payload is valid and has distinct file content
     const payloadText = await readFile(file, "utf8");
-    assert.doesNotThrow(() => JSON.parse(payloadText), `observation file ${basename(file)} is not valid JSON`);
+    const payload = JSON.parse(payloadText);
+    assert.equal(typeof payload, "object");
+    assert.ok(payload.developmentCycle?.runId, `observation file ${basename(file)} missing developmentCycle.runId`);
   }
   assert.ok(observationIds.size >= 2, `expected 2 distinct observation ids, found ${observationIds.size}: ${[...observationIds].join(", ")}`);
+  assert.ok(
+    observationIds.has(first.details.observerObservationId),
+    `missing first cycle observation id ${first.details.observerObservationId} in ${[...observationIds].join(", ")}`,
+  );
+  assert.ok(
+    observationIds.has(second.details.observerObservationId),
+    `missing second cycle observation id ${second.details.observerObservationId} in ${[...observationIds].join(", ")}`,
+  );
   const combined = logs.join("");
   assert.match(combined, /run-a/);
   assert.match(combined, /run-b/);

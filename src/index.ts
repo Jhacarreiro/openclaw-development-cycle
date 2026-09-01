@@ -376,7 +376,12 @@ ${commandLine} > ${shellQuote(stdoutPath)} 2> ${shellQuote(stderrPath)}
       timeout: 5000,
       maxBuffer: 64 * 1024,
     });
-    const launchInfo = JSON.parse(String(launched.stdout || "{}"));
+    let launchInfo: any;
+    try {
+      launchInfo = JSON.parse(String(launched.stdout || "{}"));
+    } catch {
+      throw new Error(`supervised_runner_output_invalid:${String(launched.stdout || "").trim()}`);
+    }
     const runnerPid = Number(launchInfo?.pid || 0);
     if (!launchInfo?.ok || !Number.isInteger(runnerPid) || runnerPid <= 1) {
       throw new Error(`supervised_runner_pid_invalid:${String(launched.stdout || "").trim()}`);

@@ -77,6 +77,7 @@ test("mechanical revisions allow rerunning final validation and finalizing the s
   // Merged onto current main: the delivery endgate (finalize_delivery) is the
   // exit action for a stopped gate; close only archives terminal outcomes.
   assert.equal(checkActionTransition("finalize_delivery", "external_validation_stopped").ok, true);
+  assert.equal(checkActionTransition("close", "external_validation_stopped").ok, false);
 });
 
 test("state machine tests cover every new phase entry", () => {
@@ -92,6 +93,7 @@ test("state machine tests cover every new phase entry", () => {
     // Negatives: should stay blocked
     ["start_corrections", "external_validation_passed", false],
     ["close", "external_validation_passed", false],
+    ["close", "external_validation_stopped", false],
     ["finalize_delivery", "external_validation_passed", false],
   ];
   for (const [action, phase, shouldPass] of cases) {

@@ -9,6 +9,7 @@ test("development-cycle uses a persistent subreaper supervisor", () => {
   assert.match(source, /ensureRunnerSupervisor/);
   assert.match(configSource, /runner-supervisor\.py/);
   assert.match(source, /supervised_runner_pid_invalid/);
+  assert.match(source, /supervised_runner_output_invalid/);
   assert.match(source, /runnerSupervisorPid/);
 });
 

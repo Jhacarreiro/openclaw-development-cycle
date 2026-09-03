@@ -1,6 +1,15 @@
+/**
+ * src/adapters/implementation.ts — implementation lifecycle adapter.
+ * Deploy independence: optional track is src/adapters/deploy.ts emitting deploy_manifest.json;
+ * this adapter never mutates src/core/state-machine.ts deploy-unaware lifecycle.
+ */
+
 import { readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+
+export const IMPLEMENTATION_ADAPTER_DEPLOY_INDEPENDENCE_NOTE =
+  "implementation adapter is independent of the optional deploy track; deploy state never mutates src/core/state-machine.ts lifecycle";
 
 const DEVELOPMENT_CYCLE_BIN_DIR = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", "bin");
 

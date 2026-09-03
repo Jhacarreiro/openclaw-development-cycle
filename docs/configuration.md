@@ -145,6 +145,62 @@ The observer is disabled by default. Enabling it requires a compatible process-o
 | `DEVELOPMENT_CYCLE_OBSERVER_RUNTIME` | `external` | Runtime label. |
 | `DEVELOPMENT_CYCLE_OBSERVER_OWNER` | empty | Operator or team label. |
 
+## Deploy track (optional)
+
+Disabled by default. When enabled, the same `development_cycle` tool exposes an
+independent deploy track alongside the implementation lifecycle; it does not
+require planning, implementation, final validation, or repository delivery and
+does not auto-run after them. Deploy state is durable and separate from
+`status.phase`.
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `DEVELOPMENT_CYCLE_DEPLOY_ENABLED` | `false` | Enable the deploy track. |
+| `DEVELOPMENT_CYCLE_DEPLOY_ADAPTER` | `command` | Adapter type for deploys. |
+| `DEVELOPMENT_CYCLE_DEPLOY_COMMAND` | empty | Absolute executable path for the deploy adapter. |
+| `DEVELOPMENT_CYCLE_DEPLOY_ARGS_JSON` | `[]` | JSON array of fixed string arguments placed before the request path. |
+| `DEVELOPMENT_CYCLE_DEPLOY_TIMEOUT_SECONDS` | `900` | Bounded timeout for deploy adapter invocations. |
+
+Deploy storage lives under `<state-root>/tracks/deploy/<project>/<deployId>/`
+with `deploy_status.json`, `deploy_request.json`, `deploy_manifest.json`
+(durable prepare artifact emitted by `src/adapters/deploy.ts`),
+`authorization_evidence.md` (only when provided), `rollback.json`, and
+immutable attempt directories under `prepare/`, `execute/attempts/<attemptId>/`,
+and `verify/attempts/<attemptId>/`. A deploy can exist without a development
+`runId`; `sourceRunId` is metadata only. Deploy status values are local to
+this track and not part of `src/core/state-machine.ts`: `prepared`,
+`prepare_failed`, `execution_launched`, `execution_running`, `deployed`,
+`execution_failed`, `verification_running`, `verified`, `verification_failed`,
+`stopped`.
+
+The deploy adapter (`src/adapters/deploy.ts`, alongside the implementation
+adapter at `src/adapters/implementation.ts`) generically handles
+`prepare | execute | verify` via a versioned request; `prepare` must emit
+`deploy_manifest.json` with at least `sourceCommit`, `expectedMutations[]`,
+`protectedPaths[]`, `requiredAuthorizations[]`, `verificationChecks[]`, and
+`rollback.available / description / artifacts`. `deploy_prepare` must not
+mutate production; the exact source commit is persisted before execute;
+missing required authorization fails closed and is never inferred from chat or
+history; execution is supervised and verification is bounded; v1 has no
+automatic rollback and no automatic security gate.
+
+V1 non-goals: automatic chaining from the implementation lifecycle, security
+gating, CI/CD environment promotion graphs, canary/blue-green rollouts, secret
+management, Docker/Cloudflare/GitHub logic in core, and authorization
+heuristics.
+
+Example:
+
+```bash
+export DEVELOPMENT_CYCLE_DEPLOY_ENABLED=true
+export DEVELOPMENT_CYCLE_DEPLOY_ADAPTER=command
+export DEVELOPMENT_CYCLE_DEPLOY_COMMAND=/opt/deploy/bin/adapter
+export DEVELOPMENT_CYCLE_DEPLOY_ARGS_JSON='[]'
+export DEVELOPMENT_CYCLE_DEPLOY_TIMEOUT_SECONDS=900
+```
+
+See [Adapters](adapters.md) and the deploy handoff (`docs/HANDOFF_DEPLOY_TRACK.md`).
+
 ## Parsing rules
 
 Boolean values accept `1`, `true`, `yes`, or `on`, and `0`, `false`, `no`, or `off`, case-insensitively. Positive integers fall back to defaults when invalid. `DEVELOPMENT_CYCLE_IMPLEMENTATION_ARGS_JSON` must be a JSON array containing only strings; invalid input becomes an empty array.

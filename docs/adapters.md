@@ -110,6 +110,143 @@ A command adapter can wrap:
 
 Keep adapter-specific authentication, provider selection, and sandbox policy outside the control-plane core.
 
+## Deploy adapter (optional)
+
+Disabled by default. When enabled, the same `development_cycle` tool exposes an
+independent deploy track. It is independently invocable, does not require a
+development `runId`, and its state is durable and separate from the
+implementation lifecycle. The deploy adapter is `src/adapters/deploy.ts`
+(the implementation lifecycle's adapter is `src/adapters/implementation.ts`); the
+prepare step's durable artifact is `deploy_manifest.json`.
+
+### Actions
+
+`deploy_prepare`, `deploy_execute`, `deploy_verify`, `deploy_status`, and
+optionally `deploy_stop`. `deploy_status` is read-only and never mutates
+`status.phase`.
+
+`deploy_prepare` inputs: `project`, `projectRoot`, optional `deployId` (created
+if absent), `sourceRef` (resolved and persisted as an exact commit),
+`sourceRunId` (metadata only), `deploymentAdapter`, `deploymentTarget`, and
+`objective`. It validates/pins the trusted Git checkout, creates the deploy
+track, invokes the adapter in `prepare` mode, and emits a durable manifest
+without mutating production. `deploy_execute` requires a prepared manifest and
+fails closed when `requiredAuthorizations` are declared without explicit
+`authorizationText` evidence; it never infers authorization from chat or
+history and runs through the supervisor. `deploy_verify` runs bounded
+adapter-defined checks; terminal result is `verified` or
+`verification_failed` — failure surfaces rollback metadata without
+automatically rolling back.
+
+When `deployId` is absent, `deploy_status` returns the latest deploy for the
+project when it can do so safely.
+
+### Independent status set
+
+Local to this track; not part of `src/core/state-machine.ts`:
+
+```text
+prepared
+prepare_failed
+execution_launched
+execution_running
+deployed
+execution_failed
+verification_running
+verified
+verification_failed
+stopped
+```
+
+### Storage and durable artifacts
+
+```text
+<state-root>/tracks/deploy/<project>/<deployId>/
+  deploy_status.json
+  deploy_request.json
+  deploy_manifest.json            # durable prepare artifact (see src/adapters/deploy.ts)
+  authorization_evidence.md      # only when provided
+  rollback.json
+  prepare/
+  execute/attempts/<attemptId>/
+  verify/attempts/<attemptId>/
+```
+
+The prepare step's durable artifact is `deploy_manifest.json` — emitted by
+the deploy adapter at `src/adapters/deploy.ts`. Retries use immutable attempt
+directories; terminal markers, logs, and status from a prior attempt are never
+reused.
+
+### Versioned request schema
+
+One generic command can handle `prepare | execute | verify`:
+
+```json
+{
+  "schemaVersion": 1,
+  "track": "deploy",
+  "mode": "prepare",
+  "project": "example",
+  "deployId": "...",
+  "projectRoot": "/repo",
+  "sourceRefRequested": "main",
+  "sourceCommit": "<exact sha>",
+  "deploymentTarget": "production",
+  "resultsRoot": "/state/tracks/deploy/...",
+  "manifestPath": "/state/tracks/deploy/.../deploy_manifest.json",
+  "authorizationPath": "",
+  "timeoutSeconds": 900
+}
+```
+
+### Prepare manifest fields (`deploy_manifest.json`)
+
+`prepare` (via `src/adapters/deploy.ts`) must emit `deploy_manifest.json` with at least:
+
+```text
+sourceCommit
+expectedMutations[]
+protectedPaths[]
+requiredAuthorizations[]
+verificationChecks[]
+rollback.available / description / artifacts
+```
+
+### Configuration
+
+```bash
+export DEVELOPMENT_CYCLE_DEPLOY_ENABLED=true
+export DEVELOPMENT_CYCLE_DEPLOY_ADAPTER=command
+export DEVELOPMENT_CYCLE_DEPLOY_COMMAND=/absolute/path/to/deploy-adapter
+export DEVELOPMENT_CYCLE_DEPLOY_ARGS_JSON='[]'
+export DEVELOPMENT_CYCLE_DEPLOY_TIMEOUT_SECONDS=900
+```
+
+See [Configuration](configuration.md).
+
+### Safety requirements
+
+- Disabled by default.
+- No project/vendor-specific logic in core.
+- No secrets in requests, manifests, or logs.
+- No shell interpolation of user-controlled values.
+- `deploy_prepare` must not mutate production.
+- Exact source commit is persisted before execute.
+- Missing required authorization fails closed.
+- Work is supervised; verification is bounded.
+- No automatic rollback and no automatic security gate in v1.
+
+### V1 non-goals
+
+Automatic chaining from the implementation lifecycle, security gating, CI/CD
+environment promotion graphs, canary/blue-green rollouts, secret management,
+Docker/Cloudflare/GitHub logic in core, and authorization heuristics are out of
+scope for v1. The first real adapter fixture (for example, Shopping Assistant)
+is an adapter example only and is never hard-coded in core. The deploy
+adapter (`src/adapters/deploy.ts`) and implementation adapter
+(`src/adapters/implementation.ts`) remain separate; `deploy_manifest.json`
+belongs to the deploy track only.
+
 ## Security guidance
 
 - use an absolute executable path;

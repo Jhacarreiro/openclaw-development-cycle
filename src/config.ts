@@ -52,6 +52,13 @@ export interface DevelopmentCycleConfig {
     runtime: string;
     owner: string;
   };
+  deploy: {
+    enabled: boolean;
+    adapter: "command";
+    command: string;
+    args: string[];
+    timeoutSeconds: number;
+  };
 }
 
 function text(env: NodeJS.ProcessEnv, name: string, fallback = ""): string {
@@ -178,6 +185,13 @@ export function loadDevelopmentCycleConfig(env: NodeJS.ProcessEnv = process.env)
       branch: text(env, "DEVELOPMENT_CYCLE_OBSERVER_BRANCH"),
       runtime: text(env, "DEVELOPMENT_CYCLE_OBSERVER_RUNTIME", "external"),
       owner: text(env, "DEVELOPMENT_CYCLE_OBSERVER_OWNER"),
+    },
+    deploy: {
+      enabled: boolean(env, "DEVELOPMENT_CYCLE_DEPLOY_ENABLED", false),
+      adapter: (text(env, "DEVELOPMENT_CYCLE_DEPLOY_ADAPTER", "command") === "command" ? "command" : "command") as "command",
+      command: text(env, "DEVELOPMENT_CYCLE_DEPLOY_COMMAND"),
+      args: stringArray(env, "DEVELOPMENT_CYCLE_DEPLOY_ARGS_JSON"),
+      timeoutSeconds: positiveInteger(env, "DEVELOPMENT_CYCLE_DEPLOY_TIMEOUT_SECONDS", 900),
     },
   };
 }

@@ -5,6 +5,7 @@ export const ACTIONS = [
   "record_plan",
   "start_implementation",
   "stop_implementation",
+  "resume_finalization",
   "run_final_validation",
   "record_delivery",
   "request_final_validation",
@@ -21,6 +22,7 @@ const ALWAYS_ALLOWED = new Set<DevelopmentCycleAction>(["status", "reconcile", "
 const ALLOWED_PHASES: Partial<Record<DevelopmentCycleAction, ReadonlySet<string>>> = {
   record_plan: new Set(["", "waiting_external_plan", "plan_ready_for_implementation"]),
   start_implementation: new Set(["plan_ready_for_implementation", "implementation_failed"]),
+  resume_finalization: new Set(["review_infrastructure_failed"]),
   stop_implementation: new Set([
     "implementation_launched",
     "implementation_running",

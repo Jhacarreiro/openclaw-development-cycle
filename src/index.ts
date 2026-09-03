@@ -160,6 +160,7 @@ async function dcClassify(dir: string, status: any, runtime: any) {
   const out = String(status?.implementationStdout || status?.correctionsStdout || status?.directImplementationStdout || "");
   const err = String(status?.implementationStderr || status?.correctionsStderr || status?.directImplementationStderr || "");
   const text = [status?.error, status?.reason, status?.validationSummary, status?.councilReviewSummary, dcLines(runtime), out ? await textTail(out, 30000) : "", err ? await textTail(err, 30000) : ""].filter(Boolean).join("\n");
+  const phase = String(status?.phase || "");
   const policies: any[] = [
     ["auth_failed","blocking",true,false,true,"Resolve provider authentication/OAuth/bearer token state, then launch a clean Implementation handoff. Do not retry this run automatically.",[["401_unauthorized",/401\s+Unauthorized/i],["last_status_401",/last status:\s*401/i],["missing_bearer",/missing bearer/i],["invalid_api_key",/invalid api key|incorrect api key|unauthorized request/i]]],
     ["billing_or_quota_blocked","blocking",true,false,true,"Resolve provider billing/quota/credits or explicitly choose an alternate provider. Do not retry automatically.",[["quota_exceeded",/quota.*exceed|exceed.*quota|current quota/i],["billing_blocked",/billing|payment required|billing hard limit/i],["credits_exhausted",/insufficient credits|out of credits|credit balance|account balance|spend limit/i]]],
@@ -167,9 +168,20 @@ async function dcClassify(dir: string, status: any, runtime: any) {
     ["provider_fleet_failed","blocking",true,false,false,"Inspect provider routing/model availability and decomposition artifacts before relaunching a clean run.",[["all_providers_failed",/Decomposition failed with all providers|all providers failed/i],["no_substantive_inputs",/no substantive inputs/i],["synthesis_cannot_proceed",/Synthesis cannot proceed/i]]],
     ["local_runtime_fault","blocking",true,false,true,"Fix local permissions/sandbox/rollout-recorder state, then relaunch a clean run after inspecting dirty worktree.",[["permission_denied",/Permission denied|EACCES/i],["rollout_recorder",/failed to initialize rollout recorder/i],["sandbox_fault",/LandlockRestrict|error running landlock|linux-sandbox/i]]]
   ];
-  let c: any = null; for (const p of policies) { const m = dcMatch(text, p[6]); if (m) { c = { failureClass:p[0], severity:p[1], humanRequired:p[2], safeToAutoRetry:p[3], autoStopRecommended:p[4], recommendedAction:p[5], matched:m }; break; } }
+  let c: any = phase === "review_infrastructure_failed"
+    ? {
+        failureClass: "review_infrastructure_failed",
+        severity: "blocking",
+        humanRequired: true,
+        safeToAutoRetry: false,
+        autoStopRecommended: false,
+        recommendedAction: "Call resume_finalization only for this preserved Octopus output, then run mechanical final validation. Do not relaunch implementation automatically.",
+        matched: status?.reviewInfrastructureFailure?.matched || { name: "review_infrastructure_failure", pattern: "durable_phase", match: "review_infrastructure_failed" },
+      }
+    : null;
+  if (!c) for (const p of policies) { const m = dcMatch(text, p[6]); if (m) { c = { failureClass:p[0], severity:p[1], humanRequired:p[2], safeToAutoRetry:p[3], autoStopRecommended:p[4], recommendedAction:p[5], matched:m }; break; } }
   const codes = dcAlerts(runtime); if (!c) { const b = codes.filter((x: string) => ["status_running_but_root_missing","root_process_zombie","wall_clock_timeout_seen","provider_processes_outside_observed_tree"].includes(x)); if (b.length) c = { failureClass:"runtime_observation_blocker", severity:"warning", humanRequired:true, safeToAutoRetry:false, autoStopRecommended:false, recommendedAction:"Inspect Observer runtime observation before deciding whether to stop or relaunch.", matched:{name:"runtime_alert", pattern:b.join(","), match:b.join(", ")} }; }
-  const phase = String(status?.phase || ""); const important = new Set(["implementation_launched","implementation_delivered","implementation_failed","corrections_launched","corrections_completed","corrections_failed","external_validation_passed","external_validation_failed","stopped","closed"]);
+  const important = new Set(["implementation_launched","implementation_delivered","implementation_failed","review_infrastructure_failed","corrections_launched","corrections_completed","corrections_failed","external_validation_passed","external_validation_failed","stopped","closed"]);
   return { eventType:"development_cycle.update", phase, phaseSeverity:/failed|blocked|stopped/i.test(phase)?"blocking":"info", classification:c, shouldNotifyMain:Boolean(c)||important.has(phase), alertCodes:codes, evidencePaths:[join(dir,"status.json"),join(dir,"runtime_alerts.json"),join(dir,"runtime_observation.json"),out,err].filter(Boolean), textExcerpt:dcShort(text.replace(/\s+/g," ").trim(),1600) };
 }
 async function dcPersistFailure(dir: string, status: any, ev: any) { const c = ev?.classification; if (!c?.failureClass) { const recovery = transientRuntimeObservationRecoveryPatch(status, c); if (!recovery) return {status,changed:false}; return {status:await cycleStatus(dir,recovery),changed:true}; } if (status?.failureClass===c.failureClass && status?.failureMatched?.name===c.matched?.name) return {status,changed:false}; return {status:await cycleStatus(dir,{failureClass:c.failureClass,failureSeverity:c.severity,failureHumanRequired:c.humanRequired,failureSafeToAutoRetry:c.safeToAutoRetry,failureAutoStopRecommended:c.autoStopRecommended,failureRecommendedAction:c.recommendedAction,failureMatched:c.matched,failureDetectedAt:new Date().toISOString(),nextAction:c.recommendedAction}),changed:true}; }
@@ -1183,6 +1195,91 @@ async function resolveOctopusAttemptOutput(projectRoot: string, attemptId: strin
   }
 }
 
+async function detectOctopusReviewInfrastructureFailure(stdoutPath: string, stderrPath: string) {
+  const stdout = stdoutPath ? await textTail(stdoutPath, 60000) : "";
+  const stderr = stderrPath ? await textTail(stderrPath, 30000) : "";
+  const text = `${stdout}\n${stderr}`;
+  const noChanges = text.match(/No changes found to review/i);
+  const contextualReview = text.match(/Contextual code review|contextual review|review returned non-zero|did not produce a clean exit|completed with code\s*[1-9]/i);
+  const contraindication = text.match(/(?:\b401\b|\b403\b|unauthori[sz]ed|missing bearer|authentication (?:failed|error)|oauth (?:failed|error)|\b429\b|rate[ -]?limit|quota|insufficient_quota|billing|payment required|timed? out|timeout|provider (?:failed|error)|network (?:failed|error)|connection (?:failed|reset|refused))/i);
+  if (!noChanges || !contextualReview || contraindication) {
+    return {
+      ok: false,
+      resumeEligible: false,
+      contraindication: contraindication
+        ? { name: "review_resume_contraindication", pattern: "auth_quota_timeout_provider_network", match: contraindication[0] }
+        : null,
+    };
+  }
+  return {
+    ok: true,
+    resumeEligible: true,
+    failureClass: "review_infrastructure_failed",
+    reason: "octopus_contextual_review_reported_no_changes",
+    matched: { name: "octopus_contextual_review_no_changes", pattern: "No changes found to review", match: noChanges[0] },
+    stdoutPath: stdoutPath || null,
+    stderrPath: stderrPath || null,
+  };
+}
+
+async function resumeReviewInfrastructureFinalization(dir: string, status: any) {
+  if (String(status?.phase || "") !== "review_infrastructure_failed") {
+    return { ok: false, error: "review_infrastructure_phase_required" };
+  }
+  if (status?.reviewInfrastructureResumeEligible !== true) {
+    return { ok: false, error: "review_infrastructure_resume_not_eligible", hint: "Resolve the review blocker or start a new clean implementation handoff." };
+  }
+  if (String(status?.implementationAdapter || "") !== "octopus") {
+    return { ok: false, error: "octopus_adapter_required" };
+  }
+  const attemptId = String(status?.implementationAttemptId || status?.implementationOutputHandoff?.attemptId || "").trim();
+  const projectRoot = String(status?.projectRoot || "").trim();
+  if (!attemptId || !projectRoot) return { ok: false, error: "review_resume_identity_missing", attemptId: attemptId || null, projectRoot: projectRoot || null };
+
+  const outputHandoff = await resolveOctopusAttemptOutput(projectRoot, attemptId);
+  if (!outputHandoff?.ok) return { ok: false, error: "octopus_output_revalidation_failed", outputHandoff };
+  const previousOutputPath = String(status?.outputPath || "").trim();
+  if (previousOutputPath && previousOutputPath !== outputHandoff.outputPath) {
+    return { ok: false, error: "octopus_output_path_changed", previousOutputPath, revalidatedOutputPath: outputHandoff.outputPath };
+  }
+
+  const recoveredAt = new Date().toISOString();
+  const recoveryPath = join(dir, "review_infrastructure_recovery.json");
+  const recovery = {
+    schemaVersion: 1,
+    recoveredAt,
+    fromPhase: "review_infrastructure_failed",
+    attemptId,
+    projectRoot,
+    outputPath: outputHandoff.outputPath,
+    outputHandoff,
+    failure: status?.reviewInfrastructureFailure || null,
+    nextRequiredAction: "run_final_validation",
+  };
+  await saveJson(recoveryPath, recovery);
+  const next = await cycleStatus(dir, {
+    phase: "implementation_delivered",
+    owner: "main",
+    ok: true,
+    error: null,
+    failureClass: null,
+    failureSeverity: null,
+    failureHumanRequired: null,
+    failureSafeToAutoRetry: null,
+    failureAutoStopRecommended: null,
+    failureRecommendedAction: null,
+    failureMatched: null,
+    outputPath: outputHandoff.outputPath,
+    implementationOutputHandoff: outputHandoff,
+    reviewInfrastructureResumeEligible: false,
+    reviewInfrastructureRecoveredAt: recoveredAt,
+    reviewInfrastructureRecovery: recoveryPath,
+    resumedFromPhase: "review_infrastructure_failed",
+    nextAction: "Run run_final_validation against the preserved Octopus output before final review or repository delivery.",
+  });
+  return { ok: true, phase: next.phase, recoveryPath, outputHandoff, status: next };
+}
+
 function repositoryFindings(status: any, max = 12) {
   const raw = [...(status?.councilReviewFindings || [])];
   if (status?.failureRecommendedAction) raw.push(String(status.failureRecommendedAction));
@@ -1532,25 +1629,57 @@ async function refreshLaunchedImplementationStatus(dir: string, status: any) {
     if (!isCorrectionsRun && String(session?.adapter || status?.implementationAdapter || "") === "octopus") {
       failedOutputHandoff = await resolveOctopusAttemptOutput(String(status?.projectRoot || session?.projectRoot || ""), observedAttemptId || activeAttemptId);
     }
+    const reviewInfrastructureFailure = !isCorrectionsRun && failedOutputHandoff?.ok
+      ? await detectOctopusReviewInfrastructureFailure(stdoutPath, stderrPath)
+      : null;
+    let reviewInfrastructureFailureEvidence = "";
+    if (reviewInfrastructureFailure?.ok && reviewInfrastructureFailure.resumeEligible) {
+      reviewInfrastructureFailureEvidence = join(dir, "review_infrastructure_failure.json");
+      await saveJson(reviewInfrastructureFailureEvidence, {
+        schemaVersion: 1,
+        detectedAt: new Date().toISOString(),
+        exitCode,
+        attemptId: observedAttemptId || activeAttemptId || null,
+        outputHandoff: failedOutputHandoff,
+        failure: reviewInfrastructureFailure,
+      });
+    }
     const patch = isCorrectionsRun
       ? { phase: "corrections_failed", owner: "main", ok: false, error: `Implementation exited non-zero: ${exitCode}`, correctionsStdout: stdoutPath, correctionsStderr: stderrPath, directCorrectionsStatus: statusPath }
-      : {
-          phase: "implementation_failed",
-          owner: "main",
-          ok: false,
-          nextAction: failedOutputHandoff?.ok
-            ? "A validated partial Octopus output is available for repository delivery."
-            : "Inspect Implementation stdout/stderr, fix blockers, then launch a new clean handoff.",
-          error: `Implementation exited non-zero: ${exitCode}`,
-          implementationStdout: stdoutPath,
-          implementationStderr: stderrPath,
-          directImplementationStatus: statusPath,
-          ...(failedOutputHandoff?.ok
-            ? { outputPath: failedOutputHandoff.outputPath, implementationOutputHandoff: failedOutputHandoff }
-            : failedOutputHandoff
-              ? { implementationOutputHandoff: failedOutputHandoff }
-              : {}),
-        };
+      : reviewInfrastructureFailure?.ok && reviewInfrastructureFailure.resumeEligible
+        ? {
+            phase: "review_infrastructure_failed",
+            owner: "main",
+            ok: false,
+            nextAction: "Call resume_finalization to revalidate this exact Octopus output, then run run_final_validation. Do not relaunch implementation automatically.",
+            error: `Implementation adapter exited non-zero after review infrastructure failure: ${exitCode}`,
+            failureClass: "review_infrastructure_failed",
+            implementationStdout: stdoutPath,
+            implementationStderr: stderrPath,
+            directImplementationStatus: statusPath,
+            outputPath: failedOutputHandoff.outputPath,
+            implementationOutputHandoff: failedOutputHandoff,
+            reviewInfrastructureFailure,
+            reviewInfrastructureFailureEvidence: reviewInfrastructureFailureEvidence || null,
+            reviewInfrastructureResumeEligible: true,
+          }
+        : {
+            phase: "implementation_failed",
+            owner: "main",
+            ok: false,
+            nextAction: failedOutputHandoff?.ok
+              ? "A validated partial Octopus output is available for repository delivery."
+              : "Inspect Implementation stdout/stderr, fix blockers, then launch a new clean handoff.",
+            error: `Implementation exited non-zero: ${exitCode}`,
+            implementationStdout: stdoutPath,
+            implementationStderr: stderrPath,
+            directImplementationStatus: statusPath,
+            ...(failedOutputHandoff?.ok
+              ? { outputPath: failedOutputHandoff.outputPath, implementationOutputHandoff: failedOutputHandoff }
+              : failedOutputHandoff
+                ? { implementationOutputHandoff: failedOutputHandoff }
+                : {}),
+          };
     const observerFinalization = await finalizeObserverSessions(dir, status, "failed");
     return await cycleStatus(dir, { ...patch, observerFinalization });
   }
@@ -2494,6 +2623,12 @@ async function projectCycle(params: any) {
   const transition = checkActionTransition(action, status?.phase);
   if (!transition.ok) {
     return { ok: false, project, runId, dir, ...transition, nextAction: "Inspect status and invoke only the action allowed for the current phase." };
+  }
+
+  if (action === "resume_finalization") {
+    const resumed = await resumeReviewInfrastructureFinalization(dir, { ...status, project, runId });
+    const files = (await readdir(dir).catch(() => [])).sort();
+    return { ...resumed, project, runId, dir, files };
   }
 
   if (action === "stop_implementation") {

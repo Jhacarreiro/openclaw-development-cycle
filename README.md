@@ -143,6 +143,8 @@ stop
 | `start_corrections` | Optional/manual targeted correction pass for legacy or explicitly supervised correction workflows. A final `revise` no longer launches corrections automatically. |
 | `close` | Close a validated or stopped cycle. |
 
+Deploy track state is durable and separate from this phase machine; see [Deploy track](#deploy-track-optional).
+
 Invalid phase transitions are rejected by the state machine.
 
 When an Octopus attempt exits non-zero only because contextual review infrastructure explicitly reports `No changes found to review`, while a trusted Tangle output handoff is already materialized, `reconcile` records `review_infrastructure_failed` instead of flattening the run into a generic implementation failure. The output is preserved and marked resume-eligible. `resume_finalization` revalidates the exact attempt manifest, source checkout, worktree, and branch before moving back to `implementation_delivered`; `run_final_validation` is still mandatory before final review or repository delivery. Other non-zero failures do not use this recovery path.
@@ -180,6 +182,141 @@ The adapter translates the generic cycle request into Octopus `scripts/orchestra
 Octopus council review remains available only when this adapter is active.
 
 See [Adapters](docs/adapters.md) and [Configuration](docs/configuration.md).
+
+## Deploy track (optional)
+
+Disabled by default. When enabled, the same `development_cycle` tool exposes an
+independent deploy track alongside the implementation lifecycle — it does not
+require planning, implementation, final validation, or repository delivery, and
+it does not auto-run after them.
+
+```text
+development_cycle
+  |-- implementation lifecycle  (existing)
+  |-- deploy track              (new, optional)
+  `-- security track            (separate handoff)
+```
+
+### Actions
+
+| Action | Purpose |
+| --- | --- |
+| `deploy_prepare` | Validate/pin the trusted checkout, resolve the exact source commit, create the deploy track, invoke the deploy adapter in `prepare` mode, and emit a durable deployment manifest. Performs no production mutation. |
+| `deploy_execute` | Execute a prepared manifest through the supervised process group. Requires explicit `authorizationText` evidence when the manifest declares `requiredAuthorizations`; never infers authorization from chat or history. |
+| `deploy_verify` | Run bounded adapter-defined post-deploy checks and persist structured evidence. Terminal result is `verified` or `verification_failed`. |
+| `deploy_status` | Read-only. Returns track status, exact source commit, manifest, attempt/runtime state, verification summary, rollback metadata, files, and `nextAction`. When `deployId` is absent, returns the latest deploy for the project when safe. |
+| `deploy_stop` | Optional, bounded stop of a running deploy execution. |
+
+Deploy state is durable and separate from `status.phase`. Required inputs for
+`deploy_prepare` include `project` and `projectRoot`; optional inputs include
+`deployId` (created when absent), `sourceRef` (resolved and persisted as an
+exact commit), `sourceRunId` (metadata link to an implementation run, never
+required), `deploymentAdapter`, `deploymentTarget`, and `objective`.
+
+### Independent status set
+
+Deploy status values are local to this track and are not part of
+`src/core/state-machine.ts`:
+
+```text
+prepared
+prepare_failed
+execution_launched
+execution_running
+deployed
+execution_failed
+verification_running
+verified
+verification_failed
+stopped
+```
+
+### Storage and durable artifacts
+
+```text
+<state-root>/tracks/deploy/<project>/<deployId>/
+  deploy_status.json
+  deploy_request.json
+  deploy_manifest.json            # durable prepare artifact (see src/adapters/deploy.ts)
+  authorization_evidence.md      # only when provided
+  rollback.json
+  prepare/
+  execute/attempts/<attemptId>/
+  verify/attempts/<attemptId>/
+```
+
+Retries use immutable attempt directories and never reuse terminal markers,
+logs, or status from a prior attempt. A deploy can exist without a
+development `runId`. The prepare step's durable artifact is
+`deploy_manifest.json` — emitted by the deploy adapter at
+`src/adapters/deploy.ts`.
+
+### Adapter contract
+
+Deployment logic belongs in an adapter, not `src/index.ts`. The deploy
+adapter is `src/adapters/deploy.ts` (generic command adapter reused alongside
+`src/adapters/implementation.ts`):
+
+```bash
+export DEVELOPMENT_CYCLE_DEPLOY_ENABLED=true
+export DEVELOPMENT_CYCLE_DEPLOY_ADAPTER=command
+export DEVELOPMENT_CYCLE_DEPLOY_COMMAND=/absolute/path/to/deploy-adapter
+export DEVELOPMENT_CYCLE_DEPLOY_ARGS_JSON='[]'
+export DEVELOPMENT_CYCLE_DEPLOY_TIMEOUT_SECONDS=900
+```
+
+One command handles `prepare | execute | verify` via a versioned request:
+
+```json
+{
+  "schemaVersion": 1,
+  "track": "deploy",
+  "mode": "prepare",
+  "project": "example",
+  "deployId": "...",
+  "projectRoot": "/repo",
+  "sourceRefRequested": "main",
+  "sourceCommit": "<exact sha>",
+  "deploymentTarget": "production",
+  "resultsRoot": "/state/tracks/deploy/...",
+  "manifestPath": "/state/tracks/deploy/.../deploy_manifest.json",
+  "authorizationPath": "",
+  "timeoutSeconds": 900
+}
+```
+
+`prepare` (via `src/adapters/deploy.ts`) must emit `deploy_manifest.json` with at least:
+
+```text
+sourceCommit
+expectedMutations[]
+protectedPaths[]
+requiredAuthorizations[]
+verificationChecks[]
+rollback.available / description / artifacts
+```
+
+The implementation lifecycle's adapter is `src/adapters/implementation.ts`; the deploy track's adapter is `src/adapters/deploy.ts`.
+
+### Safety requirements
+
+- Feature is disabled by default.
+- No project/vendor-specific logic in core.
+- No secrets in requests, manifests, or logs.
+- No shell interpolation of user-controlled values.
+- `deploy_prepare` must not mutate production.
+- The exact source commit is persisted before `deploy_execute`.
+- Missing required authorization fails closed.
+- Work runs through the supervisor, never a long foreground shell call.
+- Verification is bounded.
+- No automatic rollback and no automatic security gate in v1.
+
+### V1 non-goals
+
+Automatic chaining from the implementation lifecycle, security gating, CI/CD
+environment promotion graphs, canary/blue-green rollouts, secret management,
+Docker/Cloudflare/GitHub logic in core, and authorization heuristics are out of
+scope for v1. See [Adapters](docs/adapters.md) and [Configuration](docs/configuration.md).
 
 ## Notifications
 

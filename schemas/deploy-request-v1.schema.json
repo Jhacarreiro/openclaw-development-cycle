@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Jhacarreiro/openclaw-development-cycle/schemas/deploy-request-v1.schema.json",
+  "title": "Development Cycle Deploy Request v1",
+  "type": "object",
+  "additionalProperties": true,
+  "required": [
+    "schemaVersion",
+    "track",
+    "mode",
+    "project",
+    "deployId",
+    "projectRoot",
+    "sourceCommit",
+    "resultsRoot",
+    "manifestPath"
+  ],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "track": { "const": "deploy" },
+    "mode": { "enum": ["prepare", "execute", "verify"] },
+    "project": { "type": "string", "minLength": 1 },
+    "deployId": { "type": "string", "minLength": 1 },
+    "projectRoot": { "type": "string", "minLength": 1 },
+    "sourceRefRequested": { "type": "string" },
+    "sourceCommit": { "type": "string", "minLength": 1 },
+    "deploymentTarget": { "type": "string" },
+    "resultsRoot": { "type": "string", "minLength": 1 },
+    "manifestPath": { "type": "string", "minLength": 1 },
+    "authorizationPath": { "type": "string" },
+    "timeoutSeconds": { "type": "integer", "minimum": 1 }
+  }
+}

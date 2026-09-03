@@ -1,0 +1,58 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Jhacarreiro/openclaw-development-cycle/schemas/deploy-manifest-v1.schema.json",
+  "title": "Development Cycle Deploy Manifest v1",
+  "description": "Durable manifest emitted by the deploy adapter in prepare mode; validated by src/adapters/deploy.ts#validateDeployManifest and persisted as deploy_manifest.json",
+  "type": "object",
+  "additionalProperties": true,
+  "required": [
+    "sourceCommit",
+    "expectedMutations",
+    "protectedPaths",
+    "requiredAuthorizations",
+    "verificationChecks",
+    "rollback"
+  ],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "sourceCommit": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$",
+      "description": "Exact 40-hex commit SHA resolved from sourceRef before execute"
+    },
+    "project": { "type": "string" },
+    "deployId": { "type": "string" },
+    "deploymentTarget": { "type": "string" },
+    "expectedMutations": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Planned production-affecting changes identified during prepare (no mutation in prepare)"
+    },
+    "protectedPaths": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "requiredAuthorizations": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Authorizations that must be present as authorizationText before deploy_execute; missing evidence fails closed"
+    },
+    "verificationChecks": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Bounded post-deploy checks run in verify"
+    },
+    "rollback": {
+      "type": "object",
+      "required": ["available", "description", "artifacts"],
+      "properties": {
+        "available": { "type": "boolean" },
+        "description": { "type": "string" },
+        "artifacts": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      }
+    }
+  }
+}

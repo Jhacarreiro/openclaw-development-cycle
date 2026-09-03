@@ -38,7 +38,9 @@ Filesystem persistence:
 
 ### `src/adapters/implementation.ts`
 
-Adapter contract and launch translation:
+Implementation-lifecycle adapter contract and launch translation (the
+deploy track's adapter lives in `src/adapters/deploy.ts`; its durable
+prepare artifact is `deploy_manifest.json`):
 
 - generic `command` adapter;
 - optional `octopus` adapter;
@@ -132,6 +134,90 @@ The packaged supervisor:
 - records terminal exit state;
 - stops the process group with `SIGTERM`, then `SIGKILL` when necessary;
 - acts as a subreaper to avoid orphaned descendants.
+
+## Deploy track (optional)
+
+Disabled by default. The deploy track is independent from the implementation
+lifecycle and does not chain automatically from it.
+
+```text
+development_cycle
+  |-- implementation lifecycle  (existing: src/core/state-machine.ts)
+  |-- deploy track              (new, optional)
+  `-- security track            (separate handoff)
+```
+
+Still one OpenClaw tool (`development_cycle`). Deploy state is durable and
+separate from `status.phase`.
+
+### Actions
+
+`deploy_prepare`, `deploy_execute`, `deploy_verify`, `deploy_status`, and
+optionally `deploy_stop`. `deploy_status` is read-only; the rest are
+track-scoped and do not mutate the implementation cycle. `deploy_prepare`
+must not mutate production. `deploy_execute` requires a prepared manifest and
+fails closed when `requiredAuthorizations` are declared without explicit
+`authorizationText` evidence; authorization is never inferred from chat or
+history. `deploy_verify` is bounded and its failure surfaces rollback metadata
+without automatically rolling back.
+
+### Independent status set
+
+Deploy status values are local to this track, not part of
+`src/core/state-machine.ts`:
+
+```text
+prepared
+prepare_failed
+execution_launched
+execution_running
+deployed
+execution_failed
+verification_running
+verified
+verification_failed
+stopped
+```
+
+### Storage and durable artifacts
+
+Deploy state lives outside `runs/`:
+
+```text
+<state-root>/tracks/deploy/<project>/<deployId>/
+  deploy_status.json
+  deploy_request.json
+  deploy_manifest.json
+  authorization_evidence.md      # only when provided
+  rollback.json
+  prepare/
+  execute/attempts/<attemptId>/
+  verify/attempts/<attemptId>/
+```
+
+A deploy can exist without a development `runId`; `sourceRunId` is optional
+metadata only. The exact source commit is persisted before execute. Retries use
+immutable attempt directories and never reuse terminal markers, logs, or status
+from a prior attempt. Verification failure does not auto-rollback. The
+prepare step's durable artifact is `deploy_manifest.json`; see
+`src/adapters/deploy.ts` for the adapter that emits it.
+
+### Adapter and supervision
+
+Deployment logic belongs in an adapter, not `src/index.ts`. The deploy
+adapter (`src/adapters/deploy.ts`) reuses the generic command adapter for
+`prepare | execute | verify` — `deploy_manifest.json` is the `prepare`
+artifact — via the same supervisor used by the implementation adapter
+(`src/adapters/implementation.ts`) runner; execution is supervised and
+observable and is distinct from verification. See [Adapters](adapters.md) and
+[Configuration](configuration.md).
+
+### V1 non-goals
+
+Automatic chaining from the implementation lifecycle, security gating, CI/CD
+environment promotion graphs, canary/blue-green rollouts, secret management,
+Docker/Cloudflare/GitHub logic in core, and authorization heuristics are out of
+scope for v1.
 
 ## Trust boundaries
 

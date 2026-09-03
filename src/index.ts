@@ -1199,9 +1199,11 @@ async function detectOctopusReviewInfrastructureFailure(stdoutPath: string, stde
   const stdout = stdoutPath ? await textTail(stdoutPath, 60000) : "";
   const stderr = stderrPath ? await textTail(stderrPath, 30000) : "";
   const text = `${stdout}\n${stderr}`;
-  const noChanges = text.match(/No changes found to review/i);
-  const contextualReview = text.match(/Contextual code review|contextual review|review returned non-zero|did not produce a clean exit|completed with code\s*[1-9]/i);
-  const contraindication = text.match(/(?:\b401\b|\b403\b|unauthori[sz]ed|missing bearer|authentication (?:failed|error)|oauth (?:failed|error)|\b429\b|rate[ -]?limit|quota|insufficient_quota|billing|payment required|timed? out|timeout|provider (?:failed|error)|network (?:failed|error)|connection (?:failed|reset|refused))/i);
+  const reviewMarker = text.toLowerCase().lastIndexOf("contextual code review");
+  const reviewText = reviewMarker >= 0 ? text.slice(reviewMarker) : text;
+  const noChanges = reviewText.match(/No changes found to review/i);
+  const contextualReview = reviewText.match(/Contextual code review|contextual review|review returned non-zero|did not produce a clean exit|completed with code\s*[1-9]/i);
+  const contraindication = reviewText.match(/(?:\b401\b|\b403\b|unauthori[sz]ed|missing bearer|authentication (?:failed|error)|oauth (?:failed|error)|\b429\b|rate[ -]?limit|quota|insufficient_quota|billing|payment required|timed out|timeout (?:exceeded|after|while|waiting|reached)|exit(?:ed)?(?: code)? 124|provider (?:failed|error)|network (?:failed|error)|connection (?:failed|reset|refused))/i);
   if (!noChanges || !contextualReview || contraindication) {
     return {
       ok: false,

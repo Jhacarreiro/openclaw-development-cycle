@@ -87,6 +87,7 @@ test("review infrastructure failure preserves and resumes the exact Octopus outp
   const session = JSON.parse(await readFile(launched.directImplementationStatus, "utf8"));
   await writeFile(session.stdoutPath || session.logs?.stdout, [
     "Quality Gate: CHALLENGED (100% complete)",
+    "Earlier planning text mentions VERIFICATION_TIMEOUT_SECONDS=300 but no runtime timeout occurred.",
     "Step 4: Contextual code review (initial)...",
     "No changes found to review",
     "Contextual review did not produce a clean exit after 1 attempt(s).",

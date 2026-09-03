@@ -67,6 +67,19 @@ Use the returned `allowedPhases`. Do not edit `status.json` to bypass the state 
 
 This is expected. Adapter exit, validation, and acceptance are separate stages. Run `reconcile`, request final validation, record `go`, `revise`, or `stop`, and then close the cycle.
 
+## Octopus produced output but contextual review says `No changes found to review`
+
+Run `reconcile` first. If and only if the cycle reports:
+
+```text
+phase: review_infrastructure_failed
+reviewInfrastructureResumeEligible: true
+```
+
+then call `resume_finalization` for the same project/run. The tool revalidates the exact Octopus attempt manifest, source repository, integration worktree, and expected run branch before returning to `implementation_delivered`. It persists recovery evidence and requires `run_final_validation` next.
+
+Do not use this path for authentication failures, timeouts, build/test failures, real review findings, missing manifests, or changed output identity. Those remain fail-closed and require their normal recovery path.
+
 ## Notifications are skipped
 
 A notification requires:

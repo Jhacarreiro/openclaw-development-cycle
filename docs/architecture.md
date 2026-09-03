@@ -109,12 +109,15 @@ waiting_external_plan
   -> plan_ready_for_implementation
   -> implementation_launched / implementation_running
   -> implementation_delivered
+  -> review_infrastructure_failed --resume_finalization--> implementation_delivered
   -> waiting_final_validation
   -> final_validated | final_revised | stopped
   -> repository delivery (success or partial)
   -> merged | delivery_published | closed_partial | closed_invalid
 
 `start_corrections` remains available only for explicit/manual correction workflows; a final `revise` terminates the current plan as a partial delivery instead of automatically entering another correction loop.
+
+`review_infrastructure_failed` is deliberately narrow: it requires a non-zero Octopus attempt, a validated output handoff, and explicit contextual-review `No changes found to review` evidence. Its only recovery action is `resume_finalization`, which re-resolves the same Tangle manifest and rejects changed or untrusted output identity. It does not skip mechanical final validation.
 ```
 
 There are no legacy Octopus action or phase aliases in the public contract.

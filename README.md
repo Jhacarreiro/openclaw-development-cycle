@@ -135,6 +135,7 @@ stop
 | `status` | Read persisted state without mutation. |
 | `reconcile` | Refresh runtime state and apply enabled follow-up behavior. |
 | `stop_implementation` | Stop the supervised process group. |
+| `resume_finalization` | Revalidate a preserved Octopus output after a narrowly classified review-infrastructure-only failure; never relaunches implementation. |
 | `record_delivery` | Record externally supplied delivery evidence. |
 | `run_final_validation` | Run configured validation commands. |
 | `request_final_validation` | Build the final validation pack. |
@@ -143,6 +144,8 @@ stop
 | `close` | Close a validated or stopped cycle. |
 
 Invalid phase transitions are rejected by the state machine.
+
+When an Octopus attempt exits non-zero only because contextual review infrastructure explicitly reports `No changes found to review`, while a trusted Tangle output handoff is already materialized, `reconcile` records `review_infrastructure_failed` instead of flattening the run into a generic implementation failure. The output is preserved and marked resume-eligible. `resume_finalization` revalidates the exact attempt manifest, source checkout, worktree, and branch before moving back to `implementation_delivered`; `run_final_validation` is still mandatory before final review or repository delivery. Other non-zero failures do not use this recovery path.
 
 ### Approved-plan normalization
 

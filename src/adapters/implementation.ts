@@ -1,5 +1,8 @@
 import { readFileSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+
+const DEVELOPMENT_CYCLE_BIN_DIR = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", "bin");
 
 export type ImplementationAdapterKind = "command" | "octopus";
 export type ImplementationMode = "delivery" | "corrections";
@@ -169,6 +172,7 @@ export function buildImplementationLaunchSpec(
       ],
       env: {
         ...genericEnv,
+        PATH: `${DEVELOPMENT_CYCLE_BIN_DIR}:${process.env.PATH || ""}`,
         OCTOPUS_CODEX_SANDBOX: config.octopusSandbox,
         OCTOPUS_TANGLE_RUN_ID: String(input.attemptId),
         ...octopusRoutedSeatEnvironment(),

@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import test from "node:test";
 import {
   buildImplementationLaunchSpec,
@@ -75,6 +77,9 @@ test("Octopus adapter translates the generic request into orchestrate.sh", () =>
   assert.equal(spec.env.DEVELOPMENT_CYCLE_ATTEMPT_ID, "delivery-attempt-1");
   assert.equal(spec.env.OCTOPUS_TANGLE_RUN_ID, "delivery-attempt-1");
   assert.equal(spec.env.OCTOPUS_PRESERVE_CALLER_PROCESS_GROUP, "true");
+  assert.match(spec.env.PATH, /development-cycle\/bin:/);
+  assert.equal(Object.hasOwn(spec.env, "CODEX_HOME"), false);
+  assert.equal(Object.keys(spec.env).some((key) => /TOKEN|SECRET|PASSWORD/.test(key)), false);
   assert.equal(spec.env.LOOP_UNTIL_APPROVED, "true");
   assert.equal(spec.env.OCTOPUS_AGENT_ROOT_SESSION_ID, "session-1");
   assert.equal(spec.env.CRABFLEET_ROOT_SESSION_ID, "session-1");
@@ -145,6 +150,48 @@ test("Octopus adapter maps canonical role routes into Octopus review seat identi
     if (previousHome === undefined) delete process.env.HOME;
     else process.env.HOME = previousHome;
     rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("Codex bridge reads the OpenClaw OAuth profile directly without provider discovery", () => {
+  const bridgePath = fileURLToPath(new URL("../bin/codex-openclaw-bridge.py", import.meta.url));
+  const bridge = readFileSync(bridgePath, "utf8");
+  assert.match(bridge, /ensureAuthProfileStore/);
+  assert.match(bridge, /openai:default/);
+  assert.match(bridge, /p\.access/);
+  assert.match(bridge, /p\.accountId/);
+  assert.match(bridge, /p\.chatgptPlanType/);
+  assert.match(bridge, /expired or near expiry/);
+  assert.match(bridge, /chatgptAuthTokens/);
+  assert.match(bridge, /account\/login\/start/);
+  assert.match(bridge, /CODEX_HOME/);
+  assert.doesNotMatch(bridge, /resolveApiKeyForProvider/);
+  assert.doesNotMatch(bridge, /auth\.json/);
+  assert.doesNotMatch(bridge, /auth-profiles\.json/);
+  assert.doesNotMatch(bridge, /\/data\//);
+});
+
+test("Codex bridge discovers and forwards to the real CLI for non-exec commands", () => {
+  const root = mkdtempSync(join(tmpdir(), "development-cycle-codex-bridge-"));
+  const fakeBinDir = join(root, "real");
+  mkdirSync(fakeBinDir, { recursive: true });
+  const fakeCodex = join(fakeBinDir, "codex");
+  writeFileSync(fakeCodex, "#!/bin/sh\nprintf '%s\\n' REAL_CODEX_OK\n");
+  chmodSync(fakeCodex, 0o755);
+
+  try {
+    const shimPath = fileURLToPath(new URL("../bin/codex", import.meta.url));
+    const bridgeBin = fileURLToPath(new URL("../bin/", import.meta.url));
+    const stdout = execFileSync(shimPath, ["--version"], {
+      encoding: "utf8",
+      env: {
+        PATH: `${bridgeBin}:${fakeBinDir}:/usr/bin:/bin`,
+        HOME: root,
+      },
+    });
+    assert.equal(stdout.trim(), "REAL_CODEX_OK");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
   }
 });
 

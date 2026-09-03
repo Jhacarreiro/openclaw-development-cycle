@@ -172,7 +172,9 @@ export DEVELOPMENT_CYCLE_OCTOPUS_ROOT=/path/to/claude-octopus
 export DEVELOPMENT_CYCLE_OCTOPUS_SANDBOX=workspace-write
 ```
 
-The adapter translates the generic cycle request into Octopus `scripts/orchestrate.sh` calls. Octopus council review remains available only when this adapter is active.
+The adapter translates the generic cycle request into Octopus `scripts/orchestrate.sh` calls. For Codex seats, it prepends an owned compatibility bridge that reads the existing OpenClaw `openai` OAuth profile directly from the public auth-profile store at runtime and passes ephemeral ChatGPT auth to `codex app-server`. It does not require or persist a separate Codex CLI login under `CODEX_HOME`. Non-Codex providers and Octopus model routing remain unchanged.
+
+Octopus council review remains available only when this adapter is active.
 
 See [Adapters](docs/adapters.md) and [Configuration](docs/configuration.md).
 

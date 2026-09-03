@@ -42,6 +42,8 @@ export DEVELOPMENT_CYCLE_IMPLEMENTATION_ADAPTER=octopus
 export DEVELOPMENT_CYCLE_OCTOPUS_ROOT=$HOME/src/claude-octopus
 ```
 
+No additional Codex OAuth variable is required for the Octopus adapter. Codex seats reuse the OpenClaw `openai` OAuth profile at launch time through the owned bridge without provider discovery and do not require a persistent `CODEX_HOME/auth.json`.
+
 A tool call may override the configured adapter with `implementationAdapter` and the adapter subcommand with `implementationCommand`.
 
 See [Implementation adapters](adapters.md).

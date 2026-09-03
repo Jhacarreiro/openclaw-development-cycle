@@ -87,6 +87,12 @@ export DEVELOPMENT_CYCLE_OCTOPUS_SANDBOX=workspace-write
 
 When the optional observer integration is enabled, the adapter maps generic observer metadata to the Octopus and Crabfleet lifecycle environment expected by that ecosystem.
 
+Codex seats use the owned `bin/codex` compatibility shim. The shim intercepts non-interactive `codex exec` calls, reads the current OpenClaw `openai` OAuth profile directly through the public auth-profile store API, and supplies the resulting ChatGPT auth ephemerally to `codex app-server`. The shim creates a temporary empty `CODEX_HOME` for the child process and removes it afterwards, so Octopus does not depend on a second persistent `$OPENCLAW_STATE_DIR/codex/auth.json`.
+
+The bridge is deliberately narrow: it does not choose models, alter canonical Octopus role routing, copy OAuth credentials into repository/runtime state, or patch Octopus upstream. Commands other than `codex exec` are forwarded to the real Codex CLI unchanged.
+
+If the OpenClaw OAuth profile cannot be resolved, the bridge fails closed before launching a Codex turn.
+
 When Octopus `providers.json` contains exact `{provider, model}` routes, the adapter treats those canonical routing roles as the single source of truth for model selection. It maps them into upstream model-qualified seat overrides at launch time: Design Review uses `implementer`, `researcher`, `code-reviewer`, and `synthesizer`; contextual review maps logic/verifier to `code-reviewer`, security to `security-reviewer`, architecture to `architect`, CVE research to `researcher`, diversity/debate to `strategist`, and synthesis to `synthesizer`. The emitted `OCTOPUS_*_AGENT` values are transport only and are not a second persistent model table. Explicit process-level seat overrides take precedence; missing, malformed, or non-exact role routes leave upstream Octopus behavior unchanged.
 
 Council review and council-driven corrections are adapter-specific capabilities and only run when the active adapter is `octopus`. An explicit `autoCouncilCorrectionsMax: 0` disables automatic council corrections: the cycle records `council_review_waiting_human` immediately instead of silently falling back to the default two correction attempts.

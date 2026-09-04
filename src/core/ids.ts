@@ -20,10 +20,12 @@ function identityDigest(raw: string): string {
 }
 
 const DIGEST_MARK = "-id-";
-const DIGEST_PATTERN = /-id-[0-9a-f]{64}$/;
+const DIGEST_SUFFIX_PATTERN = /-id-[0-9a-f]{64}$/;
+const CANONICAL_ID_PATTERN = /^[a-zA-Z0-9._-]+-id-[0-9a-f]{64}$/;
 
-export function isCanonicalId(input: unknown): boolean {
-  return DIGEST_PATTERN.test(String(input ?? ""));
+export function isCanonicalId(input: unknown, maxLength = CLEAN_ID_MAX_LENGTH): boolean {
+  const raw = String(input ?? "");
+  return raw.length > 0 && raw.length <= maxLength && raw !== "." && raw !== ".." && CANONICAL_ID_PATTERN.test(raw);
 }
 
 export function cleanId(input: unknown, fallback = "run", maxLength = CLEAN_ID_MAX_LENGTH): string {
@@ -44,7 +46,7 @@ export function cleanId(input: unknown, fallback = "run", maxLength = CLEAN_ID_M
   if (dotToken) return fallback;
   const base = sanitized ? sanitized : fallback;
   const emptyInput = !trimmed;
-  const alreadyReserved = DIGEST_PATTERN.test(base);
+  const alreadyReserved = DIGEST_SUFFIX_PATTERN.test(base);
   // Reserve the digest-shaped namespace too. A literal clean input such as
   // "foo-id-<sha256>" must not alias the canonical identifier generated for
   // some different raw input. Marker-shaped literals are escaped by hashing
@@ -56,20 +58,20 @@ export function cleanId(input: unknown, fallback = "run", maxLength = CLEAN_ID_M
   const suffix = `${DIGEST_MARK}${digest}`;
   const prefixLength = maxLength - suffix.length;
   if (prefixLength < 1) return digest.slice(0, maxLength);
-  const prefix = (alreadyReserved ? base.replace(DIGEST_PATTERN, "") : base).slice(0, prefixLength);
+  const prefix = (alreadyReserved ? base.replace(DIGEST_SUFFIX_PATTERN, "") : base).slice(0, prefixLength);
   return `${prefix}${suffix}`;
 }
 
 export function idPathCandidates(input: unknown, fallback = "run", maxLength = CLEAN_ID_MAX_LENGTH): string[] {
   const next = cleanId(input, fallback, maxLength);
   const prev = legacyCleanId(input, fallback, maxLength);
-  if (prev === next || /^\.+$/.test(prev) || isCanonicalId(prev)) return [next];
+  if (prev === next || /^\.+$/.test(prev) || isCanonicalId(prev, maxLength)) return [next];
   return [next, prev];
 }
 
 export function projectPathCandidates(input: unknown, fallback = "run", maxLength = CLEAN_ID_MAX_LENGTH): string[] {
   const raw = String(input ?? "");
-  if (isCanonicalId(raw)) return [raw];
+  if (isCanonicalId(raw, maxLength)) return [raw];
   return idPathCandidates(input, fallback, maxLength);
 }
 

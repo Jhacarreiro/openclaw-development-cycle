@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { access, mkdir, mkdtemp, readFile, readdir, rename, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, sep } from "node:path";
 import test from "node:test";
 import { acquireLock, createFilesystemStore } from "../dist/storage/filesystem.js";
 import { cleanId } from "../dist/core/ids.js";
@@ -311,4 +311,18 @@ test("reused canonical project IDs stay in the same physical project directory",
 
   const second = store.runDir(canonicalProject, "Run-2");
   assert.equal(second, join(root, "runs", canonicalProject, "Run-2"));
+});
+
+test("traversal-shaped digest suffixes cannot escape the storage root", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "development-cycle-canonical-traversal-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const store = createFilesystemStore(root);
+  const digest = "b".repeat(64);
+  const rawProject = `../outside-id-${digest}`;
+  const rawRun = `..\\run-id-${digest}`;
+
+  const dir = store.runDir(rawProject, rawRun);
+  const expectedRoot = join(root, "runs");
+  assert.equal(dir.startsWith(expectedRoot + sep), true, dir);
+  assert.equal(dir.includes(".." + sep), false, dir);
 });

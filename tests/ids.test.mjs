@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { join, relative } from "node:path";
 import test from "node:test";
-import { cleanId, idPathCandidates, legacyCleanId, newRunId, projectPathCandidates } from "../dist/core/ids.js";
+import { cleanId, idPathCandidates, isCanonicalId, legacyCleanId, newRunId, projectPathCandidates } from "../dist/core/ids.js";
 
 const ALPHA_BETA_RAW = "  alpha / beta  ";
 const ALPHA_BETA_DIGEST = createHash("sha256").update(ALPHA_BETA_RAW).digest("hex");
@@ -108,4 +108,12 @@ test("newRunId keeps reused canonical project IDs stable", () => {
   const now = new Date("2026-07-16T12:34:56.000Z");
   const id = newRunId(project, now);
   assert.ok(id.startsWith(`${project.slice(0, 95)}-20260716123456000-`), id);
+});
+
+test("canonical IDs reject traversal-shaped suffix lookalikes", () => {
+  const digest = "a".repeat(64);
+  assert.equal(isCanonicalId(`safe-id-${digest}`), true);
+  assert.equal(isCanonicalId(`../outside-id-${digest}`), false);
+  assert.equal(isCanonicalId(`..\\outside-id-${digest}`), false);
+  assert.equal(isCanonicalId(`/absolute-id-${digest}`), false);
 });

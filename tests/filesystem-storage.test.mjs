@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { access, mkdir, mkdtemp, readFile, readdir, rename, rm, stat, utimes, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, readdir, rename, rm, stat, symlink, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, sep } from "node:path";
 import test from "node:test";
 import { acquireLock, createFilesystemStore } from "../dist/storage/filesystem.js";
-import { cleanId } from "../dist/core/ids.js";
+import { cleanId, legacyCleanId } from "../dist/core/ids.js";
 
 function unusedPid() {
   for (let pid = 100000; pid < 200000; pid += 1) {
@@ -325,4 +325,47 @@ test("traversal-shaped digest suffixes cannot escape the storage root", async (t
   const expectedRoot = join(root, "runs");
   assert.equal(dir.startsWith(expectedRoot + sep), true, dir);
   assert.equal(dir.includes(".." + sep), false, dir);
+});
+test("legacy resolver rejects symlinked candidate directories", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "development-cycle-legacy-symlink-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const store = createFilesystemStore(root);
+
+  const rawProject = "Project / One";
+  const rawRun = "Run #1";
+  const legacyProject = legacyCleanId(rawProject);
+  const legacyRun = legacyCleanId(rawRun);
+  const runsRoot = join(root, "runs");
+  const outside = await mkdtemp(join(tmpdir(), "development-cycle-outside-legacy-"));
+  t.after(() => rm(outside, { recursive: true, force: true }));
+
+  await mkdir(join(outside, legacyRun), { recursive: true });
+  await mkdir(runsRoot, { recursive: true });
+  await symlink(outside, join(runsRoot, legacyProject), "dir");
+
+  const resolved = store.runDir(rawProject, rawRun);
+  assert.equal(resolved, join(runsRoot, cleanId(rawProject), cleanId(rawRun)));
+});
+
+test("legacy resolver preserves a complete project-run pair instead of mixing candidates", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "development-cycle-legacy-pair-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const store = createFilesystemStore(root);
+
+  const rawProject = "Project / One";
+  const rawRun = "Run #1";
+  const canonicalProject = cleanId(rawProject);
+  const canonicalRun = cleanId(rawRun);
+  const legacyProject = legacyCleanId(rawProject);
+  const legacyRun = legacyCleanId(rawRun);
+  const runsRoot = join(root, "runs");
+
+  const mixedA = join(runsRoot, canonicalProject, legacyRun);
+  const mixedB = join(runsRoot, legacyProject, canonicalRun);
+  const legacyPair = join(runsRoot, legacyProject, legacyRun);
+  await mkdir(mixedA, { recursive: true });
+  await mkdir(mixedB, { recursive: true });
+  await mkdir(legacyPair, { recursive: true });
+
+  assert.equal(store.runDir(rawProject, rawRun), legacyPair);
 });

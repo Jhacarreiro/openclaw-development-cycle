@@ -1,6 +1,6 @@
 import { appendFile, mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
-import { statSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { lstatSync, realpathSync } from "node:fs";
+import { dirname, join, relative, sep } from "node:path";
 import { cleanId, idPathCandidates, projectPathCandidates } from "../core/ids.js";
 
 // mkdir-based lock: atomic on POSIX. An owner token (pid:nonce) is written
@@ -131,25 +131,33 @@ export interface FilesystemStore {
   appendJsonl(path: string, data: unknown): Promise<void>;
 }
 
-function existingDir(path: string): boolean {
+function existingContainedDir(path: string, root: string): boolean {
   try {
-    return statSync(path).isDirectory();
+    if (!lstatSync(path).isDirectory() || lstatSync(path).isSymbolicLink()) return false;
+    const realRoot = realpathSync(root);
+    const realPath = realpathSync(path);
+    const rel = relative(realRoot, realPath);
+    return rel !== "" && rel !== ".." && !rel.startsWith(".." + sep) && !rel.startsWith(sep);
   } catch {
     return false;
   }
 }
 
 export function createFilesystemStore(stateRoot: string, now: () => Date = () => new Date()): FilesystemStore {
+  const runsRoot = join(stateRoot, "runs");
   const runDir = (project: unknown, runId: unknown) => {
     const projects = projectPathCandidates(project);
     const runs = idPathCandidates(runId);
-    for (const projectId of projects) {
-      for (const run of runs) {
-        const candidate = join(stateRoot, "runs", projectId, run);
-        if (existingDir(candidate)) return candidate;
-      }
+    const canonical = [projects[0]!, runs[0]!] as const;
+    const legacy = [projects[1] ?? projects[0]!, runs[1] ?? runs[0]!] as const;
+    const pairs = canonical[0] === legacy[0] && canonical[1] === legacy[1] ? [canonical] : [canonical, legacy];
+    for (const [projectId, run] of pairs) {
+      const projectDir = join(runsRoot, projectId);
+      const candidate = join(projectDir, run);
+      if (!existingContainedDir(projectDir, runsRoot)) continue;
+      if (existingContainedDir(candidate, runsRoot)) return candidate;
     }
-    return join(stateRoot, "runs", projects[0]!, runs[0]!);
+    return join(runsRoot, canonical[0], canonical[1]);
   };
 
   const loadJson = async <T extends object = Record<string, unknown>>(path: string): Promise<T> => {

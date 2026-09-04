@@ -129,3 +129,68 @@ test("project-level status discovers a valid run whose id contains .lock", async
   assert.equal(status.details.dir, runDir);
   assert.equal(status.details.status.phase, "planned");
 });
+
+test("explicit raw run ids reopen legacy sanitized state", async (t) => {
+  const root = join(tmpdir(), `development-cycle-explicit-legacy-${process.pid}-${Date.now()}`);
+  t.after(() => rm(root, { recursive: true, force: true }));
+
+  process.env.DEVELOPMENT_CYCLE_STATE_ROOT = join(root, "state");
+  process.env.DEVELOPMENT_CYCLE_PROJECT_DOCS_ROOT = join(root, "docs");
+  process.env.DEVELOPMENT_CYCLE_NOTIFICATIONS_ENABLED = "false";
+  process.env.DEVELOPMENT_CYCLE_OBSERVER_ENABLED = "false";
+
+  const legacyProject = "Project-One";
+  const legacyRunId = "Run-1";
+  const legacyDir = join(root, "state", "runs", legacyProject, legacyRunId);
+  await mkdir(legacyDir, { recursive: true });
+  await writeFile(join(legacyDir, "status.json"), `${JSON.stringify({ phase: "planned", project: legacyProject, runId: legacyRunId }, null, 2)}\n`);
+
+  const { default: plugin } = await import(`../dist/index.js?explicit-legacy=${Date.now()}`);
+  let registered;
+  plugin.register({ pluginConfig: {}, registerTool(tool) { registered = tool; } });
+
+  const status = await registered.execute(
+    "explicit-legacy-status",
+    { action: "status", project: "Project / One", runId: "Run #1" },
+    undefined,
+    undefined,
+  );
+
+  assert.equal(status.details.ok, true, JSON.stringify(status.details));
+  assert.equal(status.details.dir, legacyDir);
+  assert.equal(status.details.project, legacyProject);
+  assert.equal(status.details.runId, legacyRunId);
+  assert.equal(status.details.status.phase, "planned");
+});
+
+test("explicit digest-shaped legacy run ids remain readable", async (t) => {
+  const root = join(tmpdir(), `development-cycle-marker-legacy-${process.pid}-${Date.now()}`);
+  t.after(() => rm(root, { recursive: true, force: true }));
+
+  process.env.DEVELOPMENT_CYCLE_STATE_ROOT = join(root, "state");
+  process.env.DEVELOPMENT_CYCLE_PROJECT_DOCS_ROOT = join(root, "docs");
+  process.env.DEVELOPMENT_CYCLE_NOTIFICATIONS_ENABLED = "false";
+  process.env.DEVELOPMENT_CYCLE_OBSERVER_ENABLED = "false";
+
+  const project = "legacy-marker-project";
+  const legacyRunId = `run-id-${"a".repeat(64)}`;
+  const legacyDir = join(root, "state", "runs", project, legacyRunId);
+  await mkdir(legacyDir, { recursive: true });
+  await writeFile(join(legacyDir, "status.json"), `${JSON.stringify({ phase: "planned", project, runId: legacyRunId }, null, 2)}\n`);
+
+  const { default: plugin } = await import(`../dist/index.js?marker-legacy=${Date.now()}`);
+  let registered;
+  plugin.register({ pluginConfig: {}, registerTool(tool) { registered = tool; } });
+
+  const status = await registered.execute(
+    "marker-legacy-status",
+    { action: "status", project, runId: legacyRunId },
+    undefined,
+    undefined,
+  );
+
+  assert.equal(status.details.ok, true, JSON.stringify(status.details));
+  assert.equal(status.details.dir, legacyDir);
+  assert.equal(status.details.runId, legacyRunId);
+  assert.equal(status.details.status.phase, "planned");
+})

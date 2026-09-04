@@ -2588,9 +2588,9 @@ async function projectCycle(params: any) {
   // the documented no-run response BEFORE normalizing it into a run id.
   const requestedRunId = params.runId || (createRun ? newRunId(rawProject) : await latestRunId(rawProject));
   if (!requestedRunId) return { ok: true, project, runId: null, dir: null, status: null, files: [], nextAction: "request_plan or record_plan" };
-  const runId = cleanId(requestedRunId);
-  const dir = cycleDir(rawProject, runId);
+  const dir = cycleDir(rawProject, requestedRunId);
   project = basename(dirname(dir));
+  const runId = basename(dir);
   if (action !== "status" && params[lifecycleLockHeld] !== true) {
     await mkdir(dir, { recursive: true });
     let lifecycleLock: Awaited<ReturnType<typeof acquireLock>>;

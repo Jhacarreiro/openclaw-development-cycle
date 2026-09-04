@@ -11,6 +11,7 @@ import { randomUUID } from "node:crypto";
 import { ACTIONS, checkActionTransition } from "./core/state-machine.js";
 import { parseFinalDecision } from "./core/decisions.js";
 import { cleanId, newRunId as createRunId } from "./core/ids.js";
+import { pathWithin as nfcPathWithin, containedRelativePath } from "./core/paths.js";
 import { nextStallQuietAccounting } from "./core/stall-accounting.js";
 import { councilNeedsCorrectionsText, resolveAutoCouncilCorrectionsMax } from "./core/council-policy.js";
 import { inferDeliveryClassification } from "./core/delivery-classification.js";
@@ -816,15 +817,21 @@ function resolveTrustedProjectWikiPath(project: string, ...candidates: Array<str
   for (const c of candidates) {
     if (!c) continue;
     const abs = resolve(String(c));
-    if (pathWithin(projectsWikiRoot, abs)) return abs;
+    if (pathWithin(projectsWikiRoot, abs) && abs !== resolve(projectsWikiRoot)) return abs;
   }
   return fallback;
 }
 
+// NFC-aware containment with inode verification for Unicode-form aliases
+// (from fix/pathwithin-nfc-normalize); same call contract as the lexical version.
 function pathWithin(root: string, candidate: string) {
   if (!root || !candidate) return false;
-  const rel = relative(resolve(root), resolve(candidate)).replace(/\\/g, "/");
-  return Boolean(rel) && rel !== ".." && !rel.startsWith("../") && !rel.startsWith("/");
+  const a = resolve(root);
+  const b = resolve(candidate);
+  // Descendant-only: the shared wiki/docs root (and NFC/NFD aliases of it)
+  // must not count as a project wiki destination.
+  if (a === b || a.normalize("NFC") === b.normalize("NFC")) return false;
+  return nfcPathWithin(a, b);
 }
 
 /** True if candidate resolves inside any allowed root (or equals a root). */
@@ -961,11 +968,9 @@ async function readAllowedTextFile(pathValue: string, roots: Array<any>, errorCo
       rootHandle = pinnedRoot.handle;
       current = rootHandle;
       const pinnedRealRoot = pinnedRoot.realPath || await realpath(pinnedRoot.procPath);
-      let rel = "";
-      if (pathWithin(absRoot, abs)) rel = relative(absRoot, abs).replace(/\\/g, "/");
-      else if (pathWithin(pinnedRealRoot, abs)) rel = relative(pinnedRealRoot, abs).replace(/\\/g, "/");
-      else continue;
-      if (!rel || rel === ".." || rel.startsWith("../") || rel.startsWith("/")) continue;
+      let rel = containedRelativePath(absRoot, abs);
+      if (rel == null) rel = containedRelativePath(pinnedRealRoot, abs);
+      if (!rel) continue;
 
       const parts = rel.split("/").filter(Boolean);
       const readyFile = String(process.env.DEVELOPMENT_CYCLE_TEST_PINNED_ALLOWED_READ_READY_FILE || "").trim();
@@ -1001,10 +1006,9 @@ async function openPinnedContainedDir(target: string, root: string, create = fal
   const pinnedRoot = create ? await openOrCreateStableDirectory(absRoot) : await openStableDirectory(absRoot);
   if (!pinnedRoot) return null;
   const realRoot = pinnedRoot.realPath;
-  let targetRel = "";
-  if (absTarget === absRoot || pathWithin(absRoot, absTarget)) targetRel = relative(absRoot, absTarget).replace(/\\/g, "/");
-  else if (absTarget === realRoot || pathWithin(realRoot, absTarget)) targetRel = relative(realRoot, absTarget).replace(/\\/g, "/");
-  else {
+  let targetRel = containedRelativePath(absRoot, absTarget);
+  if (targetRel == null) targetRel = containedRelativePath(realRoot, absTarget);
+  if (targetRel == null) {
     await pinnedRoot.handle.close().catch(() => null);
     return null;
   }

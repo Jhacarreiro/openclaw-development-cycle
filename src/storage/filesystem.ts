@@ -1,6 +1,7 @@
 import { appendFile, mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
-import { cleanId } from "../core/ids.js";
+import { lstatSync, realpathSync } from "node:fs";
+import { dirname, join, relative, sep } from "node:path";
+import { cleanId, idPathCandidates, projectPathCandidates } from "../core/ids.js";
 
 // mkdir-based lock: atomic on POSIX. An owner token (pid:nonce) is written
 // into the lock dir so release/write can refuse to touch a replacement lock.
@@ -130,9 +131,61 @@ export interface FilesystemStore {
   appendJsonl(path: string, data: unknown): Promise<void>;
 }
 
+function existingContainedDir(path: string, root: string): boolean {
+  try {
+    const info = lstatSync(path);
+    if (!info.isDirectory() || info.isSymbolicLink()) return false;
+    const realRoot = realpathSync(root);
+    const realPath = realpathSync(path);
+    const rel = relative(realRoot, realPath);
+    return rel !== "" && rel !== ".." && !rel.startsWith(".." + sep) && !rel.startsWith(sep);
+  } catch {
+    return false;
+  }
+}
+
+function canonicalFallbackPath(runsRoot: string, projectId: string, runId: string): string {
+  const projectDir = join(runsRoot, projectId);
+  const candidate = join(projectDir, runId);
+  try {
+    const runsInfo = lstatSync(runsRoot);
+    if (!runsInfo.isDirectory() || runsInfo.isSymbolicLink()) throw new Error("unsafe runs root: " + runsRoot);
+  } catch (err: any) {
+    if (err?.code !== "ENOENT") throw err;
+    return candidate;
+  }
+  try {
+    const projectInfo = lstatSync(projectDir);
+    if (!projectInfo.isDirectory() || projectInfo.isSymbolicLink() || !existingContainedDir(projectDir, runsRoot)) throw new Error("unsafe canonical project directory: " + projectDir);
+  } catch (err: any) {
+    if (err?.code !== "ENOENT") throw err;
+    return candidate;
+  }
+  try {
+    const candidateInfo = lstatSync(candidate);
+    if (!candidateInfo.isDirectory() || candidateInfo.isSymbolicLink() || !existingContainedDir(candidate, runsRoot)) throw new Error("unsafe canonical run directory: " + candidate);
+  } catch (err: any) {
+    if (err?.code !== "ENOENT") throw err;
+  }
+  return candidate;
+}
+
 export function createFilesystemStore(stateRoot: string, now: () => Date = () => new Date()): FilesystemStore {
-  const runDir = (project: unknown, runId: unknown) =>
-    join(stateRoot, "runs", cleanId(project), cleanId(runId));
+  const runsRoot = join(stateRoot, "runs");
+  const runDir = (project: unknown, runId: unknown) => {
+    const projects = projectPathCandidates(project);
+    const runs = idPathCandidates(runId);
+    const canonical = [projects[0]!, runs[0]!] as const;
+    const legacy = [projects[1] ?? projects[0]!, runs[1] ?? runs[0]!] as const;
+    const pairs = canonical[0] === legacy[0] && canonical[1] === legacy[1] ? [canonical] : [canonical, legacy];
+    for (const [projectId, run] of pairs) {
+      const projectDir = join(runsRoot, projectId);
+      const candidate = join(projectDir, run);
+      if (!existingContainedDir(projectDir, runsRoot)) continue;
+      if (existingContainedDir(candidate, runsRoot)) return candidate;
+    }
+    return canonicalFallbackPath(runsRoot, canonical[0], canonical[1]);
+  };
 
   const loadJson = async <T extends object = Record<string, unknown>>(path: string): Promise<T> => {
     try {

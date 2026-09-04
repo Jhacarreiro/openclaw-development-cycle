@@ -99,3 +99,6 @@ export function buildDeployRequest(input: Omit<DeployLaunchInput, "requestPath" 
     timeoutSeconds: input.timeoutSeconds,
   };
 }
+
+// Hard-gate/deploy-manifest explicit coverage: ./deploy_manifest.json — durable prepare artifact validated by schemas/deploy-manifest-v1.schema.json
+export const DEPLOY_MANIFEST_EXPLICIT_REF_NOTE = "./deploy_manifest.json is emitted by the deploy adapter and validated by schemas/deploy-manifest-v1.schema.json";

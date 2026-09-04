@@ -1199,12 +1199,24 @@ async function detectOctopusReviewInfrastructureFailure(stdoutPath: string, stde
   const stdout = stdoutPath ? await textTail(stdoutPath, 60000) : "";
   const stderr = stderrPath ? await textTail(stderrPath, 30000) : "";
   const text = `${stdout}\n${stderr}`;
-  const reviewMarker = text.toLowerCase().lastIndexOf("contextual code review");
-  const reviewText = reviewMarker >= 0 ? text.slice(reviewMarker) : text;
+  const lower = text.toLowerCase();
+  const noChangesIndex = lower.lastIndexOf("no changes found to review");
+  if (noChangesIndex < 0) return { ok: false, resumeEligible: false, contraindication: null };
+
+  // Octopus review output is not stable enough to require one literal heading.
+  // Prefer the nearest known review boundary before the final no-changes verdict.
+  const reviewBoundaries = [
+    lower.lastIndexOf("contextual code review", noChangesIndex),
+    lower.lastIndexOf("quality gate:", noChangesIndex),
+    lower.lastIndexOf("/octo:review", noChangesIndex),
+    lower.lastIndexOf("proof packet:", noChangesIndex),
+  ].filter((index) => index >= 0);
+  const reviewMarker = reviewBoundaries.length ? Math.max(...reviewBoundaries) : Math.max(0, noChangesIndex - 12000);
+  const reviewText = text.slice(reviewMarker);
   const noChanges = reviewText.match(/No changes found to review/i);
-  const contextualReview = reviewText.match(/Contextual code review|contextual review|review returned non-zero|did not produce a clean exit|completed with code\s*[1-9]/i);
+  const reviewEvidence = reviewText.match(/Contextual code review|\/octo:review|Quality Gate:|Proof packet:|This is NOT a clean review|zero providers returned results/i);
   const contraindication = reviewText.match(/(?:\b401\b|\b403\b|unauthori[sz]ed|missing bearer|authentication (?:failed|error)|oauth (?:failed|error)|\b429\b|rate[ -]?limit|quota|insufficient_quota|billing|payment required|timed out|timeout (?:exceeded|after|while|waiting|reached)|exit(?:ed)?(?: code)? 124|provider (?:failed|error)|network (?:failed|error)|connection (?:failed|reset|refused))/i);
-  if (!noChanges || !contextualReview || contraindication) {
+  if (!noChanges || !reviewEvidence || contraindication) {
     return {
       ok: false,
       resumeEligible: false,

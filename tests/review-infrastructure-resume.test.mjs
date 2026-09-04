@@ -86,11 +86,16 @@ test("review infrastructure failure preserves and resumes the exact Octopus outp
 
   const session = JSON.parse(await readFile(launched.directImplementationStatus, "utf8"));
   await writeFile(session.stdoutPath || session.logs?.stdout, [
-    "Quality Gate: CHALLENGED (100% complete)",
-    "Earlier planning text mentions VERIFICATION_TIMEOUT_SECONDS=300 but no runtime timeout occurred.",
-    "Step 4: Contextual code review (initial)...",
-    "No changes found to review",
-    "Contextual review did not produce a clean exit after 1 attempt(s).",
+    "Earlier provider task timed out and was retried successfully.",
+    "Retry progress: 3/3 tasks",
+    "SUCCESS: Recorded decision for phase 'validate_tangle_results'",
+    "Quality Gate: CHALLENGED (100% of tangle results succeeded)",
+    "Proof packet: /tmp/review-proof-packet",
+    "+-----------------------------------------------------------------+",
+    "|  /octo:review - Multi-LLM Code Review Results                  |",
+    "+-----------------------------------------------------------------+",
+    "WARNING: No changes found to review",
+    "This is NOT a clean review — zero providers returned results.",
   ].join("\n") + "\n");
   await writeFile(session.exitCodePath, "1\n");
   await writeFile(session.exitedAtPath, "2026-09-03T18:30:00Z\n");
@@ -146,10 +151,12 @@ test("review infrastructure failure preserves and resumes the exact Octopus outp
   }, null, 2));
   const blockedSession = JSON.parse(await readFile(blockedLaunch.directImplementationStatus, "utf8"));
   await writeFile(blockedSession.stdoutPath || blockedSession.logs?.stdout, [
-    "Step 4: Contextual code review (initial)...",
-    "No changes found to review",
+    "Quality Gate: CHALLENGED (100% of tangle results succeeded)",
+    "Proof packet: /tmp/review-proof-packet-auth",
+    "|  /octo:review - Multi-LLM Code Review Results                  |",
+    "WARNING: No changes found to review",
     "ERROR: 401 Unauthorized: Missing bearer or basic authentication in header",
-    "Contextual review did not produce a clean exit after 1 attempt(s).",
+    "This is NOT a clean review — zero providers returned results.",
   ].join("\n") + "\n");
   await writeFile(blockedSession.exitCodePath, "1\n");
   await writeFile(blockedSession.exitedAtPath, "2026-09-03T18:40:00Z\n");

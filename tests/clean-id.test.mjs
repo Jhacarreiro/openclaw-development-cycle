@@ -5,6 +5,9 @@ import { join, relative } from "node:path";
 import { cleanId } from "../dist/core/ids.js";
 
 test("cleanId rejects path traversal tokens", () => {
+  assert.notEqual(cleanId(".."), "..");
+  assert.notEqual(cleanId("."), ".");
+  assert.notEqual(cleanId("..."), "...");
   assert.equal(cleanId(".."), "run");
   assert.equal(cleanId("."), "run");
   assert.equal(cleanId("..."), "run");

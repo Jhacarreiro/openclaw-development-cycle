@@ -1,6 +1,7 @@
 import { appendFile, mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import { statSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { cleanId } from "../core/ids.js";
+import { cleanId, idPathCandidates } from "../core/ids.js";
 
 // mkdir-based lock: atomic on POSIX. An owner token (pid:nonce) is written
 // into the lock dir so release/write can refuse to touch a replacement lock.
@@ -130,9 +131,26 @@ export interface FilesystemStore {
   appendJsonl(path: string, data: unknown): Promise<void>;
 }
 
+function existingDir(path: string): boolean {
+  try {
+    return statSync(path).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
 export function createFilesystemStore(stateRoot: string, now: () => Date = () => new Date()): FilesystemStore {
-  const runDir = (project: unknown, runId: unknown) =>
-    join(stateRoot, "runs", cleanId(project), cleanId(runId));
+  const runDir = (project: unknown, runId: unknown) => {
+    const projects = idPathCandidates(project);
+    const runs = idPathCandidates(runId);
+    for (const projectId of projects) {
+      for (const run of runs) {
+        const candidate = join(stateRoot, "runs", projectId, run);
+        if (existingDir(candidate)) return candidate;
+      }
+    }
+    return join(stateRoot, "runs", cleanId(project), cleanId(runId));
+  };
 
   const loadJson = async <T extends object = Record<string, unknown>>(path: string): Promise<T> => {
     try {

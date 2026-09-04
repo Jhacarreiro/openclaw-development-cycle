@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, writeFile, rm, access, symlink, rename, readdir } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, writeFile, rm, access, symlink, rename, readdir, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import test from "node:test";
 import { execFileSync } from "node:child_process";
 
@@ -1049,4 +1049,142 @@ test("run_final_validation keeps the checkout pinned after config load", async (
   assert.equal(await readFile(join(moved, "SAFE_VALIDATION_RAN"), "utf8"), "safe");
   await assert.rejects(access(join(outside, "EVIL_VALIDATION_RAN")));
   await assert.rejects(access(join(outside, "SAFE_VALIDATION_RAN")));
+});
+
+// --- NFC/NFD containment semantics (from fix/pathwithin-nfc-normalize) ---
+import { pathWithin } from "../dist/core/paths.js";
+const NFC = "caf\u00e9";
+const NFD = "cafe\u0301";
+function codes(name) {
+  return [...String(name)].map((c) => c.codePointAt(0).toString(16)).join(" ");
+}
+async function sameEntry(left, right) {
+  try {
+    const a = await stat(left);
+    const b = await stat(right);
+    return a.dev === b.dev && a.ino === b.ino;
+  } catch {
+    return false;
+  }
+}
+async function exists(path) {
+  try {
+    await access(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+test("pathWithin accepts the same existing entry across NFC/NFD only when inodes match", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "dc-path-same-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const nfcDir = join(root, NFC);
+  const nfdDir = join(root, NFD);
+  await mkdir(nfcDir);
+
+  assert.equal(pathWithin(nfcDir, nfcDir), true);
+  assert.equal(NFC.normalize("NFC"), NFD.normalize("NFC"));
+
+  const unified = await sameEntry(nfcDir, nfdDir);
+  assert.equal(
+    pathWithin(nfcDir, nfdDir),
+    unified,
+    `same-entry nfc=[${codes(NFC)}] nfd=[${codes(NFD)}] unified=${unified}`,
+  );
+  if (unified) {
+    const child = join(nfdDir, "plans");
+    assert.equal(pathWithin(nfcDir, child), true, "macOS-style same inode must accept NFD child");
+  } else {
+    assert.equal(await exists(nfdDir), false, "Linux must not treat a missing NFD alias as the NFC entry");
+  }
+});
+
+test("record_plan does not persist into the shared docs root", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "dc-wiki-shared-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const code = join(root, "code");
+  await mkdir(code, { recursive: true });
+  await mkdir(join(code, ".git"));
+  const docsRoot = join(root, "docs");
+  await mkdir(docsRoot, { recursive: true });
+  const tool = await registerPlugin(root);
+  const planReq = await tool.execute(
+    "pg-shared-wiki",
+    {
+      action: "request_plan",
+      project: "fixture-shared-wiki",
+      projectRoot: code,
+      projectWikiPath: docsRoot,
+      direction: "keep wiki per project",
+    },
+    undefined,
+    undefined,
+  );
+  assert.equal(planReq.details.ok, true, JSON.stringify(planReq.details));
+  const wiki = planReq.details.projectWikiPath || planReq.details.status?.projectWikiPath || "";
+  if (wiki) {
+    assert.notEqual(resolve(wiki), resolve(docsRoot));
+  }
+  await assert.rejects(access(join(docsRoot, "plans")));
+  const recorded = await tool.execute(
+    "pg-shared-wiki-record",
+    {
+      action: "record_plan",
+      project: "fixture-shared-wiki",
+      runId: planReq.details.runId,
+      projectRoot: code,
+      projectWikiPath: docsRoot,
+      planText: "# plan\n\nObjective\n",
+      force: true,
+    },
+    undefined,
+    undefined,
+  );
+  assert.equal(recorded.details.ok, true, JSON.stringify(recorded.details));
+  await assert.rejects(access(join(docsRoot, "plans")));
+});
+
+test("record_plan reads an allowed file through an NFC/NFD alias of the same root", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "dc-path-unicode-read-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+
+  const codeNfc = join(root, `code-${NFC}`);
+  const codeNfd = join(root, `code-${NFD}`);
+  await mkdir(codeNfc, { recursive: true });
+  execFileSync("git", ["init", "-q", codeNfc]);
+  await symlink(codeNfc, codeNfd, "dir");
+
+  const planPath = join(codeNfc, "plan.md");
+  await writeFile(
+    planPath,
+    "# Implementation plan\n\n## Project paths\n- projectRoot\n\n## Tasks\n1. Verify Unicode path containment\n\n## Validation checks\n- npm test\n\n## Stop conditions\n- none\n\n## Expected artifacts\n- none\n",
+  );
+
+  const tool = await registerPlugin(root);
+  const requested = await tool.execute(
+    "unicode-read-1",
+    { action: "request_plan", project: "unicode-read", projectRoot: codeNfc },
+    undefined,
+    undefined,
+  );
+  assert.equal(requested.details.ok, true, JSON.stringify(requested.details));
+
+  const recorded = await tool.execute(
+    "unicode-read-2",
+    {
+      action: "record_plan",
+      project: "unicode-read",
+      runId: requested.details.runId,
+      projectRoot: codeNfc,
+      planPath: join(codeNfd, "plan.md"),
+      force: true,
+    },
+    undefined,
+    undefined,
+  );
+
+  assert.equal(recorded.details.ok, true, JSON.stringify(recorded.details));
+  const persisted = await readFile(join(requested.details.dir, "implementation_plan.md"), "utf8");
+  assert.match(persisted, /Verify Unicode path containment/);
+  assert.match(persisted, /Approved source plan \(verbatim\)/);
 });

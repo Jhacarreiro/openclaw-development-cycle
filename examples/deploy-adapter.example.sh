@@ -11,6 +11,7 @@ deployment_target=$(jq -r '.deploymentTarget // ""' "$request_path")
 results_root=$(jq -r '.resultsRoot' "$request_path")
 manifest_path=$(jq -r '.manifestPath' "$request_path")
 authorization_path=$(jq -r '.authorizationPath // ""' "$request_path")
+verification_evidence_path=$(jq -r '.verificationEvidencePath // ""' "$request_path")
 
 mkdir -p "$results_root"
 
@@ -45,9 +46,23 @@ case "$mode" in
     ;;
 
   verify)
-    result_dir=$(dirname "$manifest_path")
-    verify_result="$result_dir/verify_result.json"
-    jq -n --arg c "$source_commit" '{ok:true, mode:"verify", sourceCommit:$c, checks:[{name:"health", ok:true}]}' > "$verify_result"
+    if [ -z "$verification_evidence_path" ]; then
+      printf '{"ok":false,"error":"verification_evidence_path_missing"}\n' >&2
+      exit 2
+    fi
+    manifest_checks=$(jq -r '.verificationChecks[]?' "$manifest_path" 2>/dev/null || true)
+    if [ -z "$manifest_checks" ]; then
+      manifest_checks="health
+release==commit"
+    fi
+    checks_json=$(printf '%s\n' "$manifest_checks" | jq -R -s '
+      split("\n") | map(select(length > 0)) | map({name: ., status: "pass"})
+    ')
+    mkdir -p "$(dirname "$verification_evidence_path")"
+    jq -n \
+      --arg c "$source_commit" \
+      --argjson checks "$checks_json" \
+      '{schemaVersion: 1, ok: true, mode: "verify", sourceCommit: $c, checks: $checks}' > "$verification_evidence_path"
     printf '{"ok":true,"mode":"verify"}\n'
     ;;
 

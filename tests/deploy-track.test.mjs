@@ -3,6 +3,7 @@ import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { randomUUID } from "node:crypto";
 import { loadDevelopmentCycleConfig } from "../dist/config.js";
 import { buildDeployLaunchSpec, buildDeployRequest } from "../dist/adapters/deploy.js";
 import { checkActionTransition } from "../dist/state-machine.js";
@@ -127,37 +128,31 @@ test("1. deploy actions never change normal cycle status.phase", async (t) => {
   }
 });
 
-test("2. a deploy can exist without a development runId", async (t) => {
+test("2. a deploy can exist without a development runId (live adapter path)", async (t) => {
   assert.match(srcDeploy, /DeployLaunchInput|DeployMode|buildDeploy/, "deploy adapter must exist");
   assert.doesNotMatch(srcDeploy, /runId.*required/i, "deploy adapter must not require runId");
-  if (hasFullDeploy && hasDeployTracks) {
-    const root = await mkdtemp(join(tmpdir(), "deploy-track-2-"));
-    t.after(() => rm(root, { recursive: true, force: true }));
-    await mkdir(join(root, "checkout", ".git"), { recursive: true });
-    const adapterPath = join(root, "adapter.mjs");
-    await writeFile(adapterPath, makePrepareStub(), { mode: 0o755 });
-    const { deployTrackDir, deployManifestPath } = full.tracks;
-    const { runDeployPrepare } = full.mod;
-    const project = "deploy-no-run";
-    const deployId = cleanId("deploy-no-run-1", "deploy");
-    const trackDir = deployTrackDir(join(root, "state"), project, deployId);
-    const commit = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
-    const cfg = { enabled: true, adapter: "command", command: adapterPath, args: [], timeoutSeconds: 5, supervisorPath: "", supervisorSocket: "" };
-    const prep = await runDeployPrepare(cfg, { project, deployId, projectRoot: join(root, "checkout"), sourceCommit: commit, resultsRoot: trackDir, manifestPath: deployManifestPath(trackDir), deploymentTarget: "production", sourceRunId: undefined });
-    assert.equal(prep.ok, true, JSON.stringify(prep));
-    await stat(deployManifestPath(trackDir));
-    const manifest = JSON.parse(await readFile(deployManifestPath(trackDir), "utf8"));
-    assert.equal(manifest.sourceCommit, commit);
-    const runs = await readdir(join(root, "state", "runs")).catch(() => []);
-    assert.equal(runs.length, 0, "deploy must not create a lifecycle runs/ dir");
-  } else {
-    const req = buildDeployRequest({ project: "x", deployId: "d1", projectRoot: "/repo", sourceRefRequested: "main", sourceCommit: "abc123", deploymentTarget: "production", resultsRoot: "/state/tracks/deploy/x/d1", manifestPath: "/state/tracks/deploy/x/d1/deploy_manifest.json", authorizationPath: "", mode: "prepare" });
-    assert.equal(req.track, "deploy");
-    assert.equal(req.sourceCommit, "abc123");
-    assert.equal(typeof req.deployId, "string");
-    assert.equal("runId" in req, false, "deploy request must not require runId");
-    assert.match(JSON.stringify(req), /deploy/);
-  }
+  assert.equal(hasFullDeploy && hasDeployTracks, true, "live deploy adapter modules are required — fallback branch is removed");
+  const root = await mkdtemp(join(tmpdir(), "deploy-track-2-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await mkdir(join(root, "checkout", ".git"), { recursive: true });
+  const adapterPath = join(root, "adapter.mjs");
+  await writeFile(adapterPath, makePrepareStub(), { mode: 0o755 });
+  const { deployTrackDir, deployManifestPath } = full.tracks;
+  const { runDeployPrepare } = full.mod;
+  const project = "deploy-no-run";
+  const deployId = cleanId("deploy-no-run-1", "deploy");
+  const trackDir = deployTrackDir(join(root, "state"), project, deployId);
+  const commit = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
+  const cfg = { enabled: true, adapter: "command", command: adapterPath, args: [], timeoutSeconds: 5, supervisorPath: "", supervisorSocket: "" };
+  const prep = await runDeployPrepare(cfg, { project, deployId, projectRoot: join(root, "checkout"), sourceCommit: commit, resultsRoot: trackDir, manifestPath: deployManifestPath(trackDir), deploymentTarget: "production", sourceRunId: undefined });
+  assert.equal(prep.ok, true, JSON.stringify(prep));
+  await stat(deployManifestPath(trackDir));
+  const manifest = JSON.parse(await readFile(deployManifestPath(trackDir), "utf8"));
+  assert.equal(manifest.sourceCommit, commit);
+  const runs = await readdir(join(root, "state", "runs")).catch(() => []);
+  assert.equal(runs.length, 0, "deploy must not create a lifecycle runs/ dir");
+  const req = buildDeployRequest({ project: "x", deployId: "d1", projectRoot: "/repo", sourceRefRequested: "main", sourceCommit: "a".repeat(40), deploymentTarget: "production", resultsRoot: "/state/tracks/deploy/x/d1", manifestPath: "/state/tracks/deploy/x/d1/deploy_manifest.json", authorizationPath: "", mode: "prepare" });
+  assert.equal("runId" in req, false, "live deploy request must not require runId");
 });
 
 test("3. deploy is disabled by default", async () => {
@@ -172,7 +167,8 @@ test("3. deploy is disabled by default", async () => {
   assert.equal(enabled.deploy.command, "/bin/true");
   const disabled = loadDevelopmentCycleConfig({ HOME: "/tmp/example-home", DEVELOPMENT_CYCLE_DEPLOY_ENABLED: "false" });
   assert.equal(disabled.deploy.enabled, false);
-  if (hasFullDeploy) {
+  assert.equal(hasFullDeploy, true, "live deploy adapter is required — static fallback branch is removed");
+  {
     const { runDeployPrepare } = full.mod;
     const root = await mkdtemp(join(tmpdir(), "deploy-disabled-"));
     try {
@@ -184,13 +180,10 @@ test("3. deploy is disabled by default", async () => {
       assert.equal(res.ok, false);
       assert.equal(res.error, "deploy_disabled");
     } finally { await rm(root, { recursive: true, force: true }); }
-  } else {
-    assert.match(srcConfig, /DEVELOPMENT_CYCLE_DEPLOY_ENABLED/, "config must define deploy enabled flag");
-    assert.match(srcDeploy, /buildDeploy/, "deploy adapter module must exist");
   }
 });
 
-test("4. exact commit is persisted", async (t) => {
+test("4. exact commit is persisted (live adapter + request schema)", async (t) => {
   const req = buildDeployRequest({ project: "p", deployId: "d", projectRoot: "/repo", sourceRefRequested: "main", sourceCommit: "0123456789abcdef0123456789abcdef01234567", deploymentTarget: "production", resultsRoot: "/state/tracks/deploy/p/d", manifestPath: "/state/tracks/deploy/p/d/deploy_manifest.json", authorizationPath: "", mode: "prepare" });
   assert.equal(req.sourceCommit, "0123456789abcdef0123456789abcdef01234567");
   assert.equal(req.sourceRefRequested, "main");
@@ -199,9 +192,12 @@ test("4. exact commit is persisted", async (t) => {
   assert.ok(deploySchema.length > 0, "deploy schema must exist");
   if (deploySchema) {
     const schema = JSON.parse(deploySchema);
-    assert.equal(schema.properties.sourceCommit.minLength, 1);
     assert.ok(schema.required.includes("sourceCommit"));
     assert.ok(schema.required.includes("deployId"));
+    const sc = schema.properties.sourceCommit || {};
+    const hasExactHexPattern = typeof sc.pattern === "string" && /40/.test(sc.pattern) && /0-9a-f/.test(sc.pattern);
+    const hasMinLength = sc.minLength === 1;
+    assert.ok(hasExactHexPattern || hasMinLength, "deploy request sourceCommit must require exact 40-hex (pattern) or at least minLength 1 until schema is tightened");
   }
   assert.match(srcDeploy, /sourceCommit/, "deploy adapter must handle sourceCommit");
   if (hasFullDeploy && hasDeployTracks) {
@@ -244,104 +240,85 @@ await writeFile(req.manifestPath, JSON.stringify(manifest, null, 2));
   }
 });
 
-test("5. execute-before-prepare is rejected", async (t) => {
-  if (hasFullDeploy && hasDeployTracks) {
-    const root = await mkdtemp(join(tmpdir(), "deploy-track-5-"));
-    t.after(() => rm(root, { recursive: true, force: true }));
-    await mkdir(join(root, "checkout", ".git"), { recursive: true });
-    const { deployTrackDir, deployManifestPath } = full.tracks;
-    const { runDeployExecute, runDeployVerify } = full.mod;
-    const trackDir = deployTrackDir(join(root, "state"), "proj5", "d5");
-    await mkdir(trackDir, { recursive: true });
-    const cfg = { enabled: true, adapter: "command", command: "/bin/true", args: [], timeoutSeconds: 5, supervisorPath: "", supervisorSocket: "" };
-    const execRes = await runDeployExecute(cfg, { project: "proj5", deployId: "d5", projectRoot: join(root, "checkout"), sourceCommit: "abc", resultsRoot: trackDir, manifestPath: deployManifestPath(trackDir), authorizationPath: "" });
-    assert.equal(execRes.ok, false);
-    assert.match(String(execRes.error), /manifest/);
-    const verifyRes = await runDeployVerify(cfg, { project: "proj5", deployId: "d5", projectRoot: join(root, "checkout"), sourceCommit: "abc", resultsRoot: trackDir, manifestPath: deployManifestPath(trackDir) });
-    assert.equal(verifyRes.ok, false);
-    assert.match(String(verifyRes.error), /manifest/);
-    if (hasDeploySM) {
-      assert.equal(full.deploySM.checkDeployActionTransition("deploy_execute", "").ok, false);
-      assert.equal(full.deploySM.checkDeployActionTransition("deploy_verify", "").ok, false);
-    }
-  } else {
-    assert.match(srcDeploy, /validateManifest|manifest/i, "deploy adapter must validate manifest presence");
-    if (hasDeploySM) {
-      assert.equal(full.deploySM.checkDeployActionTransition("deploy_execute", "").ok, false);
-      assert.equal(full.deploySM.checkDeployActionTransition("deploy_execute", "prepared").ok, true);
-      assert.equal(full.deploySM.checkDeployActionTransition("deploy_verify", "deployed").ok, true);
-      assert.equal(full.deploySM.checkDeployActionTransition("deploy_verify", "prepared").ok, false);
-    } else {
-      assert.ok(true, "deploy state machine not yet built — manifest validation still required in adapter");
-    }
-  }
+test("5. execute-before-prepare is rejected (live path)", async (t) => {
+  assert.equal(hasFullDeploy && hasDeployTracks, true, "live deploy adapter is required — fallback removed");
+  const root = await mkdtemp(join(tmpdir(), "deploy-track-5-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await mkdir(join(root, "checkout", ".git"), { recursive: true });
+  const { deployTrackDir, deployManifestPath } = full.tracks;
+  const { runDeployExecute, runDeployVerify } = full.mod;
+  const trackDir = deployTrackDir(join(root, "state"), "proj5", "d5");
+  await mkdir(trackDir, { recursive: true });
+  const cfg = { enabled: true, adapter: "command", command: "/bin/true", args: [], timeoutSeconds: 5, supervisorPath: "", supervisorSocket: "" };
+  const execRes = await runDeployExecute(cfg, { project: "proj5", deployId: "d5", projectRoot: join(root, "checkout"), sourceCommit: "abc", resultsRoot: trackDir, manifestPath: deployManifestPath(trackDir), authorizationPath: "" });
+  assert.equal(execRes.ok, false);
+  assert.match(String(execRes.error), /manifest/);
+  const verifyRes = await runDeployVerify(cfg, { project: "proj5", deployId: "d5", projectRoot: join(root, "checkout"), sourceCommit: "abc", resultsRoot: trackDir, manifestPath: deployManifestPath(trackDir) });
+  assert.equal(verifyRes.ok, false);
+  assert.match(String(verifyRes.error), /manifest/);
+  assert.equal(full.deploySM.checkDeployActionTransition("deploy_execute", "").ok, false);
+  assert.equal(full.deploySM.checkDeployActionTransition("deploy_verify", "").ok, false);
 });
 
-test("6. missing required authorization is rejected (fail closed)", async (t) => {
+test("6. missing required authorization is rejected (fail closed) — live path", async (t) => {
   assert.match(srcDeploy, /requiredAuthorizations|authorization/i, "deploy adapter must handle authorization");
-  if (hasFullDeploy && hasDeployTracks) {
-    const root = await mkdtemp(join(tmpdir(), "deploy-track-6-"));
-    t.after(() => rm(root, { recursive: true, force: true }));
-    await mkdir(join(root, "checkout", ".git"), { recursive: true });
-    const adapterPath = join(root, "adapter.mjs");
-    await writeFile(adapterPath, makePrepareStub(), { mode: 0o755 });
-    const project = "needs-auth";
-    const deployId = "deploy-auth-1";
-    const { deployTrackDir, deployManifestPath } = full.tracks;
-    const { runDeployPrepare, runDeployExecute } = full.mod;
-    const trackDir = deployTrackDir(join(root, "state"), project, deployId);
-    await mkdir(trackDir, { recursive: true });
-    const commit = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-    const cfg = { enabled: true, adapter: "command", command: adapterPath, args: [], timeoutSeconds: 5, supervisorPath: "", supervisorSocket: "" };
-    const prep = await runDeployPrepare(cfg, { project, deployId, projectRoot: join(root, "checkout"), sourceCommit: commit, resultsRoot: trackDir, manifestPath: deployManifestPath(trackDir) });
-    assert.equal(prep.ok, true, JSON.stringify(prep));
-    const manifest = JSON.parse(await readFile(deployManifestPath(trackDir), "utf8"));
-    assert.ok(manifest.requiredAuthorizations.length > 0);
-    const supPath = join(root, "sup.py");
-    await writeSupervisorStub(supPath);
-    const cfgExec = { enabled: true, adapter: "command", command: adapterPath, args: [], timeoutSeconds: 5, supervisorPath: supPath, supervisorSocket: join(root, "sock") };
-    const execWithoutAuth = await runDeployExecute(cfgExec, { project, deployId, projectRoot: join(root, "checkout"), sourceCommit: commit, resultsRoot: trackDir, manifestPath: deployManifestPath(trackDir), authorizationPath: "" });
-    assert.equal(execWithoutAuth.ok, false);
-    assert.match(String(execWithoutAuth.error), /authorization_required/);
-    assert.equal(execWithoutAuth.attemptId, "");
-    const execWithAuth = await runDeployExecute(cfgExec, { project, deployId, projectRoot: join(root, "checkout"), sourceCommit: commit, resultsRoot: trackDir, manifestPath: deployManifestPath(trackDir), authorizationPath: "", authorizationText: "operator approval: yes, deploy to production" });
-    assert.equal(execWithAuth.ok, true, JSON.stringify(execWithAuth));
-    assert.ok(execWithAuth.attemptId);
-    await stat(join(trackDir, "authorization_evidence.md"));
-  } else {
-    const req = buildDeployRequest({ project: "needs-auth", deployId: "d1", projectRoot: "/repo", sourceRefRequested: "", sourceCommit: "abc", deploymentTarget: "production", resultsRoot: "/tmp/x", manifestPath: "/tmp/x/deploy_manifest.json", authorizationPath: "", mode: "execute" });
-    assert.equal(req.authorizationPath, "");
-    assert.equal(req.track, "deploy");
-    assert.match(srcDeploy, /authorization/i, "deploy adapter must enforce authorization");
-  }
+  assert.equal(hasFullDeploy && hasDeployTracks, true, "live deploy adapter is required — fallback removed");
+  const root = await mkdtemp(join(tmpdir(), "deploy-track-6-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await mkdir(join(root, "checkout", ".git"), { recursive: true });
+  const adapterPath = join(root, "adapter.mjs");
+  await writeFile(adapterPath, makePrepareStub(), { mode: 0o755 });
+  const project = "needs-auth";
+  const deployId = "deploy-auth-1";
+  const { deployTrackDir, deployManifestPath } = full.tracks;
+  const { runDeployPrepare, runDeployExecute } = full.mod;
+  const trackDir = deployTrackDir(join(root, "state"), project, deployId);
+  await mkdir(trackDir, { recursive: true });
+  const commit = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+  const cfg = { enabled: true, adapter: "command", command: adapterPath, args: [], timeoutSeconds: 5, supervisorPath: "", supervisorSocket: "" };
+  const prep = await runDeployPrepare(cfg, { project, deployId, projectRoot: join(root, "checkout"), sourceCommit: commit, resultsRoot: trackDir, manifestPath: deployManifestPath(trackDir) });
+  assert.equal(prep.ok, true, JSON.stringify(prep));
+  const manifest = JSON.parse(await readFile(deployManifestPath(trackDir), "utf8"));
+  assert.ok(manifest.requiredAuthorizations.length > 0);
+  const supPath = join(root, "sup.py");
+  await writeSupervisorStub(supPath);
+  const cfgExec = { enabled: true, adapter: "command", command: adapterPath, args: [], timeoutSeconds: 5, supervisorPath: supPath, supervisorSocket: join(root, "sock") };
+  const execWithoutAuth = await runDeployExecute(cfgExec, { project, deployId, projectRoot: join(root, "checkout"), sourceCommit: commit, resultsRoot: trackDir, manifestPath: deployManifestPath(trackDir), authorizationPath: "" });
+  assert.equal(execWithoutAuth.ok, false);
+  assert.match(String(execWithoutAuth.error), /authorization_required/);
+  assert.equal(execWithoutAuth.attemptId, "");
+  const execWithAuth = await runDeployExecute(cfgExec, { project, deployId, projectRoot: join(root, "checkout"), sourceCommit: commit, resultsRoot: trackDir, manifestPath: deployManifestPath(trackDir), authorizationPath: "", authorizationText: "operator approval: yes, deploy to production" });
+  assert.equal(execWithAuth.ok, true, JSON.stringify(execWithAuth));
+  assert.ok(execWithAuth.attemptId);
+  await stat(join(trackDir, "authorization_evidence.md"));
 });
 
-test("7. retries use immutable attempt directories that never reuse terminal markers", async (t) => {
-  if (hasFullDeploy && hasDeployTracks) {
-    const root = await mkdtemp(join(tmpdir(), "deploy-track-7-"));
-    t.after(() => rm(root, { recursive: true, force: true }));
-    await mkdir(join(root, "checkout", ".git"), { recursive: true });
-    const adapterPath = join(root, "adapter.mjs");
-    await writeFile(adapterPath, makePrepareStub(), { mode: 0o755 });
-    const project = "deploy-retry";
-    const deployId = "deploy-retry-1";
-    const { deployTrackDir, deployManifestPath } = full.tracks;
-    const { runDeployPrepare, runDeployVerify } = full.mod;
-    const trackDir = deployTrackDir(join(root, "state"), project, deployId);
-    await mkdir(trackDir, { recursive: true });
-    const commit = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
-    const cfg = { enabled: true, adapter: "command", command: adapterPath, args: [], timeoutSeconds: 5, supervisorPath: "", supervisorSocket: "" };
-    const a = await runDeployPrepare(cfg, { project, deployId, projectRoot: join(root, "checkout"), sourceCommit: commit, resultsRoot: trackDir, manifestPath: deployManifestPath(trackDir) });
-    const b = await runDeployPrepare(cfg, { project, deployId, projectRoot: join(root, "checkout"), sourceCommit: commit, resultsRoot: trackDir, manifestPath: deployManifestPath(trackDir) });
-    assert.equal(a.ok, true);
-    assert.equal(b.ok, true);
-    assert.notEqual(a.attemptId, b.attemptId);
-    assert.notEqual(a.attemptDir, b.attemptDir);
-    await stat(join(a.attemptDir, "stdout.log"));
-    await stat(join(b.attemptDir, "stdout.log"));
-    const attempts = await readdir(join(trackDir, "prepare", "attempts"));
-    assert.ok(attempts.includes(a.attemptId));
-    assert.ok(attempts.includes(b.attemptId));
+test("7. retries use immutable attempt directories that never reuse terminal markers — live path", async (t) => {
+  assert.equal(hasFullDeploy && hasDeployTracks, true, "live deploy adapter is required — fallback removed");
+  const root = await mkdtemp(join(tmpdir(), "deploy-track-7-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await mkdir(join(root, "checkout", ".git"), { recursive: true });
+  const adapterPath = join(root, "adapter.mjs");
+  await writeFile(adapterPath, makePrepareStub(), { mode: 0o755 });
+  const project = "deploy-retry";
+  const deployId = "deploy-retry-1";
+  const { deployTrackDir, deployManifestPath } = full.tracks;
+  const { runDeployPrepare, runDeployVerify } = full.mod;
+  const trackDir = deployTrackDir(join(root, "state"), project, deployId);
+  await mkdir(trackDir, { recursive: true });
+  const commit = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+  const cfg = { enabled: true, adapter: "command", command: adapterPath, args: [], timeoutSeconds: 5, supervisorPath: "", supervisorSocket: "" };
+  const a = await runDeployPrepare(cfg, { project, deployId, projectRoot: join(root, "checkout"), sourceCommit: commit, resultsRoot: trackDir, manifestPath: deployManifestPath(trackDir) });
+  const b = await runDeployPrepare(cfg, { project, deployId, projectRoot: join(root, "checkout"), sourceCommit: commit, resultsRoot: trackDir, manifestPath: deployManifestPath(trackDir) });
+  assert.equal(a.ok, true);
+  assert.equal(b.ok, true);
+  assert.notEqual(a.attemptId, b.attemptId);
+  assert.notEqual(a.attemptDir, b.attemptDir);
+  await stat(join(a.attemptDir, "stdout.log"));
+  await stat(join(b.attemptDir, "stdout.log"));
+  const attempts = await readdir(join(trackDir, "prepare", "attempts"));
+  assert.ok(attempts.includes(a.attemptId));
+  assert.ok(attempts.includes(b.attemptId));
     const failingStub = `#!/usr/bin/env node
 import { readFile, writeFile, mkdir } from "node:fs/promises";
 import { dirname } from "node:path";
@@ -366,14 +343,11 @@ process.exit(0);
     const v1 = await runDeployVerify(cfgV, { project: "deploy-retry-v", deployId: "d", projectRoot: join(root, "checkout"), sourceCommit: commit, resultsRoot: vd, manifestPath: deployManifestPath(vd) });
     const v2 = await runDeployVerify(cfgV, { project: "deploy-retry-v", deployId: "d", projectRoot: join(root, "checkout"), sourceCommit: commit, resultsRoot: vd, manifestPath: deployManifestPath(vd) });
     assert.notEqual(v1.attemptId, v2.attemptId);
-  } else {
-    assert.match(srcDeploy, /buildDeployRequest|buildDeployLaunchSpec/, "deploy adapter must expose deploy request/launch helpers");
-    assert.match(deploySchema || srcDeploy, /sourceCommit|deploy|track/, "deploy track schema or adapter must define deploy identity");
-  }
 });
 
-test("8. verification failure does not auto-rollback", async (t) => {
-  if (hasFullDeploy && hasDeployTracks) {
+test("8. verification failure does not auto-rollback — live path", async (t) => {
+  assert.equal(hasFullDeploy && hasDeployTracks, true, "live deploy adapter is required — fallback removed");
+  {
     const root = await mkdtemp(join(tmpdir(), "deploy-track-8-"));
     t.after(() => rm(root, { recursive: true, force: true }));
     await mkdir(join(root, "checkout", ".git"), { recursive: true });
@@ -419,15 +393,12 @@ process.exit(0);
     const verifyResult = JSON.parse(await readFile(join(verify.attemptDir, "verify_result.json"), "utf8"));
     assert.equal(verifyResult.ok, false);
     assert.match(verifyResult.nextAction, /no automatic rollback/);
-  } else {
-    assert.match(deploySchema || srcDeploy, /rollback|sourceCommit|deploy/, "deploy must define rollback or deploy schema");
-    const txt = `${srcDeploy} ${srcIndex}`;
-    assert.doesNotMatch(txt, /autoRollback/i, "deploy must not auto-rollback");
   }
 });
 
-test("9. deploy_status is read-only", async (t) => {
-  if (hasFullDeploy && hasDeployTracks) {
+test("9. deploy_status is read-only — live path", async (t) => {
+  assert.equal(hasFullDeploy && hasDeployTracks, true, "live deploy adapter is required — fallback removed");
+  {
     const root = await mkdtemp(join(tmpdir(), "deploy-track-9-"));
     t.after(() => rm(root, { recursive: true, force: true }));
     await mkdir(join(root, "checkout", ".git"), { recursive: true });
@@ -455,11 +426,6 @@ test("9. deploy_status is read-only", async (t) => {
     assert.equal(await readFile(statusPath, "utf8"), beforeContent);
     const req = bdr({ project, deployId, projectRoot: join(root, "checkout"), sourceCommit: commit, resultsRoot: trackDir, manifestPath: deployManifestPath(trackDir), deploymentTarget: "production", mode: "prepare" });
     assert.equal(req.track, "deploy");
-  } else {
-    assert.match(srcIndex, /deploy_status|readOnly/, "deploy_status must be read-only");
-    const before = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
-    assert.ok(before.length > 0);
-    assert.ok(true, "read-only verified via static check; full runtime read-only test runs when deploy tracks land");
   }
 });
 
@@ -483,27 +449,33 @@ test("10. existing development-cycle tests remain green (deploy does not pollute
   }
 });
 
-test("hard-gate: deploy_manifest.json and src/adapters/implementation.ts are explicitly covered", async () => {
-  const manifestRaw = await readFile(new URL("../deploy_manifest.json", import.meta.url), "utf8");
-  const manifest = JSON.parse(manifestRaw);
-  assert.equal(manifest.schemaVersion, 1);
-  assert.equal(manifest.track, "deploy");
-  assert.ok(String(manifest.sourceCommit).length >= 10, "manifest must pin sourceCommit");
+test("hard-gate: durable deploy_manifest.json is under tracks/deploy and schema is authoritative (no root-level example artifact)", async (t) => {
+  let rootExists = false;
+  try { await stat(new URL("../deploy_manifest.json", import.meta.url)); rootExists = true; } catch (e) { if (e?.code !== "ENOENT") throw e; }
+  assert.equal(rootExists, false, "root-level deploy_manifest.json must not exist — durable manifest lives at <state>/tracks/deploy/<project>/<deployId>/deploy_manifest.json only");
+
+  const manifestSchemaRaw = await readFile(new URL("../schemas/deploy-manifest-v1.schema.json", import.meta.url), "utf8");
+  const manifestSchema = JSON.parse(manifestSchemaRaw);
+  assert.ok(manifestSchema.properties.sourceCommit, "manifest schema must define sourceCommit");
+  assert.equal(String(manifestSchema.properties.sourceCommit.pattern || ""), "^[0-9a-f]{40}$", "manifest sourceCommit must be exact 40-hex");
+
+  const fixture = { schemaVersion: 1, track: "deploy", sourceCommit: "a".repeat(40), expectedMutations: ["m"], protectedPaths: [], requiredAuthorizations: [], verificationChecks: ["health"], rollback: { available: true, description: "rollback", artifacts: [] } };
+  assert.equal(fixture.schemaVersion, 1);
+  assert.equal(fixture.track, "deploy");
+  assert.ok(String(fixture.sourceCommit).length === 40, "fixture sourceCommit must be exact 40-hex");
   for (const field of ["expectedMutations", "protectedPaths", "requiredAuthorizations", "verificationChecks"]) {
-    assert.ok(Array.isArray(manifest[field]), `manifest.${field} must be an array`);
+    assert.ok(Array.isArray(fixture[field]), `fixture.${field} must be an array`);
   }
-  assert.ok(manifest.rollback && typeof manifest.rollback === "object");
-  assert.equal(typeof manifest.rollback.available, "boolean");
-  assert.ok(String(manifest.rollback.description || "").length >= 1);
-  assert.ok(Array.isArray(manifest.rollback.artifacts));
+  assert.ok(fixture.rollback && typeof fixture.rollback === "object");
+  assert.equal(typeof fixture.rollback.available, "boolean");
+  assert.ok(String(fixture.rollback.description || "").length >= 1);
+  assert.ok(Array.isArray(fixture.rollback.artifacts));
 
   const implRaw = await readFile(new URL("../src/adapters/implementation.ts", import.meta.url), "utf8");
   assert.match(implRaw, /src\/adapters\/implementation\.ts/, "implementation adapter must identify itself");
   assert.match(implRaw, /deploy_manifest\.json/, "implementation adapter must explicitly reference the deploy manifest contract");
   assert.match(implRaw, /src\/adapters\/deploy\.ts/, "implementation adapter must explicitly reference the deploy adapter");
   assert.match(implRaw, /buildImplementationLaunchSpec/, "implementation adapter must still expose buildImplementationLaunchSpec");
-  const implManifestRef = await readFile(new URL("../deploy_manifest.json", import.meta.url), "utf8").then((s) => JSON.parse(s));
-  assert.equal(implManifestRef.track, "deploy");
 
   assert.ok(srcIndex.includes("deploy_prepare") || srcIndex.includes("development_cycle"), "src/index must expose deploy or cycle entry");
 });

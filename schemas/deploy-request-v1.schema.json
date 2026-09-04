@@ -23,11 +23,12 @@
     "deployId": { "type": "string", "minLength": 1 },
     "projectRoot": { "type": "string", "minLength": 1 },
     "sourceRefRequested": { "type": "string" },
-    "sourceCommit": { "type": "string", "minLength": 1 },
+    "sourceCommit": { "type": "string", "pattern": "^[0-9a-f]{40}$", "description": "Exact 40-hex commit SHA resolved from sourceRef before execute" },
     "deploymentTarget": { "type": "string" },
     "resultsRoot": { "type": "string", "minLength": 1 },
     "manifestPath": { "type": "string", "minLength": 1 },
     "authorizationPath": { "type": "string" },
+    "verificationEvidencePath": { "type": "string", "description": "Path where verify mode must write structured evidence covering every verificationChecks entry" },
     "timeoutSeconds": { "type": "integer", "minimum": 1 }
   }
 }

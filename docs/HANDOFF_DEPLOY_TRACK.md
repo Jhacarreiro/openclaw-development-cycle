@@ -174,7 +174,10 @@ DEVELOPMENT_CYCLE_DEPLOY_ARGS_JSON=[]
 DEVELOPMENT_CYCLE_DEPLOY_TIMEOUT_SECONDS=<bounded default>
 ```
 
-One command can handle `prepare | execute | verify` using a versioned request:
+One command can handle `prepare | execute | verify` using a versioned request
+(`sourceCommit` is an exact 40-hex SHA; `verificationEvidencePath` is supplied only for `verify` and the
+adapter must write structured evidence there covering every `verificationChecks` entry; unsupported
+`DEVELOPMENT_CYCLE_DEPLOY_ADAPTER` values fail closed — only `command` is supported):
 
 ```json
 {
@@ -185,7 +188,7 @@ One command can handle `prepare | execute | verify` using a versioned request:
   "deployId": "...",
   "projectRoot": "/repo",
   "sourceRefRequested": "main",
-  "sourceCommit": "<exact sha>",
+  "sourceCommit": "<40-hex sha>",
   "deploymentTarget": "production",
   "resultsRoot": "/state/tracks/deploy/...",
   "manifestPath": "/state/tracks/deploy/.../deploy_manifest.json",
@@ -193,6 +196,12 @@ One command can handle `prepare | execute | verify` using a versioned request:
   "timeoutSeconds": 900
 }
 ```
+
+`verify` requests additionally include `verificationEvidencePath` (e.g.
+`/state/tracks/deploy/<project>/<deployId>/verify/attempts/<attemptId>/verification_evidence.json`).
+The durable deploy manifest lives only at
+`<state-root>/tracks/deploy/<project>/<deployId>/deploy_manifest.json`; no repository-root
+`deploy_manifest.json` is used as durable state.
 
 Adapter `prepare` should emit `deploy_manifest.json` with at least:
 

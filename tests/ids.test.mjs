@@ -84,26 +84,23 @@ test("newRunId stays within the bounded path contract", () => {
   assert.match(id, /20260716123456000-[0-9a-z]{6}$/);
 });
 
-test("cleanId reserves digest-shaped literal identifiers", () => {
-  const hashed = cleanId("foo ");
-  assert.match(hashed, /-id-[0-9a-f]{64}$/);
+test("cleanId treats digest-shaped canonical identifiers as opaque handles", () => {
+  const canonical = cleanId("foo ");
+  assert.match(canonical, /-id-[0-9a-f]{64}$/);
+  assert.equal(cleanId(canonical), canonical);
 
-  // A literal input equal to another raw value's canonical output must escape
-  // the reserved marker namespace rather than alias that value.
-  const escapedLiteral = cleanId(hashed);
-  assert.notEqual(escapedLiteral, hashed);
-  assert.match(escapedLiteral, /-id-[0-9a-f]{64}$/);
-
-  const lookalike = `foo-${createHash("sha256").update("foo ").digest("hex")}`;
-  assert.notEqual(cleanId(lookalike), hashed);
+  const lookalike = "foo-" + createHash("sha256").update("foo ").digest("hex");
+  assert.notEqual(cleanId(lookalike), canonical);
   assert.equal(cleanId(lookalike), lookalike);
 });
 
 test("digest-shaped legacy aliases are excluded from generic path candidates", () => {
   const canonical = cleanId("foo ");
-  assert.match(canonical, /-id-[0-9a-f]{64}$/);
-  assert.deepEqual(idPathCandidates(canonical), [cleanId(canonical)]);
+  const distinctRaw = canonical + " ";
+  assert.deepEqual(idPathCandidates(canonical), [canonical]);
   assert.deepEqual(projectPathCandidates(canonical), [canonical]);
+  assert.deepEqual(idPathCandidates(distinctRaw), [cleanId(distinctRaw)]);
+  assert.notEqual(cleanId(distinctRaw), canonical);
 });
 
 test("newRunId keeps reused canonical project IDs stable", () => {

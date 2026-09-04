@@ -182,15 +182,16 @@ test("digest-shaped legacy run aliases do not override the reserved canonical na
   let registered;
   plugin.register({ pluginConfig: {}, registerTool(tool) { registered = tool; } });
 
+  const distinctRaw = legacyRunId + " ";
   const status = await registered.execute(
     "marker-legacy-status",
-    { action: "status", project, runId: legacyRunId },
+    { action: "status", project, runId: distinctRaw },
     undefined,
     undefined,
   );
 
   assert.equal(status.details.ok, true, JSON.stringify(status.details));
   assert.notEqual(status.details.dir, legacyDir);
-  assert.equal(status.details.runId, cleanId(legacyRunId));
+  assert.equal(status.details.runId, cleanId(distinctRaw));
   assert.deepEqual(status.details.status, {});
 });

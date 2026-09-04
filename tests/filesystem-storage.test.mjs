@@ -279,7 +279,7 @@ test("delayed release does not remove a replacement lock", async (t) => {
   assert.match(await readFile(join(lockDir, "owner"), "utf8"), new RegExp(`^${process.pid}:`));
 });
 
-test("marker-shaped run literals cannot claim another raw run canonical directory", async (t) => {
+test("distinct raw run ids cannot claim a reserved canonical directory through legacy normalization", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "development-cycle-marker-run-"));
   t.after(() => rm(root, { recursive: true, force: true }));
   const store = createFilesystemStore(root);
@@ -290,9 +290,12 @@ test("marker-shaped run literals cannot claim another raw run canonical director
   await writeFile(join(canonicalDir, "status.json"), `${JSON.stringify({ phase: "planned", runId: canonicalRun }, null, 2)}
 `);
 
-  const literalDir = store.runDir("Project", canonicalRun);
-  assert.notEqual(literalDir, canonicalDir);
-  assert.equal(literalDir, join(root, "runs", "Project", cleanId(canonicalRun)));
+  assert.equal(store.runDir("Project", canonicalRun), canonicalDir);
+
+  const distinctRaw = canonicalRun + " ";
+  const distinctDir = store.runDir("Project", distinctRaw);
+  assert.notEqual(distinctDir, canonicalDir);
+  assert.equal(distinctDir, join(root, "runs", "Project", cleanId(distinctRaw)));
 });
 
 test("reused canonical project IDs stay in the same physical project directory", async (t) => {

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { join, relative } from "node:path";
 import test from "node:test";
-import { cleanId, idPathCandidates, legacyCleanId, newRunId } from "../dist/core/ids.js";
+import { cleanId, idPathCandidates, legacyCleanId, newRunId, projectPathCandidates } from "../dist/core/ids.js";
 
 const ALPHA_BETA_RAW = "  alpha / beta  ";
 const ALPHA_BETA_DIGEST = createHash("sha256").update(ALPHA_BETA_RAW).digest("hex");
@@ -97,4 +97,18 @@ test("cleanId reserves digest-shaped literal identifiers", () => {
   const lookalike = `foo-${createHash("sha256").update("foo ").digest("hex")}`;
   assert.notEqual(cleanId(lookalike), hashed);
   assert.equal(cleanId(lookalike), lookalike);
+});
+
+test("digest-shaped legacy aliases are excluded from generic path candidates", () => {
+  const canonical = cleanId("foo ");
+  assert.match(canonical, /-id-[0-9a-f]{64}$/);
+  assert.deepEqual(idPathCandidates(canonical), [cleanId(canonical)]);
+  assert.deepEqual(projectPathCandidates(canonical), [canonical]);
+});
+
+test("newRunId keeps reused canonical project IDs stable", () => {
+  const project = cleanId("Example Project");
+  const now = new Date("2026-07-16T12:34:56.000Z");
+  const id = newRunId(project, now);
+  assert.ok(id.startsWith(`${project.slice(0, 95)}-20260716123456000-`), id);
 });

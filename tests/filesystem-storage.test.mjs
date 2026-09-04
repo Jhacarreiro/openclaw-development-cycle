@@ -278,3 +278,34 @@ test("delayed release does not remove a replacement lock", async (t) => {
   assert.equal(await replacement.isHeld(), true);
   assert.match(await readFile(join(lockDir, "owner"), "utf8"), new RegExp(`^${process.pid}:`));
 });
+
+test("marker-shaped run literals cannot claim another raw run canonical directory", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "development-cycle-marker-run-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const store = createFilesystemStore(root);
+
+  const canonicalRun = cleanId("Run #1");
+  const canonicalDir = store.runDir("Project", "Run #1");
+  await mkdir(canonicalDir, { recursive: true });
+  await writeFile(join(canonicalDir, "status.json"), `${JSON.stringify({ phase: "planned", runId: canonicalRun }, null, 2)}
+`);
+
+  const literalDir = store.runDir("Project", canonicalRun);
+  assert.notEqual(literalDir, canonicalDir);
+  assert.equal(literalDir, join(root, "runs", "Project", cleanId(canonicalRun)));
+});
+
+test("reused canonical project IDs stay in the same physical project directory", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "development-cycle-canonical-project-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const store = createFilesystemStore(root);
+
+  const canonicalProject = cleanId("Project / One");
+  const first = store.runDir("Project / One", "Run-1");
+  await mkdir(first, { recursive: true });
+  await writeFile(join(first, "status.json"), `${JSON.stringify({ phase: "planned", project: canonicalProject, runId: "Run-1" }, null, 2)}
+`);
+
+  const second = store.runDir(canonicalProject, "Run-2");
+  assert.equal(second, join(root, "runs", canonicalProject, "Run-2"));
+});

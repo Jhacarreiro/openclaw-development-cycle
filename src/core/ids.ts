@@ -22,9 +22,17 @@ function identityDigest(raw: string): string {
 const DIGEST_MARK = "-id-";
 const DIGEST_PATTERN = /-id-[0-9a-f]{64}$/;
 
+export function isCanonicalId(input: unknown): boolean {
+  return DIGEST_PATTERN.test(String(input ?? ""));
+}
+
 export function cleanId(input: unknown, fallback = "run", maxLength = CLEAN_ID_MAX_LENGTH): string {
   const raw = String(input ?? "");
   const trimmed = raw.trim();
+  // Reserved canonical handles are opaque API values. Reusing one exactly
+  // must be idempotent; inputs that only sanitize to this shape are handled
+  // below as distinct identities and may not claim the reserved path.
+  if (raw === trimmed && isCanonicalId(raw)) return raw;
   const sanitized = trimmed
     .replace(/[^a-zA-Z0-9._-]+/g, "-")
     .replace(/^-+|-+$/g, "")
@@ -55,8 +63,14 @@ export function cleanId(input: unknown, fallback = "run", maxLength = CLEAN_ID_M
 export function idPathCandidates(input: unknown, fallback = "run", maxLength = CLEAN_ID_MAX_LENGTH): string[] {
   const next = cleanId(input, fallback, maxLength);
   const prev = legacyCleanId(input, fallback, maxLength);
-  if (prev === next || /^\.+$/.test(prev)) return [next];
+  if (prev === next || /^\.+$/.test(prev) || isCanonicalId(prev)) return [next];
   return [next, prev];
+}
+
+export function projectPathCandidates(input: unknown, fallback = "run", maxLength = CLEAN_ID_MAX_LENGTH): string[] {
+  const raw = String(input ?? "");
+  if (isCanonicalId(raw)) return [raw];
+  return idPathCandidates(input, fallback, maxLength);
 }
 
 export function newRunId(project: unknown, now = new Date()): string {
@@ -69,5 +83,9 @@ export function newRunId(project: unknown, now = new Date()): string {
   // pass cannot drop the timestamp or tiebreaker.
   const timestamp = now.toISOString().replace(/[-:T.Z]/g, "").slice(0, RUN_TIMESTAMP_LENGTH);
   const tiebreaker = Math.random().toString(36).slice(2, 8).padEnd(RUN_TIEBREAKER_LENGTH, "0");
-  return `${cleanId(project, "run", RUN_PROJECT_PREFIX_MAX)}-${timestamp}-${tiebreaker}`;
+  const rawProject = String(project ?? "");
+  const projectPrefix = isCanonicalId(rawProject)
+    ? rawProject.slice(0, RUN_PROJECT_PREFIX_MAX)
+    : cleanId(project, "run", RUN_PROJECT_PREFIX_MAX);
+  return `${projectPrefix}-${timestamp}-${tiebreaker}`;
 }

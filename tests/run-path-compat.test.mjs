@@ -163,7 +163,7 @@ test("explicit raw run ids reopen legacy sanitized state", async (t) => {
   assert.equal(status.details.status.phase, "planned");
 });
 
-test("explicit digest-shaped legacy run ids remain readable", async (t) => {
+test("digest-shaped legacy run aliases do not override the reserved canonical namespace", async (t) => {
   const root = join(tmpdir(), `development-cycle-marker-legacy-${process.pid}-${Date.now()}`);
   t.after(() => rm(root, { recursive: true, force: true }));
 
@@ -190,7 +190,7 @@ test("explicit digest-shaped legacy run ids remain readable", async (t) => {
   );
 
   assert.equal(status.details.ok, true, JSON.stringify(status.details));
-  assert.equal(status.details.dir, legacyDir);
-  assert.equal(status.details.runId, legacyRunId);
-  assert.equal(status.details.status.phase, "planned");
-})
+  assert.notEqual(status.details.dir, legacyDir);
+  assert.equal(status.details.runId, cleanId(legacyRunId));
+  assert.deepEqual(status.details.status, {});
+});

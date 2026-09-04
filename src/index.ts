@@ -10,7 +10,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { randomUUID } from "node:crypto";
 import { ACTIONS, checkActionTransition } from "./core/state-machine.js";
 import { parseFinalDecision } from "./core/decisions.js";
-import { cleanId, idPathCandidates, newRunId as createRunId } from "./core/ids.js";
+import { cleanId, idPathCandidates, newRunId as createRunId, projectPathCandidates } from "./core/ids.js";
 import { pathWithin as nfcPathWithin, containedRelativePath } from "./core/paths.js";
 import { nextStallQuietAccounting } from "./core/stall-accounting.js";
 import { councilNeedsCorrectionsText, resolveAutoCouncilCorrectionsMax } from "./core/council-policy.js";
@@ -2535,7 +2535,7 @@ async function stopLaunchedImplementation(dir: string, status: any, reason: stri
 
 async function latestRunId(project: string) {
   const entries: Array<{ name: string; mtime: number; ts: string }> = [];
-  for (const dirName of idPathCandidates(project)) {
+  for (const dirName of projectPathCandidates(project)) {
     const base = join(cycleRoot, "runs", dirName);
     let ents: Array<{ name: string; isDirectory: () => boolean }> = [];
     try { ents = await readdir(base, { withFileTypes: true }); } catch { continue; }

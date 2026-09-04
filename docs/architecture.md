@@ -81,6 +81,10 @@ Each run lives under:
 <state-root>/runs/<project>/<run-id>/
 ```
 
+Project and run directory names are path-safe. Already-clean names pass through. Names that need sanitization keep a readable prefix and a full SHA-256 suffix so distinct inputs do not share a directory. Generated run IDs stay at or under 120 characters.
+
+Existing directories written by the previous sanitizer (for example `Project / One` → `Project-One`) are still opened when the canonical name is absent. New runs use the canonical name.
+
 Typical cycle artifacts include:
 
 ```text

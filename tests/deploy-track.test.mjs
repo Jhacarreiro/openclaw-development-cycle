@@ -28,6 +28,9 @@ const full = await tryImportDeployFull();
 const hasFullDeploy = Boolean(full.mod && typeof full.mod.runDeployPrepare === "function");
 const hasDeployTracks = Boolean(full.tracks && typeof full.tracks.deployTrackDir === "function");
 const hasDeploySM = Boolean(full.deploySM && typeof full.deploySM.checkDeployActionTransition === "function");
+assert.equal(hasFullDeploy, true, "deploy adapter runtime exports are required; static fallback is not acceptable");
+assert.equal(hasDeployTracks, true, "deploy track runtime exports are required; static fallback is not acceptable");
+assert.equal(hasDeploySM, true, "deploy state-machine runtime export is required; static fallback is not acceptable");
 
 function deployStatuses() {
   return ["prepared","prepare_failed","execution_launched","execution_running","deployed","execution_failed","verification_running","verified","verification_failed","stopped"];
@@ -359,6 +362,7 @@ process.exit(0);
     const cfgV = { enabled: true, adapter: "command", command: verifyAdapter, args: [], timeoutSeconds: 5, supervisorPath: "", supervisorSocket: "" };
     await runDeployPrepare(cfgV, { project: "deploy-retry-v", deployId: "d", projectRoot: join(root, "checkout"), sourceCommit: commit, resultsRoot: deployTrackDir(join(root, "state"), "deploy-retry-v", "d"), manifestPath: deployManifestPath(deployTrackDir(join(root, "state"), "deploy-retry-v", "d")) });
     const vd = deployTrackDir(join(root, "state"), "deploy-retry-v", "d");
+    await full.tracks.updateDeployStatus(vd, { phase: "deployed", sourceCommit: commit });
     const v1 = await runDeployVerify(cfgV, { project: "deploy-retry-v", deployId: "d", projectRoot: join(root, "checkout"), sourceCommit: commit, resultsRoot: vd, manifestPath: deployManifestPath(vd) });
     const v2 = await runDeployVerify(cfgV, { project: "deploy-retry-v", deployId: "d", projectRoot: join(root, "checkout"), sourceCommit: commit, resultsRoot: vd, manifestPath: deployManifestPath(vd) });
     assert.notEqual(v1.attemptId, v2.attemptId);
@@ -502,4 +506,135 @@ test("hard-gate: deploy_manifest.json and src/adapters/implementation.ts are exp
   assert.equal(implManifestRef.track, "deploy");
 
   assert.ok(srcIndex.includes("deploy_prepare") || srcIndex.includes("development_cycle"), "src/index must expose deploy or cycle entry");
+});
+
+test("11. prepare/execute/verify live wiring is supervised, bounded, and repins fail-closed", async () => {
+  const prepareBody = srcIndex.slice(srcIndex.indexOf("async function handleDeployPrepare"), srcIndex.indexOf("async function handleDeployExecute"));
+  const executeBody = srcIndex.slice(srcIndex.indexOf("async function handleDeployExecute"), srcIndex.indexOf("async function handleDeployVerify"));
+  const verifyBody = srcIndex.slice(srcIndex.indexOf("async function handleDeployVerify"), srcIndex.indexOf("async function handleDeployStatus"));
+  const runnerBody = srcIndex.slice(srcIndex.indexOf("async function createDeployRunnerSession"), srcIndex.indexOf("async function waitForDeployAttemptTerminal"));
+  assert.match(prepareBody, /createDeployRunnerSession/);
+  assert.doesNotMatch(prepareBody, /execFileAsync\(/, "deploy_prepare must not execute adapter foreground");
+  assert.match(runnerBody, /timeout -k 5/);
+  assert.match(runnerBody, /verification_evidence\.json/);
+  assert.match(executeBody, /pinTrustedProjectRoot\(String\(deployStatus\.projectRoot/);
+  assert.match(verifyBody, /pinTrustedProjectRoot\(String\(deployStatus\.projectRoot/);
+  assert.doesNotMatch(executeBody, /pinned\?\.realPath\s*\|\|\s*deployStatus\.projectRoot/);
+  assert.doesNotMatch(verifyBody, /pinned\?\.realPath\s*\|\|\s*deployStatus\.projectRoot/);
+  assert.match(executeBody, /checkDeployActionTransition\("deploy_execute"/);
+  assert.match(verifyBody, /checkDeployActionTransition\("deploy_verify"/);
+  assert.match(verifyBody, /validateVerificationEvidence/);
+});
+
+test("12. deploy_status live handler is structurally read-only", async () => {
+  const statusBody = srcIndex.slice(srcIndex.indexOf("async function handleDeployStatus"), srcIndex.indexOf("async function handleDeployStop"));
+  assert.match(statusBody, /deriveDeployStatusFromAttempts/);
+  assert.doesNotMatch(statusBody, /updateDeployStatus\(/);
+  assert.doesNotMatch(statusBody, /saveJson\(/);
+  assert.doesNotMatch(statusBody, /writeFile\(/);
+  assert.doesNotMatch(statusBody, /createDeployRunnerSession\(/);
+});
+
+test("13. bounded adapter timeout fails closed", async (t) => {
+  assert.equal(hasFullDeploy && hasDeployTracks, true, "real deploy adapter modules are required");
+  const root = await mkdtemp(join(tmpdir(), "deploy-timeout-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await mkdir(join(root, "checkout", ".git"), { recursive: true });
+  const adapterPath = join(root, "slow.mjs");
+  await writeFile(adapterPath, `#!/usr/bin/env node\nawait new Promise(r => setTimeout(r, 3000));\n`, { mode: 0o755 });
+  const { deployTrackDir, deployManifestPath } = full.tracks;
+  const trackDir = deployTrackDir(join(root, "state"), "timeout-proj", "d1");
+  const cfg = { enabled: true, adapter: "command", command: adapterPath, args: [], timeoutSeconds: 1, supervisorPath: "", supervisorSocket: "" };
+  const res = await full.mod.runDeployPrepare(cfg, { project: "timeout-proj", deployId: "d1", projectRoot: join(root, "checkout"), sourceCommit: "1111111111111111111111111111111111111111", resultsRoot: trackDir, manifestPath: deployManifestPath(trackDir) });
+  assert.equal(res.ok, false);
+  assert.match(String(res.error), /timeout|prepare_failed/);
+});
+
+test("14. verify is rejected before deployed even with a valid manifest", async (t) => {
+  assert.equal(hasFullDeploy && hasDeployTracks, true, "real deploy adapter modules are required");
+  const root = await mkdtemp(join(tmpdir(), "deploy-verify-order-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await mkdir(join(root, "checkout", ".git"), { recursive: true });
+  const adapterPath = join(root, "adapter.mjs");
+  await writeFile(adapterPath, makePrepareStub(), { mode: 0o755 });
+  const project = "verify-order";
+  const deployId = "d1";
+  const commit = "2222222222222222222222222222222222222222";
+  const { deployTrackDir, deployManifestPath } = full.tracks;
+  const trackDir = deployTrackDir(join(root, "state"), project, deployId);
+  const cfg = { enabled: true, adapter: "command", command: adapterPath, args: [], timeoutSeconds: 5, supervisorPath: "", supervisorSocket: "" };
+  const prep = await full.mod.runDeployPrepare(cfg, { project, deployId, projectRoot: join(root, "checkout"), sourceCommit: commit, resultsRoot: trackDir, manifestPath: deployManifestPath(trackDir) });
+  assert.equal(prep.ok, true);
+  const verify = await full.mod.runDeployVerify(cfg, { project, deployId, projectRoot: join(root, "checkout"), sourceCommit: commit, resultsRoot: trackDir, manifestPath: deployManifestPath(trackDir) });
+  assert.equal(verify.ok, false);
+  assert.match(String(verify.error), /requires_deployed/);
+});
+
+test("15. exit zero is insufficient: verification requires complete structured evidence", async (t) => {
+  assert.equal(hasFullDeploy && hasDeployTracks, true, "real deploy adapter modules are required");
+  const root = await mkdtemp(join(tmpdir(), "deploy-evidence-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await mkdir(join(root, "checkout", ".git"), { recursive: true });
+  const adapterPath = join(root, "adapter.mjs");
+  await writeFile(adapterPath, `#!/usr/bin/env node
+import { readFile, writeFile, mkdir } from "node:fs/promises";
+import { dirname } from "node:path";
+const req = JSON.parse(await readFile(process.argv[2], "utf8"));
+if (req.mode === "prepare") {
+  await mkdir(dirname(req.manifestPath), { recursive: true });
+  await writeFile(req.manifestPath, JSON.stringify({sourceCommit:req.sourceCommit,expectedMutations:[],protectedPaths:[],requiredAuthorizations:[],verificationChecks:["health","smoke"],rollback:{available:true,description:"rollback",artifacts:[]}}, null, 2));
+  process.exit(0);
+}
+if (req.mode === "verify") {
+  await writeFile(req.verificationEvidencePath, JSON.stringify({schemaVersion:1,ok:true,checks:[{name:"health",status:"pass"}]}));
+  process.exit(0);
+}
+process.exit(0);
+`, { mode: 0o755 });
+  const project = "evidence";
+  const deployId = "d1";
+  const commit = "3333333333333333333333333333333333333333";
+  const { deployTrackDir, deployManifestPath, updateDeployStatus } = full.tracks;
+  const trackDir = deployTrackDir(join(root, "state"), project, deployId);
+  const cfg = { enabled: true, adapter: "command", command: adapterPath, args: [], timeoutSeconds: 5, supervisorPath: "", supervisorSocket: "" };
+  assert.equal((await full.mod.runDeployPrepare(cfg, { project, deployId, projectRoot: join(root, "checkout"), sourceCommit: commit, resultsRoot: trackDir, manifestPath: deployManifestPath(trackDir) })).ok, true);
+  await updateDeployStatus(trackDir, { phase: "deployed", sourceCommit: commit });
+  const verify = await full.mod.runDeployVerify(cfg, { project, deployId, projectRoot: join(root, "checkout"), sourceCommit: commit, resultsRoot: trackDir, manifestPath: deployManifestPath(trackDir) });
+  assert.equal(verify.ok, false);
+  assert.match(String(verify.error), /verification_check_not_passed:smoke/);
+});
+
+test("16. complete structured verification evidence reaches verified", async (t) => {
+  assert.equal(hasFullDeploy && hasDeployTracks, true, "real deploy adapter modules are required");
+  const root = await mkdtemp(join(tmpdir(), "deploy-evidence-pass-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await mkdir(join(root, "checkout", ".git"), { recursive: true });
+  const adapterPath = join(root, "adapter.mjs");
+  await writeFile(adapterPath, `#!/usr/bin/env node
+import { readFile, writeFile, mkdir } from "node:fs/promises";
+import { dirname } from "node:path";
+const req = JSON.parse(await readFile(process.argv[2], "utf8"));
+if (req.mode === "prepare") {
+  await mkdir(dirname(req.manifestPath), { recursive: true });
+  await writeFile(req.manifestPath, JSON.stringify({sourceCommit:req.sourceCommit,expectedMutations:[],protectedPaths:[],requiredAuthorizations:[],verificationChecks:["health","smoke"],rollback:{available:true,description:"rollback",artifacts:[]}}, null, 2));
+  process.exit(0);
+}
+if (req.mode === "verify") {
+  await writeFile(req.verificationEvidencePath, JSON.stringify({schemaVersion:1,ok:true,checks:[{name:"health",status:"pass"},{name:"smoke",status:"pass"}]}));
+  process.exit(0);
+}
+process.exit(0);
+`, { mode: 0o755 });
+  const project = "evidence-pass";
+  const deployId = "d1";
+  const commit = "4444444444444444444444444444444444444444";
+  const { deployTrackDir, deployManifestPath, updateDeployStatus, loadDeployJson, deployStatusPath } = full.tracks;
+  const trackDir = deployTrackDir(join(root, "state"), project, deployId);
+  const cfg = { enabled: true, adapter: "command", command: adapterPath, args: [], timeoutSeconds: 5, supervisorPath: "", supervisorSocket: "" };
+  assert.equal((await full.mod.runDeployPrepare(cfg, { project, deployId, projectRoot: join(root, "checkout"), sourceCommit: commit, resultsRoot: trackDir, manifestPath: deployManifestPath(trackDir) })).ok, true);
+  await updateDeployStatus(trackDir, { phase: "deployed", sourceCommit: commit });
+  const verify = await full.mod.runDeployVerify(cfg, { project, deployId, projectRoot: join(root, "checkout"), sourceCommit: commit, resultsRoot: trackDir, manifestPath: deployManifestPath(trackDir) });
+  assert.equal(verify.ok, true, JSON.stringify(verify));
+  const status = await loadDeployJson(deployStatusPath(trackDir));
+  assert.equal(status.phase, "verified");
 });

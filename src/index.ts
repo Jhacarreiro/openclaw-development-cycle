@@ -19,7 +19,8 @@ import { transientRuntimeObservationRecoveryPatch } from "./core/runtime-failure
 import { loadDevelopmentCycleConfig } from "./config.js";
 import { acquireLock, createFilesystemStore } from "./storage/filesystem.js";
 import { buildImplementationLaunchSpec, jsonShellQuote, renderShellCommand, renderShellEnvironment, shellQuote } from "./adapters/implementation.js";
-import { buildDeployLaunchSpec } from "./adapters/deploy.js";
+import { buildDeployLaunchSpec, validateDeployManifest, validateVerificationEvidence } from "./adapters/deploy.js";
+import { checkDeployActionTransition } from "./core/deploy-state-machine.js";
 
 const lifecycleLockHeld = Symbol("developmentCycleLifecycleLockHeld");
 const lifecycleLockTimeoutMs = 30000;
@@ -2558,7 +2559,10 @@ async function updateDeployStatus(dir: string, patch: any): Promise<any> {
   const lock = await acquireLock(lockDir, 5000);
   try {
     const current = await loadJson(path) as any;
-    const next = { ...current, ...patch, updatedAt: new Date().toISOString() };
+    const normalized = { ...patch } as any;
+    if (normalized.status && !normalized.phase) normalized.phase = normalized.status;
+    if (normalized.phase && !normalized.status) normalized.status = normalized.phase;
+    const next = { ...current, ...normalized, updatedAt: new Date().toISOString() };
     if (!(await lock.isHeld())) throw new Error(`lost deploy lock ${lockDir} before write`);
     await saveJson(path, next);
     return next;
@@ -2580,20 +2584,21 @@ async function resolveSourceCommit(pinnedProcPath: string, sourceRef: string): P
     return { ok: false, error: String(err?.message || err) };
   }
 }
-async function createDeployRunnerSession(dir: string, params: any, mode: "execute" | "verify") {
+async function createDeployRunnerSession(dir: string, params: any, mode: "prepare" | "execute" | "verify") {
   const attemptId = cleanId(params.attemptId || `${mode}-${Date.now()}-${randomUUID()}`, "attempt");
   const sessionDir = join(dir, mode, "attempts", attemptId);
   const logsDir = join(sessionDir, "logs");
   const statusPath = join(sessionDir, "status.json");
   const payloadPath = join(sessionDir, "payload.json");
   const requestPath = join(sessionDir, "request.json");
-  const runnerPath = join(sessionDir, mode === "execute" ? "run-deploy-execute.sh" : "run-deploy-verify.sh");
+  const runnerPath = join(sessionDir, `run-deploy-${mode}.sh`);
   const exitCodePath = join(sessionDir, "exit-code.txt");
   const exitedAtPath = join(sessionDir, "exited-at.txt");
   const stdoutPath = join(logsDir, "stdout.log");
   const stderrPath = join(logsDir, "stderr.log");
   await mkdir(logsDir, { recursive: true });
-  const deployRequest = params.deployRequest;
+  const verificationEvidencePath = mode === "verify" ? join(sessionDir, "verification_evidence.json") : "";
+  const deployRequest = { ...params.deployRequest, ...(verificationEvidencePath ? { verificationEvidencePath } : {}) };
   await saveJson(requestPath, deployRequest);
   let launchSpec: any;
   try {
@@ -2610,6 +2615,7 @@ async function createDeployRunnerSession(dir: string, params: any, mode: "execut
       timeoutSeconds: Number(params.timeoutSeconds || deployConfig.timeoutSeconds),
       mode: params.deployMode,
       requestPath,
+      verificationEvidencePath: verificationEvidencePath || undefined,
     });
   } catch (error: any) {
     return { ok: false, error: String(error?.message || error) };
@@ -2665,7 +2671,7 @@ trap 'exit 129' HUP
 (while :; do printf '{"at":"%s","pid":%s}\\n' "$(date -Is)" "$$" > "$HEARTBEAT_FILE"; sleep ${runnerHeartbeatIntervalSeconds}; done) &
 heartbeat_pid=$!
 cd ${shellQuote(params.projectRoot)} || exit 72
-${commandLine} > ${shellQuote(stdoutPath)} 2> ${shellQuote(stderrPath)}
+timeout -k 5 ${Math.max(1, Number(params.timeoutSeconds || deployConfig.timeoutSeconds))} ${commandLine} > ${shellQuote(stdoutPath)} 2> ${shellQuote(stderrPath)}
 `;
   await writeFile(runnerPath, runnerScript, { mode: 0o755 } as any);
   await rm(exitCodePath, { force: true });
@@ -2689,6 +2695,7 @@ ${commandLine} > ${shellQuote(stdoutPath)} 2> ${shellQuote(stderrPath)}
     exitedAtPath,
     stdoutPath,
     stderrPath,
+    verificationEvidencePath: verificationEvidencePath || null,
   };
   await saveJson(payloadPath, { id: status.id, attemptId, mode, project: params.project, deployId: params.deployId });
   await saveJson(statusPath, status);
@@ -2716,8 +2723,58 @@ ${commandLine} > ${shellQuote(stdoutPath)} 2> ${shellQuote(stderrPath)}
     await saveJson(statusPath, failedStatus);
     return { ok: false, attemptId, sessionDir, statusPath, payloadPath, requestPath, runnerPath, stdoutPath, stderrPath, status: failedStatus, error: String(error?.message || error) };
   }
-  return { ok: true, attemptId, sessionDir, statusPath, payloadPath, requestPath, runnerPath, stdoutPath, stderrPath, status };
+  return { ok: true, attemptId, sessionDir, statusPath, payloadPath, requestPath, runnerPath, stdoutPath, stderrPath, verificationEvidencePath: verificationEvidencePath || null, status };
 }
+async function waitForDeployAttemptTerminal(statusPath: string, timeoutSeconds: number): Promise<any> {
+  const deadline = Date.now() + Math.max(1, Number(timeoutSeconds || deployConfig.timeoutSeconds)) * 1000 + 8000;
+  let last: any = null;
+  while (Date.now() < deadline) {
+    last = await readJsonIfExists(statusPath) as any;
+    if (last && (last.launchState === "exited" || ["completed", "failed"].includes(String(last.status || "")))) return last;
+    await sleep(250);
+  }
+  return last || { status: "unknown", launchState: "unknown", error: "deploy_attempt_terminal_status_timeout" };
+}
+
+async function validatedDeployManifest(dir: string, sourceCommit: string): Promise<any> {
+  const manifestPath = join(dir, "deploy_manifest.json");
+  const raw = await readJsonIfExists(manifestPath);
+  const result = validateDeployManifest(raw, sourceCommit);
+  return { ...result, manifestPath, raw };
+}
+
+async function deriveDeployStatusFromAttempts(dir: string, current: any): Promise<any> {
+  if (!current || !Object.keys(current).length) return current;
+  const phase = String(current.phase || current.status || "");
+  if (["execution_launched", "execution_running"].includes(phase) && current.lastExecuteStatusPath) {
+    const attempt = await readJsonIfExists(String(current.lastExecuteStatusPath)) as any;
+    if (attempt && (attempt.launchState === "exited" || ["completed", "failed"].includes(String(attempt.status || ""))) && typeof attempt.exitCode === "number") {
+      const nextPhase = attempt.exitCode === 0 ? "deployed" : "execution_failed";
+      return { ...current, status: nextPhase, executionExitCode: attempt.exitCode, executionExitedAt: attempt.exitedAt || null, nextAction: nextPhase === "deployed" ? "Call deploy_verify to run post-deploy checks." : "Inspect execute attempt logs; retry deploy_execute after resolving the failure." };
+    }
+  }
+  if (phase === "verification_running" && current.lastVerifyStatusPath) {
+    const attempt = await readJsonIfExists(String(current.lastVerifyStatusPath)) as any;
+    if (attempt && (attempt.launchState === "exited" || ["completed", "failed"].includes(String(attempt.status || ""))) && typeof attempt.exitCode === "number") {
+      if (attempt.exitCode !== 0) return { ...current, status: "verification_failed", verificationExitCode: attempt.exitCode, nextAction: "Verification command failed; inspect verify logs and rollback metadata. There is no automatic rollback." };
+      const manifestResult = await validatedDeployManifest(dir, String(current.sourceCommit || ""));
+      if (!manifestResult.ok) return { ...current, status: "verification_failed", error: manifestResult.error, nextAction: "Verification cannot be accepted because the manifest is invalid or mismatched." };
+      const evidencePath = String(attempt.verificationEvidencePath || current.lastVerifyEvidencePath || "");
+      const evidence = evidencePath ? await readJsonIfExists(evidencePath) : null;
+      const verified = validateVerificationEvidence(evidence, manifestResult.manifest.verificationChecks);
+      if (!verified.ok) return { ...current, status: "verification_failed", error: verified.error, verificationEvidencePath: evidencePath || null, nextAction: "Verification evidence is incomplete or failed. There is no automatic rollback." };
+      return { ...current, status: "verified", verificationExitCode: 0, verificationEvidencePath: evidencePath, verification: verified.evidence, nextAction: "Deployment verified." };
+    }
+  }
+  return current;
+}
+
+async function reconcileDeployStatusForMutation(dir: string, current: any): Promise<any> {
+  const derived = await deriveDeployStatusFromAttempts(dir, current);
+  if (!derived || JSON.stringify(derived) === JSON.stringify(current)) return current;
+  return await updateDeployStatus(dir, derived);
+}
+
 async function handleDeployPrepare(rawParams: any) {
   if (!deployConfig.enabled) return { ok: false, error: "deploy_disabled", hint: "Set DEVELOPMENT_CYCLE_DEPLOY_ENABLED=true to enable deploy track." };
   const project = cleanId(rawParams.project || "default");
@@ -2726,82 +2783,50 @@ async function handleDeployPrepare(rawParams: any) {
   const pinned = await pinTrustedProjectRoot(requestedProjectRoot);
   if (!pinned) return { ok: false, error: "projectRoot_missing_or_not_trusted_git_checkout", project, projectRoot: requestedProjectRoot };
   let sourceCommit = "";
+  let realProjectRoot = "";
   try {
+    realProjectRoot = pinned.realPath;
     const resolved = await resolveSourceCommit(pinned.procPath, String(rawParams.sourceRef || ""));
     if (!resolved.ok) return { ok: false, error: "source_ref_not_resolved", detail: resolved.error };
     sourceCommit = resolved.commit;
   } finally { await pinned.handle.close().catch(() => null); }
+
   const deployId = cleanId(rawParams.deployId || `${project}-${Date.now().toString(36)}-${randomUUID().slice(0, 8)}`);
   const dir = deployDir(project, deployId);
   await mkdir(dir, { recursive: true });
+  const existing = await readJsonIfExists(join(dir, "deploy_status.json")) as any;
+  if (existing && Object.keys(existing).length) {
+    const transition = checkDeployActionTransition("deploy_prepare", String(existing.phase || existing.status || ""));
+    if (!transition.ok) return { ok: false, error: transition.error, project, deployId, dir };
+  }
+
   const deploymentTarget = String(rawParams.deploymentTarget || "");
-  const objective = String(rawParams.objective || "");
-  const deployRequest: any = {
-    project,
-    deployId,
-    projectRoot: String((await pinTrustedProjectRoot(requestedProjectRoot).then(async (p) => { const v = p?.realPath || requestedProjectRoot; await p?.handle.close().catch(() => null); return v; })) || requestedProjectRoot),
-    sourceRef: String(rawParams.sourceRef || ""),
-    sourceRunId: String(rawParams.sourceRunId || ""),
-    deploymentTarget,
-    objective,
-    sourceCommit,
-    deploymentAdapter: String(rawParams.deploymentAdapter || ""),
-    createdAt: new Date().toISOString(),
-  };
+  const deployRequest = { project, deployId, projectRoot: realProjectRoot, sourceRef: String(rawParams.sourceRef || ""), sourceRunId: String(rawParams.sourceRunId || ""), deploymentTarget, objective: String(rawParams.objective || ""), sourceCommit, deploymentAdapter: String(rawParams.deploymentAdapter || ""), createdAt: new Date().toISOString() };
   await saveJson(join(dir, "deploy_request.json"), deployRequest);
-  const pinned2 = await pinTrustedProjectRoot(requestedProjectRoot);
-  const realProjectRoot = pinned2?.realPath || requestedProjectRoot;
-  if (pinned2) await pinned2.handle.close().catch(() => null);
   const manifestPath = join(dir, "deploy_manifest.json");
-  const prepareDir = join(dir, "prepare");
-  await mkdir(prepareDir, { recursive: true });
-  const adapterRequestPath = join(prepareDir, "request.json");
-  const attemptId = cleanId(`prepare-${Date.now()}-${randomUUID()}`, "attempt");
-  const attemptDir = join(prepareDir, "attempts", attemptId);
-  await mkdir(attemptDir, { recursive: true });
-  const resultsRoot = dir;
-  const deployAdapterRequest: any = {
-    schemaVersion: 1,
-    track: "deploy",
-    mode: "prepare",
-    project,
-    deployId,
-    projectRoot: realProjectRoot,
-    sourceRefRequested: String(rawParams.sourceRef || ""),
-    sourceCommit,
-    deploymentTarget,
-    resultsRoot,
-    manifestPath,
-    authorizationPath: "",
-    timeoutSeconds: Number(deployConfig.timeoutSeconds),
-  };
-  await saveJson(adapterRequestPath, deployAdapterRequest);
-  await saveJson(join(attemptDir, "request.json"), deployAdapterRequest);
-  let adapterResult: any = null;
-  let adapterError: string | null = null;
-  try {
-    if (!deployConfig.command) throw new Error("deploy_command_not_configured");
-    const execStat = await stat(deployConfig.command).catch(() => null);
-    if (!execStat?.isFile() || (execStat.mode & 0o111) === 0) throw new Error("deploy_executable_missing_or_not_executable");
-    const res = await execFileAsync(deployConfig.command, [...deployConfig.args, adapterRequestPath], { cwd: realProjectRoot, timeout: deployConfig.timeoutSeconds * 1000, maxBuffer: 2 * 1024 * 1024 });
-    adapterResult = { stdout: String(res.stdout || ""), stderr: String(res.stderr || "") };
-  } catch (err: any) {
-    adapterError = String(err?.message || err);
-    adapterResult = { stdout: String(err?.stdout || ""), stderr: String(err?.stderr || ""), error: adapterError };
+  const adapterRequest = { schemaVersion: 1, track: "deploy", mode: "prepare", project, deployId, projectRoot: realProjectRoot, sourceRefRequested: deployRequest.sourceRef, sourceCommit, deploymentTarget, resultsRoot: dir, manifestPath, authorizationPath: "", timeoutSeconds: Number(deployConfig.timeoutSeconds) };
+  const launched = await createDeployRunnerSession(dir, { ...adapterRequest, deployRequest: adapterRequest, deployMode: "prepare" }, "prepare");
+  if (!launched.ok) {
+    const next = await updateDeployStatus(dir, { project, deployId, projectRoot: realProjectRoot, sourceCommit, sourceRef: deployRequest.sourceRef, deploymentTarget, status: "prepare_failed", error: launched.error, lastPrepareAttemptId: launched.attemptId || null, lastPrepareStatusPath: launched.statusPath || null, nextAction: "Fix deploy prepare launch blocker, then retry deploy_prepare." });
+    return { ok: false, error: launched.error, project, deployId, dir, status: next.status };
   }
-  await saveJson(join(attemptDir, "result.json"), { adapterResult, adapterError, completedAt: new Date().toISOString() });
-  await writeFile(join(attemptDir, "stdout.log"), String(adapterResult?.stdout || ""));
-  await writeFile(join(attemptDir, "stderr.log"), String(adapterResult?.stderr || adapterResult?.error || ""));
-  const manifest = await readJsonIfExists(manifestPath);
-  if (!manifest || typeof manifest !== "object" || !String((manifest as any).sourceCommit || "").trim()) {
-    await updateDeployStatus(dir, { project, deployId, projectRoot: realProjectRoot, sourceCommit, sourceRef: String(rawParams.sourceRef || ""), deploymentTarget, status: "prepare_failed", error: adapterError || "deploy_manifest_missing_or_invalid", adapterResult, manifestPath, manifest: manifest || null, nextAction: "Fix deploy adapter prepare to emit deploy_manifest.json with sourceCommit." });
-    return { ok: false, error: "deploy_manifest_missing_or_invalid", project, deployId, dir, sourceCommit, adapterError, manifest };
+  const terminal = await waitForDeployAttemptTerminal(launched.statusPath, Number(deployConfig.timeoutSeconds));
+  if (typeof terminal?.exitCode !== "number" || terminal.exitCode !== 0) {
+    const error = terminal?.exitCode === 124 ? "deploy_prepare_timeout" : "deploy_prepare_failed";
+    const next = await updateDeployStatus(dir, { project, deployId, projectRoot: realProjectRoot, sourceCommit, sourceRef: deployRequest.sourceRef, deploymentTarget, status: "prepare_failed", error, lastPrepareAttemptId: launched.attemptId, lastPrepareSessionDir: launched.sessionDir, lastPrepareStatusPath: launched.statusPath, lastPrepareStdout: launched.stdoutPath, lastPrepareStderr: launched.stderrPath, nextAction: "Inspect prepare attempt logs; retry deploy_prepare after resolving the failure." });
+    return { ok: false, error, project, deployId, dir, status: next.status, attemptId: launched.attemptId };
   }
-  const rollback = (manifest as any).rollback || null;
-  if (rollback) await saveJson(join(dir, "rollback.json"), rollback);
-  const next = await updateDeployStatus(dir, { project, deployId, projectRoot: realProjectRoot, sourceCommit, sourceRef: String(rawParams.sourceRef || ""), sourceRunId: String(rawParams.sourceRunId || ""), deploymentTarget, status: "prepared", manifestPath, manifest, rollback, expectedMutations: (manifest as any).expectedMutations || [], protectedPaths: (manifest as any).protectedPaths || [], requiredAuthorizations: (manifest as any).requiredAuthorizations || [], verificationChecks: (manifest as any).verificationChecks || [], nextAction: "Call deploy_execute with authorizationText when ready to deploy.", adapterResult });
-  return { ok: true, project, deployId, dir, status: next.status, sourceCommit, manifest, rollback, nextAction: next.nextAction };
+  const manifestResult = await validatedDeployManifest(dir, sourceCommit);
+  if (!manifestResult.ok) {
+    const next = await updateDeployStatus(dir, { project, deployId, projectRoot: realProjectRoot, sourceCommit, sourceRef: deployRequest.sourceRef, deploymentTarget, status: "prepare_failed", error: manifestResult.error, lastPrepareAttemptId: launched.attemptId, lastPrepareSessionDir: launched.sessionDir, lastPrepareStatusPath: launched.statusPath, manifestPath, manifest: manifestResult.raw || null, nextAction: "Fix deploy adapter prepare to emit a complete deploy_manifest.json for the exact pinned source commit." });
+    return { ok: false, error: manifestResult.error, project, deployId, dir, status: next.status, sourceCommit };
+  }
+  const manifest = manifestResult.manifest;
+  await saveJson(join(dir, "rollback.json"), manifest.rollback);
+  const next = await updateDeployStatus(dir, { project, deployId, projectRoot: realProjectRoot, sourceCommit, sourceRef: deployRequest.sourceRef, sourceRunId: deployRequest.sourceRunId, deploymentTarget, status: "prepared", manifestPath, manifest, rollback: manifest.rollback, expectedMutations: manifest.expectedMutations, protectedPaths: manifest.protectedPaths, requiredAuthorizations: manifest.requiredAuthorizations, verificationChecks: manifest.verificationChecks, lastPrepareAttemptId: launched.attemptId, lastPrepareSessionDir: launched.sessionDir, lastPrepareStatusPath: launched.statusPath, lastPrepareStdout: launched.stdoutPath, lastPrepareStderr: launched.stderrPath, nextAction: "Call deploy_execute with authorizationText when ready to deploy." });
+  return { ok: true, project, deployId, dir, status: next.status, sourceCommit, manifest, rollback: manifest.rollback, attemptId: launched.attemptId, nextAction: next.nextAction };
 }
+
 async function handleDeployExecute(rawParams: any) {
   if (!deployConfig.enabled) return { ok: false, error: "deploy_disabled" };
   const project = cleanId(rawParams.project || "default");
@@ -2809,54 +2834,41 @@ async function handleDeployExecute(rawParams: any) {
   if (!deployIdRaw) return { ok: false, error: "deployId_required", project };
   const deployId = cleanId(deployIdRaw);
   const dir = deployDir(project, deployId);
-  const deployStatus = await readJsonIfExists(join(dir, "deploy_status.json")) as any;
-  if (!deployStatus || !deployStatus.sourceCommit) return { ok: false, error: "deploy_not_prepared", project, deployId, hint: "Call deploy_prepare first." };
-  const manifest = (await readJsonIfExists(join(dir, "deploy_manifest.json")) as any) || deployStatus.manifest;
-  if (!manifest) return { ok: false, error: "deploy_manifest_missing", project, deployId };
-  const requiredAuth = Array.isArray(manifest.requiredAuthorizations) ? manifest.requiredAuthorizations : [];
+  let deployStatus = await readJsonIfExists(join(dir, "deploy_status.json")) as any;
+  if (!deployStatus || !Object.keys(deployStatus).length) return { ok: false, error: "deploy_not_prepared", project, deployId, hint: "Call deploy_prepare first." };
+  deployStatus = await reconcileDeployStatusForMutation(dir, deployStatus);
+  const transition = checkDeployActionTransition("deploy_execute", String(deployStatus.phase || deployStatus.status || ""));
+  if (!transition.ok) return { ok: false, error: transition.error, project, deployId, status: deployStatus.status };
+
+  const manifestResult = await validatedDeployManifest(dir, String(deployStatus.sourceCommit || ""));
+  if (!manifestResult.ok) return { ok: false, error: manifestResult.error, project, deployId };
+  const manifest = manifestResult.manifest;
   const authText = String(rawParams.authorizationText || "").trim();
-  if (requiredAuth.length > 0 && !authText) return { ok: false, error: "missing_required_authorization", requiredAuthorizations: requiredAuth, hint: "Provide authorizationText." };
-  if (authText) await writeFile(join(dir, "authorization_evidence.md"), authText + "\n");
-  const pinned = await pinTrustedProjectRoot(String(deployStatus.projectRoot || rawParams.projectRoot || ""));
-  const realProjectRoot = pinned?.realPath || String(deployStatus.projectRoot || "");
-  if (pinned) await pinned.handle.close().catch(() => null);
-  if (!realProjectRoot) return { ok: false, error: "projectRoot_missing", project, deployId };
+  if (manifest.requiredAuthorizations.length > 0 && !authText) return { ok: false, error: "missing_required_authorization", requiredAuthorizations: manifest.requiredAuthorizations, hint: "Provide authorizationText." };
+  let authPath = "";
+  if (authText) {
+    authPath = join(dir, "authorization_evidence.md");
+    await writeFile(authPath, `${authText}\n`, { mode: 0o600 } as any);
+  }
+
+  const pinned = await pinTrustedProjectRoot(String(deployStatus.projectRoot || ""));
+  if (!pinned) return { ok: false, error: "projectRoot_missing_or_not_trusted_git_checkout", project, deployId, projectRoot: String(deployStatus.projectRoot || "") };
+  const realProjectRoot = pinned.realPath;
+  await pinned.handle.close().catch(() => null);
   const manifestPath = join(dir, "deploy_manifest.json");
-  const authPath = authText ? join(dir, "authorization_evidence.md") : "";
-  const deployAdapterRequest: any = {
-    schemaVersion: 1,
-    track: "deploy",
-    mode: "execute",
-    project,
-    deployId,
-    projectRoot: realProjectRoot,
-    sourceRefRequested: String(deployStatus.sourceRef || ""),
-    sourceCommit: String(deployStatus.sourceCommit || ""),
-    deploymentTarget: String(deployStatus.deploymentTarget || ""),
-    resultsRoot: dir,
-    manifestPath,
-    authorizationPath: authPath,
-    timeoutSeconds: Number(deployConfig.timeoutSeconds),
-  };
-  const launched = await createDeployRunnerSession(dir, { project, deployId, projectRoot: realProjectRoot, sourceRefRequested: deployAdapterRequest.sourceRefRequested, sourceCommit: deployAdapterRequest.sourceCommit, deploymentTarget: deployAdapterRequest.deploymentTarget, resultsRoot: dir, manifestPath, authorizationPath: authPath, timeoutSeconds: deployAdapterRequest.timeoutSeconds, deployRequest: deployAdapterRequest, deployMode: "execute" }, "execute");
+  const adapterRequest = { schemaVersion: 1, track: "deploy", mode: "execute", project, deployId, projectRoot: realProjectRoot, sourceRefRequested: String(deployStatus.sourceRef || ""), sourceCommit: String(deployStatus.sourceCommit || ""), deploymentTarget: String(deployStatus.deploymentTarget || ""), resultsRoot: dir, manifestPath, authorizationPath: authPath, timeoutSeconds: Number(deployConfig.timeoutSeconds) };
+  const launched = await createDeployRunnerSession(dir, { ...adapterRequest, deployRequest: adapterRequest, deployMode: "execute" }, "execute");
   if (!launched.ok) {
-    const next = await updateDeployStatus(dir, { status: "execution_failed", error: launched.error, lastExecuteAttemptId: (launched as any).attemptId || null, lastExecuteStatusPath: (launched as any).statusPath || null, nextAction: "Fix deploy execute launch blocker, then retry deploy_execute." });
+    const next = await updateDeployStatus(dir, { status: "execution_failed", error: launched.error, authorizationPath: authPath || null, lastExecuteAttemptId: launched.attemptId || null, lastExecuteStatusPath: launched.statusPath || null, nextAction: "Fix deploy execute launch blocker, then retry deploy_execute." });
     return { ok: false, error: launched.error, project, deployId, dir, status: next.status };
   }
-  const exitCode = (launched.status as any)?.exitCode;
-  let deployPhase: string;
-  let nextAction: string;
-  if (typeof exitCode === "number") {
-    deployPhase = exitCode === 0 ? "deployed" : "execution_failed";
-    nextAction = exitCode === 0 ? "Call deploy_verify to run post-deploy checks." : "Inspect execute attempt logs; retry deploy_execute.";
-  } else {
-    const isRunning = String((launched.status as any)?.status || "") === "running";
-    deployPhase = isRunning ? "execution_running" : "execution_launched";
-    nextAction = "Poll deploy_status; execution is supervised.";
-  }
-  const next = await updateDeployStatus(dir, { status: deployPhase, lastExecuteAttemptId: launched.attemptId, lastExecuteSessionDir: launched.sessionDir, lastExecuteStatusPath: launched.statusPath, lastExecuteStdout: launched.stdoutPath, lastExecuteStderr: launched.stderrPath, nextAction });
-  return { ok: exitCode === undefined ? true : exitCode === 0, project, deployId, dir, status: next.status, attemptId: launched.attemptId, sessionDir: launched.sessionDir, nextAction };
+  const exitCode = launched.status?.exitCode;
+  const phase = typeof exitCode === "number" ? (exitCode === 0 ? "deployed" : "execution_failed") : (String(launched.status?.status || "") === "running" ? "execution_running" : "execution_launched");
+  const nextAction = phase === "deployed" ? "Call deploy_verify to run post-deploy checks." : phase === "execution_failed" ? "Inspect execute attempt logs; retry deploy_execute after resolving the failure." : "Poll deploy_status; execution is supervised.";
+  const next = await updateDeployStatus(dir, { status: phase, authorizationPath: authPath || null, lastExecuteAttemptId: launched.attemptId, lastExecuteSessionDir: launched.sessionDir, lastExecuteStatusPath: launched.statusPath, lastExecuteStdout: launched.stdoutPath, lastExecuteStderr: launched.stderrPath, nextAction });
+  return { ok: phase !== "execution_failed", project, deployId, dir, status: next.status, attemptId: launched.attemptId, sessionDir: launched.sessionDir, nextAction };
 }
+
 async function handleDeployVerify(rawParams: any) {
   if (!deployConfig.enabled) return { ok: false, error: "deploy_disabled" };
   const project = cleanId(rawParams.project || "default");
@@ -2864,52 +2876,53 @@ async function handleDeployVerify(rawParams: any) {
   if (!deployIdRaw) return { ok: false, error: "deployId_required" };
   const deployId = cleanId(deployIdRaw);
   const dir = deployDir(project, deployId);
-  const deployStatus = await readJsonIfExists(join(dir, "deploy_status.json")) as any;
-  if (!deployStatus || !deployStatus.sourceCommit) return { ok: false, error: "deploy_not_prepared", project, deployId };
-  if (!["deployed", "execution_running", "execution_launched", "verified", "verification_failed"].includes(String(deployStatus.status || ""))) {
-    const s = String(deployStatus.status || "");
-    if (!["deployed", "verified", "verification_failed"].includes(s) && s !== "execution_running" && s !== "execution_launched") {
-      // Allow verify after deployed, but also after execution_running for polling-like verify; reject otherwise
-      if (!["prepared"].includes(s)) {}
-    }
-  }
+  let deployStatus = await readJsonIfExists(join(dir, "deploy_status.json")) as any;
+  if (!deployStatus || !Object.keys(deployStatus).length) return { ok: false, error: "deploy_not_prepared", project, deployId };
+  deployStatus = await reconcileDeployStatusForMutation(dir, deployStatus);
+  const transition = checkDeployActionTransition("deploy_verify", String(deployStatus.phase || deployStatus.status || ""));
+  if (!transition.ok) return { ok: false, error: transition.error, project, deployId, status: deployStatus.status };
+
+  const manifestResult = await validatedDeployManifest(dir, String(deployStatus.sourceCommit || ""));
+  if (!manifestResult.ok) return { ok: false, error: manifestResult.error, project, deployId };
   const pinned = await pinTrustedProjectRoot(String(deployStatus.projectRoot || ""));
-  const realProjectRoot = pinned?.realPath || String(deployStatus.projectRoot || "");
-  if (pinned) await pinned.handle.close().catch(() => null);
+  if (!pinned) return { ok: false, error: "projectRoot_missing_or_not_trusted_git_checkout", project, deployId, projectRoot: String(deployStatus.projectRoot || "") };
+  const realProjectRoot = pinned.realPath;
+  await pinned.handle.close().catch(() => null);
   const manifestPath = join(dir, "deploy_manifest.json");
-  const verifyRunning = await updateDeployStatus(dir, { status: "verification_running", nextAction: "Verification running; poll deploy_status." });
-  const deployAdapterRequest: any = {
-    schemaVersion: 1,
-    track: "deploy",
-    mode: "verify",
-    project,
-    deployId,
-    projectRoot: realProjectRoot,
-    sourceRefRequested: String(deployStatus.sourceRef || ""),
-    sourceCommit: String(deployStatus.sourceCommit || ""),
-    deploymentTarget: String(deployStatus.deploymentTarget || ""),
-    resultsRoot: dir,
-    manifestPath,
-    authorizationPath: String(deployStatus.authorizationPath || (await stat(join(dir, "authorization_evidence.md")).then(() => join(dir, "authorization_evidence.md")).catch(() => ""))),
-    timeoutSeconds: Number(deployConfig.timeoutSeconds),
-  };
-  const launched = await createDeployRunnerSession(dir, { project, deployId, projectRoot: realProjectRoot, sourceRefRequested: deployAdapterRequest.sourceRefRequested, sourceCommit: deployAdapterRequest.sourceCommit, deploymentTarget: deployAdapterRequest.deploymentTarget, resultsRoot: dir, manifestPath, authorizationPath: deployAdapterRequest.authorizationPath, timeoutSeconds: deployAdapterRequest.timeoutSeconds, deployRequest: deployAdapterRequest, deployMode: "verify" }, "verify");
+  const authPath = await stat(join(dir, "authorization_evidence.md")).then(() => join(dir, "authorization_evidence.md")).catch(() => "");
+  const adapterRequest = { schemaVersion: 1, track: "deploy", mode: "verify", project, deployId, projectRoot: realProjectRoot, sourceRefRequested: String(deployStatus.sourceRef || ""), sourceCommit: String(deployStatus.sourceCommit || ""), deploymentTarget: String(deployStatus.deploymentTarget || ""), resultsRoot: dir, manifestPath, authorizationPath: authPath, timeoutSeconds: Number(deployConfig.timeoutSeconds) };
+  const launched = await createDeployRunnerSession(dir, { ...adapterRequest, deployRequest: adapterRequest, deployMode: "verify" }, "verify");
   if (!launched.ok) {
-    const next = await updateDeployStatus(dir, { status: "verification_failed", error: launched.error, lastVerifyAttemptId: (launched as any).attemptId || null, nextAction: "Fix verify launch blocker, then retry deploy_verify. Rollback metadata is in rollback.json." });
+    const next = await updateDeployStatus(dir, { status: "verification_failed", error: launched.error, lastVerifyAttemptId: launched.attemptId || null, nextAction: "Fix verify launch blocker, then retry deploy_verify. Rollback metadata is in rollback.json." });
     return { ok: false, error: launched.error, project, deployId, dir, status: next.status };
   }
-  const exitCode = (launched.status as any)?.exitCode;
-  let finalStatus: string;
+
+  const exitCode = launched.status?.exitCode;
+  let finalStatus = "verification_running";
+  let error = "";
+  let verification: any = null;
   if (typeof exitCode === "number") {
-    finalStatus = exitCode === 0 ? "verified" : "verification_failed";
-  } else {
-    finalStatus = String((launched.status as any)?.status || "") === "running" ? "verification_running" : "verification_running";
+    if (exitCode !== 0) {
+      finalStatus = "verification_failed";
+      error = exitCode === 124 ? "deploy_verify_timeout" : "deploy_verify_failed";
+    } else {
+      verification = launched.verificationEvidencePath ? await readJsonIfExists(launched.verificationEvidencePath) : null;
+      const evidence = validateVerificationEvidence(verification, manifestResult.manifest.verificationChecks);
+      if (evidence.ok) {
+        finalStatus = "verified";
+        verification = evidence.evidence;
+      } else {
+        finalStatus = "verification_failed";
+        error = evidence.error;
+      }
+    }
   }
   const rollback = await readJsonIfExists(join(dir, "rollback.json"));
-  const nextAction = finalStatus === "verified" ? "Deployment verified." : finalStatus === "verification_failed" ? `Verification failed; rollback metadata: ${JSON.stringify(rollback || {})}. Operator next action: inspect verify logs and decide rollback.` : "Poll deploy_status.";
-  const next = await updateDeployStatus(dir, { status: finalStatus, lastVerifyAttemptId: launched.attemptId, lastVerifySessionDir: launched.sessionDir, lastVerifyStatusPath: launched.statusPath, lastVerifyStdout: launched.stdoutPath, lastVerifyStderr: launched.stderrPath, nextAction });
-  return { ok: finalStatus === "verified" || finalStatus === "verification_running", project, deployId, dir, status: next.status, attemptId: launched.attemptId, nextAction };
+  const nextAction = finalStatus === "verified" ? "Deployment verified." : finalStatus === "verification_failed" ? "Verification failed; inspect evidence and rollback metadata. There is no automatic rollback." : "Poll deploy_status; verification is supervised.";
+  const next = await updateDeployStatus(dir, { status: finalStatus, ...(error ? { error } : {}), lastVerifyAttemptId: launched.attemptId, lastVerifySessionDir: launched.sessionDir, lastVerifyStatusPath: launched.statusPath, lastVerifyEvidencePath: launched.verificationEvidencePath || null, lastVerifyStdout: launched.stdoutPath, lastVerifyStderr: launched.stderrPath, ...(verification ? { verification } : {}), nextAction });
+  return { ok: finalStatus !== "verification_failed", project, deployId, dir, status: next.status, attemptId: launched.attemptId, verificationEvidencePath: launched.verificationEvidencePath || null, rollback, nextAction };
 }
+
 async function handleDeployStatus(rawParams: any) {
   const project = cleanId(rawParams.project || "default");
   let deployId = String(rawParams.deployId || "").trim();
@@ -2920,14 +2933,16 @@ async function handleDeployStatus(rawParams: any) {
   }
   deployId = cleanId(deployId);
   const dir = deployDir(project, deployId);
-  const status = await readJsonIfExists(join(dir, "deploy_status.json")) as any;
-  if (!status || !Object.keys(status).length) return { ok: false, error: "deploy_not_found", project, deployId, dir };
+  const storedStatus = await readJsonIfExists(join(dir, "deploy_status.json")) as any;
+  if (!storedStatus || !Object.keys(storedStatus).length) return { ok: false, error: "deploy_not_found", project, deployId, dir };
+  const effectiveStatus = await deriveDeployStatusFromAttempts(dir, storedStatus);
   const files = (await readdir(dir).catch(() => [])).sort();
   const manifest = await readJsonIfExists(join(dir, "deploy_manifest.json"));
   const rollback = await readJsonIfExists(join(dir, "rollback.json"));
   const authEvidence = await readTextIfExists(join(dir, "authorization_evidence.md"));
-  return { ok: true, readOnly: true, project, deployId, dir, status, manifest, rollback, authorizationEvidencePresent: Boolean(authEvidence.trim()), files, nextAction: status?.nextAction || null };
+  return { ok: true, readOnly: true, project, deployId, dir, status: effectiveStatus, storedStatus, manifest, rollback, authorizationEvidencePresent: Boolean(authEvidence.trim()), files, nextAction: effectiveStatus?.nextAction || null };
 }
+
 async function handleDeployStop(rawParams: any) {
   if (!deployConfig.enabled) return { ok: false, error: "deploy_disabled" };
   const project = cleanId(rawParams.project || "default");
@@ -2935,26 +2950,31 @@ async function handleDeployStop(rawParams: any) {
   if (!deployIdRaw) return { ok: false, error: "deployId_required" };
   const deployId = cleanId(deployIdRaw);
   const dir = deployDir(project, deployId);
-  const status = await readJsonIfExists(join(dir, "deploy_status.json")) as any;
+  let status = await readJsonIfExists(join(dir, "deploy_status.json")) as any;
   if (!status || !Object.keys(status).length) return { ok: false, error: "deploy_not_found", project, deployId };
-  const targets = [status.lastExecuteStatusPath, status.lastVerifyStatusPath].filter(Boolean).map(String);
+  status = await reconcileDeployStatusForMutation(dir, status);
+  const transition = checkDeployActionTransition("deploy_stop", String(status.phase || status.status || ""));
+  if (!transition.ok) return { ok: false, error: transition.error, project, deployId, status: status.status };
+  const target = String(status.status || "") === "verification_running" ? status.lastVerifyStatusPath : status.lastExecuteStatusPath;
+  if (!target) return { ok: false, error: "deploy_stop_running_attempt_missing", project, deployId };
+  const session = await readJsonIfExists(String(target)) as any;
+  if (!session || String(session.status || "") !== "running") return { ok: false, error: "deploy_stop_running_attempt_missing", project, deployId };
+  const runnerPid = Number(session.runnerPid || session.pid || 0);
+  const pgid = Number(session.processGroupId || runnerPid || 0);
   const stopped: any[] = [];
-  for (const target of targets) {
-    const session = await readJsonIfExists(target) as any;
-    if (!session) { stopped.push({ target, skipped: true, reason: "session_status_missing" }); continue; }
-    const runnerPid = Number(session.runnerPid || session.pid || 0);
-    const pgid = Number(session.processGroupId || runnerPid || 0);
-    try {
-      if (pgid) try { process.kill(-pgid, "SIGTERM"); } catch {}
-      else if (runnerPid) try { process.kill(runnerPid, "SIGTERM"); } catch {}
-      await sleep(1200);
-      if (pgid) try { process.kill(-pgid, "SIGKILL"); } catch {}
-      else if (runnerPid) try { process.kill(runnerPid, "SIGKILL"); } catch {}
-      stopped.push({ target, ok: true, runnerPid: runnerPid || null, pgid: pgid || null });
-    } catch (e: any) { stopped.push({ target, ok: false, error: String(e?.message || e) }); }
+  try {
+    if (pgid) try { process.kill(-pgid, "SIGTERM"); } catch {}
+    else if (runnerPid) try { process.kill(runnerPid, "SIGTERM"); } catch {}
+    await sleep(1200);
+    if (pgid) try { process.kill(-pgid, "SIGKILL"); } catch {}
+    else if (runnerPid) try { process.kill(runnerPid, "SIGKILL"); } catch {}
+    stopped.push({ target, ok: true, runnerPid: runnerPid || null, pgid: pgid || null });
+  } catch (e: any) {
+    stopped.push({ target, ok: false, error: String(e?.message || e) });
   }
-  const next = await updateDeployStatus(dir, { status: "stopped", stoppedAt: new Date().toISOString(), stopResults: stopped, nextAction: "Deploy stopped; inspect state before retrying." });
-  return { ok: true, project, deployId, dir, status: next.status, stopped };
+  const ok = stopped.every((item) => item.ok === true);
+  const next = await updateDeployStatus(dir, { status: ok ? "stopped" : String(status.status || ""), ...(ok ? { stoppedAt: new Date().toISOString() } : {}), stopResults: stopped, nextAction: ok ? "Deploy stopped; inspect state before retrying." : "Stop failed; inspect the supervised attempt before taking further action." });
+  return { ok, project, deployId, dir, status: next.status, stopped };
 }
 
 async function projectCycle(params: any) {

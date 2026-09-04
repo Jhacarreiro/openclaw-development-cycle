@@ -22,6 +22,7 @@ import { acquireLock, createFilesystemStore } from "./storage/filesystem.js";
 import { buildImplementationLaunchSpec, jsonShellQuote, renderShellCommand, renderShellEnvironment, shellQuote } from "./adapters/implementation.js";
 
 const lifecycleLockHeld = Symbol("developmentCycleLifecycleLockHeld");
+const resolvedCycleDir = Symbol("developmentCycleResolvedCycleDir");
 const lifecycleLockTimeoutMs = 30000;
 
 const developmentCycleConfig = loadDevelopmentCycleConfig();
@@ -2533,26 +2534,50 @@ async function stopLaunchedImplementation(dir: string, status: any, reason: stri
   return { ok: true, stopped, status: next };
 }
 
-async function latestRunId(project: string) {
-  const entries: Array<{ name: string; mtime: number; ts: string }> = [];
+async function latestRunDir(project: string) {
+  const runsRoot = join(cycleRoot, "runs");
+  const runsRootInfo = await lstat(runsRoot).catch(() => null);
+  if (!runsRootInfo?.isDirectory() || runsRootInfo.isSymbolicLink()) return "";
+  const realRunsRoot = await realpath(runsRoot).catch(() => "");
+  if (!realRunsRoot) return "";
+
+  const containedDir = async (path: string) => {
+    const info = await lstat(path).catch(() => null);
+    if (!info?.isDirectory() || info.isSymbolicLink()) return null;
+    const realPath = await realpath(path).catch(() => "");
+    if (!realPath) return null;
+    const rel = relative(realRunsRoot, realPath);
+    if (!rel || rel === ".." || rel.startsWith(".." + sep) || rel.startsWith(sep)) return null;
+    return info;
+  };
+
+  const entries: Array<{ dir: string; name: string; mtime: number; ts: string }> = [];
   for (const dirName of projectPathCandidates(project)) {
-    const base = join(cycleRoot, "runs", dirName);
+    const base = join(runsRoot, dirName);
+    if (!(await containedDir(base))) continue;
+
     let ents: Array<{ name: string; isDirectory: () => boolean }> = [];
     try { ents = await readdir(base, { withFileTypes: true }); } catch { continue; }
     for (const ent of ents) {
       if (!ent.isDirectory() || !ent.name || ent.name === "." || ent.name === ".." || ent.name === ".git") continue;
       const full = join(base, ent.name);
-      // A valid run id may legitimately contain ".lock" (cleanId permits dots).
-      // Distinguish runs from project-level control directories by requiring the
-      // durable run record rather than filtering on the directory name.
-      const statusInfo = await stat(join(full, "status.json")).catch(() => null);
-      if (!statusInfo?.isFile()) continue;
-      let mtime = 0;
-      try { mtime = (await stat(full)).mtimeMs; } catch { continue; }
+      const fullInfo = await containedDir(full);
+      if (!fullInfo) continue;
+
+      const statusPath = join(full, "status.json");
+      const statusInfo = await lstat(statusPath).catch(() => null);
+      if (!statusInfo?.isFile() || statusInfo.isSymbolicLink()) continue;
+
       const tsMatch = ent.name.match(/-(\d{14,17})(?:-[a-z0-9]+)?$/i);
-      entries.push({ name: ent.name, mtime, ts: tsMatch ? tsMatch[1].padEnd(17, "0") : "" });
+      entries.push({
+        dir: full,
+        name: ent.name,
+        mtime: fullInfo.mtimeMs,
+        ts: tsMatch ? tsMatch[1].padEnd(17, "0") : "",
+      });
     }
   }
+
   entries.sort((a, b) => {
     if (a.ts && b.ts && a.ts !== b.ts) return a.ts.localeCompare(b.ts);
     if (a.ts && !b.ts) return 1;
@@ -2560,7 +2585,7 @@ async function latestRunId(project: string) {
     if (a.mtime !== b.mtime) return a.mtime - b.mtime;
     return a.name.localeCompare(b.name);
   });
-  return entries.at(-1)?.name || "";
+  return entries.at(-1)?.dir || "";
 }
 
 const LIVE_RUN_PHASES = ["implementation_launched", "implementation_running", "corrections_launched", "corrections_running"];
@@ -2583,12 +2608,14 @@ async function projectCycle(params: any) {
   const rawProject = params.project || "default";
   let project = cleanId(rawProject);
   const createRun = action === "request_plan" || action === "record_plan";
-  // cleanId("") falls back to "run", which would turn a "no run exists yet"
-  // latestRunId result into a phantom run directory. Check the raw value for
-  // the documented no-run response BEFORE normalizing it into a run id.
-  const requestedRunId = params.runId || (createRun ? newRunId(rawProject) : await latestRunId(rawProject));
-  if (!requestedRunId) return { ok: true, project, runId: null, dir: null, status: null, files: [], nextAction: "request_plan or record_plan" };
-  const dir = cycleDir(rawProject, requestedRunId);
+
+  let dir = params[resolvedCycleDir] ? String(params[resolvedCycleDir]) : "";
+  if (!dir) {
+    if (params.runId) dir = cycleDir(rawProject, params.runId);
+    else if (createRun) dir = cycleDir(rawProject, newRunId(rawProject));
+    else dir = await latestRunDir(rawProject);
+  }
+  if (!dir) return { ok: true, project, runId: null, dir: null, status: null, files: [], nextAction: "request_plan or record_plan" };
   project = basename(dirname(dir));
   const runId = basename(dir);
   if (action !== "status" && params[lifecycleLockHeld] !== true) {
@@ -2603,7 +2630,7 @@ async function projectCycle(params: any) {
       if (!(await lifecycleLock.isHeld())) {
         return { ok: false, error: "lifecycle_action_lock_lost", project, runId, dir, action };
       }
-      return await projectCycle({ ...params, project: rawProject, runId, [lifecycleLockHeld]: true });
+      return await projectCycle({ ...params, project: rawProject, [resolvedCycleDir]: dir, [lifecycleLockHeld]: true });
     } finally {
       await lifecycleLock.release();
     }

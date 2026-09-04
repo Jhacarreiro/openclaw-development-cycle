@@ -369,3 +369,22 @@ test("legacy resolver preserves a complete project-run pair instead of mixing ca
 
   assert.equal(store.runDir(rawProject, rawRun), legacyPair);
 });
+
+test("canonical fallback rejects a symlinked project parent when the run child is missing", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "development-cycle-canonical-parent-symlink-"));
+  const outside = await mkdtemp(join(tmpdir(), "development-cycle-canonical-parent-outside-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  t.after(() => rm(outside, { recursive: true, force: true }));
+
+  const store = createFilesystemStore(root);
+  const rawProject = "Project / One";
+  const canonicalProject = cleanId(rawProject);
+  const runsRoot = join(root, "runs");
+  await mkdir(runsRoot, { recursive: true });
+  await symlink(outside, join(runsRoot, canonicalProject), "dir");
+
+  assert.throws(
+    () => store.runDir(rawProject, "new-run"),
+    /unsafe canonical project directory/,
+  );
+});

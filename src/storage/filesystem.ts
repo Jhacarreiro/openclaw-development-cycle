@@ -133,7 +133,8 @@ export interface FilesystemStore {
 
 function existingContainedDir(path: string, root: string): boolean {
   try {
-    if (!lstatSync(path).isDirectory() || lstatSync(path).isSymbolicLink()) return false;
+    const info = lstatSync(path);
+    if (!info.isDirectory() || info.isSymbolicLink()) return false;
     const realRoot = realpathSync(root);
     const realPath = realpathSync(path);
     const rel = relative(realRoot, realPath);
@@ -141,6 +142,32 @@ function existingContainedDir(path: string, root: string): boolean {
   } catch {
     return false;
   }
+}
+
+function canonicalFallbackPath(runsRoot: string, projectId: string, runId: string): string {
+  const projectDir = join(runsRoot, projectId);
+  const candidate = join(projectDir, runId);
+  try {
+    const runsInfo = lstatSync(runsRoot);
+    if (!runsInfo.isDirectory() || runsInfo.isSymbolicLink()) throw new Error("unsafe runs root: " + runsRoot);
+  } catch (err: any) {
+    if (err?.code !== "ENOENT") throw err;
+    return candidate;
+  }
+  try {
+    const projectInfo = lstatSync(projectDir);
+    if (!projectInfo.isDirectory() || projectInfo.isSymbolicLink() || !existingContainedDir(projectDir, runsRoot)) throw new Error("unsafe canonical project directory: " + projectDir);
+  } catch (err: any) {
+    if (err?.code !== "ENOENT") throw err;
+    return candidate;
+  }
+  try {
+    const candidateInfo = lstatSync(candidate);
+    if (!candidateInfo.isDirectory() || candidateInfo.isSymbolicLink() || !existingContainedDir(candidate, runsRoot)) throw new Error("unsafe canonical run directory: " + candidate);
+  } catch (err: any) {
+    if (err?.code !== "ENOENT") throw err;
+  }
+  return candidate;
 }
 
 export function createFilesystemStore(stateRoot: string, now: () => Date = () => new Date()): FilesystemStore {
@@ -157,7 +184,7 @@ export function createFilesystemStore(stateRoot: string, now: () => Date = () =>
       if (!existingContainedDir(projectDir, runsRoot)) continue;
       if (existingContainedDir(candidate, runsRoot)) return candidate;
     }
-    return join(runsRoot, canonical[0], canonical[1]);
+    return canonicalFallbackPath(runsRoot, canonical[0], canonical[1]);
   };
 
   const loadJson = async <T extends object = Record<string, unknown>>(path: string): Promise<T> => {

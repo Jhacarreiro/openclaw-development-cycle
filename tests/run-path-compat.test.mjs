@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { access, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { access, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -194,4 +194,97 @@ test("digest-shaped legacy run aliases do not override the reserved canonical na
   assert.notEqual(status.details.dir, legacyDir);
   assert.equal(status.details.runId, cleanId(distinctRaw));
   assert.deepEqual(status.details.status, {});
+});
+
+test("project-level status ignores a symlinked candidate project during latest-run discovery", async (t) => {
+  const root = join(tmpdir(), `development-cycle-latest-symlink-${process.pid}-${Date.now()}`);
+  const outside = join(tmpdir(), `development-cycle-latest-symlink-outside-${process.pid}-${Date.now()}`);
+  t.after(() => rm(root, { recursive: true, force: true }));
+  t.after(() => rm(outside, { recursive: true, force: true }));
+
+  process.env.DEVELOPMENT_CYCLE_STATE_ROOT = join(root, "state");
+  process.env.DEVELOPMENT_CYCLE_PROJECT_DOCS_ROOT = join(root, "docs");
+  process.env.DEVELOPMENT_CYCLE_NOTIFICATIONS_ENABLED = "false";
+  process.env.DEVELOPMENT_CYCLE_OBSERVER_ENABLED = "false";
+
+  const project = "symlink-project";
+  const outsideRun = join(outside, "run-20260904120000000-abc123");
+  await mkdir(outsideRun, { recursive: true });
+  await writeFile(
+    join(outsideRun, "status.json"),
+    `${JSON.stringify({ phase: "planned", project, runId: "run-20260904120000000-abc123" }, null, 2)}\n`,
+  );
+  await mkdir(join(root, "state", "runs"), { recursive: true });
+  await symlink(outside, join(root, "state", "runs", project), "dir");
+
+  const { default: plugin } = await import(`../dist/index.js?latest-symlink=${Date.now()}`);
+  let registered;
+  plugin.register({ pluginConfig: {}, registerTool(tool) { registered = tool; } });
+
+  const status = await registered.execute(
+    "latest-symlink-status",
+    { action: "status", project },
+    undefined,
+    undefined,
+  );
+
+  assert.equal(status.details.ok, true, JSON.stringify(status.details));
+  assert.equal(status.details.runId, null);
+  assert.equal(status.details.dir, null);
+  assert.equal(status.details.status, null);
+});
+
+test("lifecycle re-entry preserves the exact legacy project-run pair selected before locking", async (t) => {
+  const root = join(tmpdir(), `development-cycle-pair-lock-${process.pid}-${Date.now()}`);
+  t.after(() => rm(root, { recursive: true, force: true }));
+
+  process.env.DEVELOPMENT_CYCLE_STATE_ROOT = join(root, "state");
+  process.env.DEVELOPMENT_CYCLE_PROJECT_DOCS_ROOT = join(root, "docs");
+  process.env.DEVELOPMENT_CYCLE_NOTIFICATIONS_ENABLED = "false";
+  process.env.DEVELOPMENT_CYCLE_OBSERVER_ENABLED = "false";
+  process.env.DEVELOPMENT_CYCLE_REPOSITORY_DELIVERY_ENABLED = "false";
+
+  const rawProject = "Project / One";
+  const rawRunId = "Run #1";
+  const canonicalProject = cleanId(rawProject);
+  const legacyProject = "Project-One";
+  const legacyRunId = "Run-1";
+  const legacyDir = join(root, "state", "runs", legacyProject, legacyRunId);
+  const mixedDir = join(root, "state", "runs", canonicalProject, legacyRunId);
+
+  await mkdir(legacyDir, { recursive: true });
+  await mkdir(mixedDir, { recursive: true });
+  await writeFile(
+    join(legacyDir, "status.json"),
+    `${JSON.stringify({ phase: "planned", project: legacyProject, runId: legacyRunId, marker: "legacy-pair" }, null, 2)}\n`,
+  );
+  await writeFile(
+    join(mixedDir, "status.json"),
+    `${JSON.stringify({ phase: "planned", project: canonicalProject, runId: legacyRunId, marker: "mixed-pair" }, null, 2)}\n`,
+  );
+
+  const { default: plugin } = await import(`../dist/index.js?pair-lock=${Date.now()}`);
+  let registered;
+  plugin.register({ pluginConfig: {}, registerTool(tool) { registered = tool; } });
+
+  const result = await registered.execute(
+    "pair-lock-reconcile",
+    {
+      action: "reconcile",
+      project: rawProject,
+      runId: rawRunId,
+      notifyMain: false,
+      autoStopStalled: false,
+      autoRunFinalValidation: false,
+      autoRunCouncilReview: false,
+    },
+    undefined,
+    undefined,
+  );
+
+  assert.equal(result.details.ok, true, JSON.stringify(result.details));
+  assert.equal(result.details.dir, legacyDir);
+  assert.equal(result.details.project, legacyProject);
+  assert.equal(result.details.runId, legacyRunId);
+  assert.equal(result.details.status.marker, "legacy-pair");
 });

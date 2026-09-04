@@ -188,7 +188,11 @@ export function loadDevelopmentCycleConfig(env: NodeJS.ProcessEnv = process.env)
     },
     deploy: {
       enabled: boolean(env, "DEVELOPMENT_CYCLE_DEPLOY_ENABLED", false),
-      adapter: (text(env, "DEVELOPMENT_CYCLE_DEPLOY_ADAPTER", "command") === "command" ? "command" : "command") as "command",
+      adapter: (() => {
+        const raw = text(env, "DEVELOPMENT_CYCLE_DEPLOY_ADAPTER", "command");
+        if (raw !== "command") throw new Error(`unsupported_deploy_adapter:${raw}`);
+        return raw as "command";
+      })(),
       command: text(env, "DEVELOPMENT_CYCLE_DEPLOY_COMMAND"),
       args: stringArray(env, "DEVELOPMENT_CYCLE_DEPLOY_ARGS_JSON"),
       timeoutSeconds: positiveInteger(env, "DEVELOPMENT_CYCLE_DEPLOY_TIMEOUT_SECONDS", 900),

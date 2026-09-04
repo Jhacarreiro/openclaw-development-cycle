@@ -2548,8 +2548,35 @@ const deployConfig = developmentCycleConfig.deploy;
 function deployDir(project: string, deployId: string) { return join(cycleRoot, "tracks", "deploy", cleanId(project), cleanId(deployId)); }
 async function latestDeployId(project: string): Promise<string> {
   try {
-    const names = await readdir(join(cycleRoot, "tracks", "deploy", cleanId(project)));
-    return names.filter((x) => Boolean(cleanId(x))).sort().at(-1) || "";
+    const base = join(cycleRoot, "tracks", "deploy", cleanId(project));
+    const names = await readdir(base);
+    const ids = names.filter((x) => Boolean(cleanId(x)));
+    if (!ids.length) return "";
+    let bestId = "";
+    let bestTime = -1;
+    for (const id of ids) {
+      const dir = join(base, cleanId(id));
+      const statusPath = join(dir, "deploy_status.json");
+      let ts = -1;
+      const raw = (await readJsonIfExists(statusPath)) as any;
+      if (raw?.updatedAt) {
+        const parsed = Date.parse(String(raw.updatedAt));
+        if (Number.isFinite(parsed)) ts = parsed;
+      }
+      if (ts < 0) {
+        const st = await stat(statusPath).catch(() => null);
+        if (st?.mtimeMs) ts = st.mtimeMs;
+        else {
+          const dirSt = await stat(dir).catch(() => null);
+          if (dirSt?.mtimeMs) ts = dirSt.mtimeMs;
+        }
+      }
+      if (ts > bestTime) {
+        bestTime = ts;
+        bestId = id;
+      }
+    }
+    return bestId || ids.sort().at(-1) || "";
   } catch { return ""; }
 }
 async function updateDeployStatus(dir: string, patch: any): Promise<any> {

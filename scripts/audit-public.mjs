@@ -17,7 +17,7 @@ const textExtensions = new Set([
 
 const checks = [
   ["private IPv4 address", /\b(?:10(?:\.\d{1,3}){3}|192\.168(?:\.\d{1,3}){2}|172\.(?:1[6-9]|2\d|3[01])(?:\.\d{1,3}){2})\b/g],
-  ["fixed Unix operator path", /\/(?:data|home)\/[A-Za-z0-9._-]+\/(?:workspace|\.openclaw)(?:\/|\b)/g],
+  ["fixed Unix operator path", /(?:\/data\/(?:workspace|\.openclaw)(?:\/|\b)|\/home\/[A-Za-z0-9._-]+\/(?:workspace|\.openclaw)(?:\/|\b))/g],
   ["fixed Windows user path", /[A-Z]:\\Users\\[A-Za-z0-9._-]+\\/gi],
   ["local-only branch reference", /(?:refs\/heads\/local\/|["\']branch["\']\s*[:=]\s*["\']local\/)/g],
   ["GitHub token", /\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})\b/g],

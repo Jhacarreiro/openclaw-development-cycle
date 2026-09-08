@@ -2,7 +2,7 @@
 
 Status: design handoff only; not implemented  
 Date: 2026-09-02  
-Control-plane repository: `openclaw-development-cycle`  
+Control-plane repository: `openclaw-development-cycle`
 Octopus reference: Claude Octopus repository
 
 ## Goal

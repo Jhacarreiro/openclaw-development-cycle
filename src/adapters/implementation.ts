@@ -28,6 +28,8 @@ export interface ImplementationLaunchInput {
   prompt: string;
   timeoutSeconds?: number;
   command?: string;
+  interventionPath?: string;
+  writeScopeMode?: "strict" | "adaptive";
   observer?: {
     sessionId?: string;
     agentHookPath?: string;
@@ -56,6 +58,7 @@ function genericEnvironment(input: ImplementationLaunchInput): Record<string, st
     DEVELOPMENT_CYCLE_PROJECT_ROOT: input.projectRoot,
     DEVELOPMENT_CYCLE_REQUEST_PATH: input.requestPath,
     DEVELOPMENT_CYCLE_PROMPT_PATH: input.promptPath,
+    DEVELOPMENT_CYCLE_INTERVENTION_PATH: input.interventionPath || "",
     DEVELOPMENT_CYCLE_OBSERVER_SESSION_ID: input.observer?.sessionId || "",
   };
 }
@@ -175,6 +178,8 @@ export function buildImplementationLaunchSpec(
         PATH: `${DEVELOPMENT_CYCLE_BIN_DIR}:${process.env.PATH || ""}`,
         OCTOPUS_CODEX_SANDBOX: config.octopusSandbox,
         OCTOPUS_TANGLE_RUN_ID: String(input.attemptId),
+        OCTOPUS_TANGLE_WRITE_SCOPE_MODE: input.writeScopeMode || "adaptive",
+        OCTOPUS_HUMAN_INTERVENTION_PATH: input.interventionPath || "",
         ...octopusRoutedSeatEnvironment(),
         OCTOPUS_PRESERVE_CALLER_PROCESS_GROUP: "true",
         LOOP_UNTIL_APPROVED: config.loopUntilApproved ? "true" : "false",

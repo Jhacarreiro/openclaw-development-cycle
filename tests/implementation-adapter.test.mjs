@@ -59,6 +59,8 @@ test("Octopus adapter translates the generic request into orchestrate.sh", () =>
       ...baseInput,
       adapter: "octopus",
       command: "tangle",
+      interventionPath: "/tmp/run/intervention.json",
+      writeScopeMode: "adaptive",
       observer: {
         sessionId: "session-1",
         agentHookPath: "/opt/observer/hook.mjs",
@@ -76,6 +78,9 @@ test("Octopus adapter translates the generic request into orchestrate.sh", () =>
   assert.equal(spec.env.OCTOPUS_CODEX_SANDBOX, "read-only");
   assert.equal(spec.env.DEVELOPMENT_CYCLE_ATTEMPT_ID, "delivery-attempt-1");
   assert.equal(spec.env.OCTOPUS_TANGLE_RUN_ID, "delivery-attempt-1");
+  assert.equal(spec.env.OCTOPUS_TANGLE_WRITE_SCOPE_MODE, "adaptive");
+  assert.equal(spec.env.OCTOPUS_HUMAN_INTERVENTION_PATH, "/tmp/run/intervention.json");
+  assert.equal(spec.env.DEVELOPMENT_CYCLE_INTERVENTION_PATH, "/tmp/run/intervention.json");
   assert.equal(spec.env.OCTOPUS_PRESERVE_CALLER_PROCESS_GROUP, "true");
   assert.match(spec.env.PATH, /development-cycle\/bin:/);
   assert.equal(Object.hasOwn(spec.env, "CODEX_HOME"), false);

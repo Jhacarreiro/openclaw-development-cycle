@@ -23,6 +23,7 @@ import { buildImplementationLaunchSpec, jsonShellQuote, renderShellCommand, rend
 
 const lifecycleLockHeld = Symbol("developmentCycleLifecycleLockHeld");
 const resolvedCycleDir = Symbol("developmentCycleResolvedCycleDir");
+const interventionResume = Symbol("developmentCycleInterventionResume");
 const lifecycleLockTimeoutMs = 30000;
 
 const developmentCycleConfig = loadDevelopmentCycleConfig();
@@ -170,7 +171,17 @@ async function dcClassify(dir: string, status: any, runtime: any) {
     ["provider_fleet_failed","blocking",true,false,false,"Inspect provider routing/model availability and decomposition artifacts before relaunching a clean run.",[["all_providers_failed",/Decomposition failed with all providers|all providers failed/i],["no_substantive_inputs",/no substantive inputs/i],["synthesis_cannot_proceed",/Synthesis cannot proceed/i]]],
     ["local_runtime_fault","blocking",true,false,true,"Fix local permissions/sandbox/rollout-recorder state, then relaunch a clean run after inspecting dirty worktree.",[["permission_denied",/Permission denied|EACCES/i],["rollout_recorder",/failed to initialize rollout recorder/i],["sandbox_fault",/LandlockRestrict|error running landlock|linux-sandbox/i]]]
   ];
-  let c: any = phase === "review_infrastructure_failed"
+  let c: any = phase === "implementation_waiting_human"
+    ? {
+        failureClass: "implementation_waiting_human",
+        severity: "warning",
+        humanRequired: true,
+        safeToAutoRetry: false,
+        autoStopRecommended: false,
+        recommendedAction: "Reply to main with the requested decision; main should call development_cycle answer_intervention for this run.",
+        matched: { name: "human_intervention", pattern: "durable_phase", match: "implementation_waiting_human" },
+      }
+    : phase === "review_infrastructure_failed"
     ? {
         failureClass: "review_infrastructure_failed",
         severity: "blocking",
@@ -183,7 +194,7 @@ async function dcClassify(dir: string, status: any, runtime: any) {
     : null;
   if (!c) for (const p of policies) { const m = dcMatch(text, p[6]); if (m) { c = { failureClass:p[0], severity:p[1], humanRequired:p[2], safeToAutoRetry:p[3], autoStopRecommended:p[4], recommendedAction:p[5], matched:m }; break; } }
   const codes = dcAlerts(runtime); if (!c) { const b = codes.filter((x: string) => ["status_running_but_root_missing","root_process_zombie","wall_clock_timeout_seen","provider_processes_outside_observed_tree"].includes(x)); if (b.length) c = { failureClass:"runtime_observation_blocker", severity:"warning", humanRequired:true, safeToAutoRetry:false, autoStopRecommended:false, recommendedAction:"Inspect Observer runtime observation before deciding whether to stop or relaunch.", matched:{name:"runtime_alert", pattern:b.join(","), match:b.join(", ")} }; }
-  const important = new Set(["implementation_launched","implementation_delivered","implementation_failed","review_infrastructure_failed","corrections_launched","corrections_completed","corrections_failed","external_validation_passed","external_validation_failed","stopped","closed"]);
+  const important = new Set(["implementation_launched","implementation_waiting_human","implementation_delivered","implementation_failed","review_infrastructure_failed","corrections_launched","corrections_completed","corrections_failed","external_validation_passed","external_validation_failed","stopped","closed"]);
   return { eventType:"development_cycle.update", phase, phaseSeverity:/failed|blocked|stopped/i.test(phase)?"blocking":"info", classification:c, shouldNotifyMain:Boolean(c)||important.has(phase), alertCodes:codes, evidencePaths:[join(dir,"status.json"),join(dir,"runtime_alerts.json"),join(dir,"runtime_observation.json"),out,err].filter(Boolean), textExcerpt:dcShort(text.replace(/\s+/g," ").trim(),1600) };
 }
 async function dcPersistFailure(dir: string, status: any, ev: any) { const c = ev?.classification; if (!c?.failureClass) { const recovery = transientRuntimeObservationRecoveryPatch(status, c); if (!recovery) return {status,changed:false}; return {status:await cycleStatus(dir,recovery),changed:true}; } if (status?.failureClass===c.failureClass && status?.failureMatched?.name===c.matched?.name) return {status,changed:false}; return {status:await cycleStatus(dir,{failureClass:c.failureClass,failureSeverity:c.severity,failureHumanRequired:c.humanRequired,failureSafeToAutoRetry:c.safeToAutoRetry,failureAutoStopRecommended:c.autoStopRecommended,failureRecommendedAction:c.recommendedAction,failureMatched:c.matched,failureDetectedAt:new Date().toISOString(),nextAction:c.recommendedAction}),changed:true}; }
@@ -225,6 +236,7 @@ async function createImplementationRunnerSession(dir: string, params: any) {
   const exitedAtPath = join(sessionDir, "exited-at.txt");
   const stdoutPath = join(logsDir, "stdout.log");
   const stderrPath = join(logsDir, "stderr.log");
+  const interventionPath = join(sessionDir, "intervention.json");
 
   await mkdir(logsDir, { recursive: true });
   await writeFile(promptPath, prompt);
@@ -243,6 +255,7 @@ async function createImplementationRunnerSession(dir: string, params: any) {
     resultsRoot: dir,
     timeoutSeconds: effectiveTimeoutSeconds,
     command,
+    interventionPath,
   };
   await saveJson(requestPath, request);
 
@@ -260,6 +273,8 @@ async function createImplementationRunnerSession(dir: string, params: any) {
       prompt,
       timeoutSeconds: effectiveTimeoutSeconds,
       command,
+      interventionPath,
+      writeScopeMode: String(params.writeScopeMode || process.env.DEVELOPMENT_CYCLE_OCTOPUS_WRITE_SCOPE_MODE || "adaptive").toLowerCase() === "strict" ? "strict" : "adaptive",
       observer: {
         sessionId: observerRootSessionId,
         agentHookPath: observerAgentHook,
@@ -342,6 +357,7 @@ ${commandLine} > ${shellQuote(stdoutPath)} 2> ${shellQuote(stderrPath)}
   await writeFile(runnerPath, runnerScript, { mode: 0o755 } as any);
 
   await rm(exitCodePath, { force: true });
+  await rm(interventionPath, { force: true });
   await rm(exitedAtPath, { force: true });
   const now = new Date().toISOString();
   const status: any = {
@@ -368,6 +384,7 @@ ${commandLine} > ${shellQuote(stdoutPath)} 2> ${shellQuote(stderrPath)}
     promptPath,
     exitCodePath,
     exitedAtPath,
+    interventionPath,
     logs: { stdout: stdoutPath, stderr: stderrPath },
     stdoutPath,
     stderrPath,
@@ -384,6 +401,7 @@ ${commandLine} > ${shellQuote(stdoutPath)} 2> ${shellQuote(stderrPath)}
     executable: launchSpec.executable,
     requestPath,
     promptPath,
+    interventionPath,
     purpose: params.purpose || "development_cycle implementation",
   });
   await saveJson(statusPath, status);
@@ -1649,6 +1667,54 @@ async function refreshLaunchedImplementationStatus(dir: string, status: any) {
       const observerFinalization = await finalizeObserverSessions(dir, status, "completed");
       return await cycleStatus(dir, { ...patch, observerFinalization });
     }
+    const interventionPath = String(session?.interventionPath || (statusPath ? join(dirname(String(statusPath)), "intervention.json") : ""));
+    const rawIntervention = !isCorrectionsRun && interventionPath ? await readJsonIfExists(interventionPath) : null;
+    const interventionQuestion = String(rawIntervention?.question || "").trim();
+    if (!isCorrectionsRun && rawIntervention && interventionQuestion) {
+      const interventionId = cleanId(rawIntervention.id || `intervention-${observedAttemptId || activeAttemptId || Date.now()}`, "intervention");
+      const normalizedIntervention = {
+        schemaVersion: 1,
+        id: interventionId,
+        status: "pending",
+        kind: String(rawIntervention.kind || "human_decision"),
+        question: interventionQuestion,
+        context: String(rawIntervention.context || ""),
+        options: Array.isArray(rawIntervention.options) ? rawIntervention.options.map(String).slice(0, 12) : [],
+        recommendedOption: rawIntervention.recommendedOption == null ? null : String(rawIntervention.recommendedOption),
+        sourceAttemptId: observedAttemptId || activeAttemptId || null,
+        sourcePath: interventionPath,
+        createdAt: String(rawIntervention.createdAt || new Date().toISOString()),
+      };
+      const durableInterventionPath = join(dir, "implementation_intervention.json");
+      await saveJson(durableInterventionPath, normalizedIntervention);
+      const observerFinalization = await finalizeObserverSessions(dir, status, "waiting_human");
+      const waiting = await cycleStatus(dir, {
+        phase: "implementation_waiting_human",
+        owner: "main",
+        ok: false,
+        nextAction: "Reply to main with the requested decision; main should call development_cycle answer_intervention for this run.",
+        error: null,
+        implementationIntervention: normalizedIntervention,
+        implementationInterventionPath: durableInterventionPath,
+        implementationInterventionRequestedAt: new Date().toISOString(),
+        implementationStdout: stdoutPath,
+        implementationStderr: stderrPath,
+        directImplementationStatus: statusPath,
+        observerFinalization,
+      });
+      const optionText = normalizedIntervention.options.length ? `
+Options: ${normalizedIntervention.options.join(" | ")}` : "";
+      const recommendedText = normalizedIntervention.recommendedOption ? `
+Recommended: ${normalizedIntervention.recommendedOption}` : "";
+      const notification = await sendCycleMessage({}, `🧑‍💻 Development Cycle needs your input — ${status?.project || "project"}`, `Run: ${status?.runId || ""}
+Intervention: ${interventionId}
+
+${normalizedIntervention.question}${optionText}${recommendedText}
+
+Reply to main; the run will resume after answer_intervention.`);
+      return await cycleStatus(dir, { ...waiting, implementationInterventionNotification: notification });
+    }
+
     let failedOutputHandoff: any = null;
     if (!isCorrectionsRun && String(session?.adapter || status?.implementationAdapter || "") === "octopus") {
       failedOutputHandoff = await resolveOctopusAttemptOutput(String(status?.projectRoot || session?.projectRoot || ""), observedAttemptId || activeAttemptId);
@@ -2255,9 +2321,7 @@ async function runCouncilCodeReview(dir: string, status: any, params: any = {}) 
   const stdoutPath = join(dir, "council-code-review.stdout");
   const stderrPath = join(dir, "council-code-review.stderr");
   const scriptPath = join(implementationConfig.octopusRoot, "scripts", "orchestrate.sh");
-  const councilSource = await readTextIfExists(join(implementationConfig.octopusRoot, "scripts", "lib", "council.sh"));
-  const activeCouncilSupportsAgy = councilSource.includes("claude,codex,agy");
-  const defaultCouncilProviders = activeCouncilSupportsAgy ? "claude,codex,agy,opencode,openrouter" : "claude,codex,opencode,openrouter";
+  const defaultCouncilProviders = "claude,codex,opencode,openrouter";
   const councilProviders = String(params.councilProviders || params.councilAutoProviders || process.env.OCTOPUS_COUNCIL_AUTO_PROVIDERS || defaultCouncilProviders);
   const councilCodexModel = String(params.councilCodexModel || process.env.DEVELOPMENT_CYCLE_COUNCIL_CODEX_MODEL || "gpt-5.6");
   const args = ["--dir", projectRoot, "council", "--goal", "review", "--domain", "security", "--style", "red-team", "--depth", String(params.councilDepth || "standard"), "--members", String(params.councilMembers || 5), "--providers", councilProviders, "--implement", "never", "--worktree", "off", "--max-cost", String(params.councilMaxCost || "2.00"), "--output-dir", outputRoot, "--json", input.task];
@@ -2721,6 +2785,37 @@ async function projectCycle(params: any) {
 
   await mkdir(dir, { recursive: true });
 
+  if (action === "answer_intervention") {
+    const intervention = status?.implementationIntervention || await readJsonIfExists(String(status?.implementationInterventionPath || join(dir, "implementation_intervention.json")));
+    if (!intervention?.id || !String(intervention?.question || "").trim()) {
+      return { ok: false, error: "implementation_intervention_missing", project, runId, dir };
+    }
+    const requestedId = String(params.interventionId || "").trim();
+    if (requestedId && requestedId !== String(intervention.id)) {
+      return { ok: false, error: "intervention_id_mismatch", project, runId, dir, expected: intervention.id, received: requestedId };
+    }
+    const response = String(params.interventionResponse || params.feedbackText || params.direction || "").trim();
+    if (!response) return { ok: false, error: "intervention_response_required", project, runId, dir, intervention };
+    const answeredAt = new Date().toISOString();
+    const responsePath = join(dir, "implementation_intervention_response.json");
+    await saveJson(responsePath, { schemaVersion: 1, id: intervention.id, runId, project, response, answeredAt, sourceInterventionPath: status?.implementationInterventionPath || null });
+    const durableInterventionPath = String(status?.implementationInterventionPath || join(dir, "implementation_intervention.json"));
+    await saveJson(durableInterventionPath, { ...intervention, status: "answered", responsePath, answeredAt });
+    await cycleStatus(dir, { implementationIntervention: { ...intervention, status: "answered", responsePath, answeredAt }, implementationInterventionResponsePath: responsePath, implementationInterventionAnsweredAt: answeredAt, nextAction: "Resuming implementation with the recorded human decision." });
+    return await projectCycle({
+      ...params,
+      action: "start_implementation",
+      project: rawProject,
+      runId,
+      projectRoot: String(status?.projectRoot || params.projectRoot || ""),
+      projectWikiPath: String(status?.projectWikiPath || params.projectWikiPath || ""),
+      planPath: String(status?.plan || params.planPath || ""),
+      [resolvedCycleDir]: dir,
+      [lifecycleLockHeld]: true,
+      [interventionResume]: { id: intervention.id, response, responsePath, answeredAt, sourceAttemptId: intervention.sourceAttemptId || null },
+    });
+  }
+
   if (action === "request_plan") {
     // request_plan is always-allowed (it is the cycle restart escape hatch),
     // but it must not hijack a LIVE run: advancing the phase here would
@@ -2850,6 +2945,10 @@ Create or validate the implementation plan only. Do not implement. The plan must
   }
 
   if (action === "start_implementation") {
+    const resumeDecision = params[interventionResume] || null;
+    if (String(status?.phase || "") === "implementation_waiting_human" && !resumeDecision) {
+      return { ok: false, error: "intervention_answer_required", project, runId, dir, intervention: status?.implementationIntervention || null, hint: "Call answer_intervention with interventionResponse; do not call start_implementation directly." };
+    }
     const requestedProjectRoot = String(params.projectRoot || status.projectRoot || "");
     const projectWikiPath = resolveTrustedProjectWikiPath(rawProject, params.projectWikiPath, status.projectWikiPath);
     const pinnedProjectWiki = await pinContainedWikiDir(project, projectWikiPath);
@@ -2899,7 +2998,10 @@ Create or validate the implementation plan only. Do not implement. The plan must
     const adapter = String(params.implementationAdapter || status.implementationAdapter || implementationConfig.adapter);
     const command = String(params.implementationCommand || (adapter === "octopus" ? "tangle" : "implement"));
     if (adapter === "octopus" && command !== "tangle") return { ok: false, error: "unsupported_octopus_command", supported: ["tangle"] };
-    const prompt = `Run the approved development plan. Stay within the agreed scope. Stop and report before risky, destructive, or protected changes that need human approval.\n\nPROJECT_DOCUMENTATION_PATH:\n${containedProjectWikiPath}\n\nPROJECT_ROOT_CODE_CHECKOUT:\n${projectRoot}\n\nIMPLEMENTATION_ADAPTER:\n${adapter}\n\nAPPROVED_PLAN:\n${plan}`;
+    const resumeBlock = resumeDecision
+      ? `\n\nHUMAN_INTERVENTION_RESOLUTION:\nIntervention: ${String(resumeDecision.id || "")}\nDecision: ${String(resumeDecision.response || "")}\n\nResume the same approved plan from the preserved repository state. Treat this human decision as authoritative for the blocked point only; do not broaden scope beyond what is necessary to continue.`
+      : "";
+    const prompt = `Run the approved development plan. Stay within the agreed scope. Stop and report before risky, destructive, or protected changes that need human approval.\n\nPROJECT_DOCUMENTATION_PATH:\n${containedProjectWikiPath}\n\nPROJECT_ROOT_CODE_CHECKOUT:\n${projectRoot}\n\nIMPLEMENTATION_ADAPTER:\n${adapter}\n\nAPPROVED_PLAN:\n${plan}${resumeBlock}`;
     const handoffRequest = join(dir, "implementation_request.md");
     const stdoutPath = join(dir, "implementation_delivery_stdout.txt");
     const stderrPath = join(dir, "implementation_delivery_stderr.txt");
@@ -2920,7 +3022,7 @@ Create or validate the implementation plan only. Do not implement. The plan must
     await updateImplementationObserverSession(dir, observerObservationId, { project, runId, command, projectRoot, projectWikiPath: containedProjectWikiPath, stdoutPath: launch.stdoutPath, stderrPath: launch.stderrPath, attemptId: launch.attemptId, pid: launch.status?.runnerPid, processGroup: launch.status?.processGroupId, status: "running", summary: `development_cycle ${command} ${project} running`, message: "Implementation runner launched and bound to the observer root process." });
     const launchRecord = join(dir, "implementation_launch.json");
     await writeFile(launchRecord, JSON.stringify(launch, null, 2) + "\n");
-    const next = await cycleStatus(dir, { phase: "implementation_launched", owner: "implementation", nextAction: "Use development_cycle status to watch the supervised implementation runner.", projectRoot, projectWikiPath: containedProjectWikiPath, implementationAdapter: launch.adapter, implementationCommand: command, codexSandbox: defaultCodexSandbox, implementationSessionId: launch.sessionId, implementationAttemptId: launch.attemptId, directImplementationStatus: launch.statusPath, directImplementationStdout: launch.stdoutPath, directImplementationStderr: launch.stderrPath, directCorrectionsStatus: null, directCorrectionsStdout: null, directCorrectionsStderr: null, correctionsStdout: null, correctionsStderr: null, observerCorrectionsObservationId: null, implementationCorrectionsSessionId: null, observerObservationId, implementationHandoffRequest: handoffRequest, implementationLaunch: launchRecord, implementationStdout: launch.stdoutPath, implementationStderr: launch.stderrPath });
+    const next = await cycleStatus(dir, { phase: "implementation_launched", owner: "implementation", nextAction: "Use development_cycle status to watch the supervised implementation runner.", projectRoot, projectWikiPath: containedProjectWikiPath, implementationAdapter: launch.adapter, implementationCommand: command, codexSandbox: defaultCodexSandbox, implementationSessionId: launch.sessionId, implementationAttemptId: launch.attemptId, directImplementationStatus: launch.statusPath, directImplementationStdout: launch.stdoutPath, directImplementationStderr: launch.stderrPath, directCorrectionsStatus: null, directCorrectionsStdout: null, directCorrectionsStderr: null, correctionsStdout: null, correctionsStderr: null, observerCorrectionsObservationId: null, implementationCorrectionsSessionId: null, observerObservationId, implementationHandoffRequest: handoffRequest, implementationLaunch: launchRecord, implementationStdout: launch.stdoutPath, implementationStderr: launch.stderrPath, ...(resumeDecision ? { implementationInterventionResolved: { id: resumeDecision.id, response: resumeDecision.response, responsePath: resumeDecision.responsePath, answeredAt: resumeDecision.answeredAt, resumedAttemptId: launch.attemptId }, implementationInterventionResumedAt: new Date().toISOString() } : {}) });
     return { ok: true, project, runId, dir, phase: next.phase, implementationAdapter: launch.adapter, implementationSessionId: launch.sessionId, implementationAttemptId: launch.attemptId, observerObservationId, launchState: launch.status?.launchState || null, directImplementationStatus: launch.statusPath };
 
   }
@@ -3107,6 +3209,8 @@ export default defineToolPlugin({
         timeoutSeconds: Type.Optional(Type.Number()),
         timeout_ms: Type.Optional(Type.Number()),
         stopReason: Type.Optional(Type.String()),
+        interventionId: Type.Optional(Type.String({ description: "Pending implementation intervention id, when answering a human gate." })),
+        interventionResponse: Type.Optional(Type.String({ description: "Human decision for a pending implementation intervention. answer_intervention resumes the same run automatically." })),
         reason: Type.Optional(Type.String()),
         validationConfigPath: Type.Optional(Type.String()),
         autoStopStalled: Type.Optional(Type.Boolean()),

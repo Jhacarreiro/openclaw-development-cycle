@@ -149,3 +149,21 @@ The observer is disabled by default. Enabling it requires a compatible process-o
 ## Parsing rules
 
 Boolean values accept `1`, `true`, `yes`, or `on`, and `0`, `false`, `no`, or `off`, case-insensitively. Positive integers fall back to defaults when invalid. `DEVELOPMENT_CYCLE_IMPLEMENTATION_ARGS_JSON` must be a JSON array containing only strings; invalid input becomes an empty array.
+
+
+### Contextual reads for Octopus
+
+`DEVELOPMENT_CYCLE_OCTOPUS_READ_SCOPE_MODE` defaults to `contextual`; `strict`
+keeps repository-relative reads only. Invalid values are rejected. Implementation
+and correction launches can select `readScopeMode: "strict"` or `"contextual"`.
+
+The adapter passes `OCTOPUS_TANGLE_READ_SCOPE_MODE` and
+`OCTOPUS_TANGLE_CONTEXTUAL_READ_ROOTS` from validated launch metadata: project
+root, project documentation root, this run-specific handoff directory, approved
+plan, request and prompt files. File entries never grant their parent directories.
+Task prose and inherited read-root environment variables cannot expand the list.
+
+This requires an Octopus revision supporting contextual reads. External read
+grants never authorize writing. Known secret/auth paths and symlink escapes are
+rejected. This is declaration validation and guidance, not OS sandboxing or
+complete secret isolation in full-access execution.

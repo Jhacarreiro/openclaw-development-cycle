@@ -275,6 +275,10 @@ async function createImplementationRunnerSession(dir: string, params: any) {
       command,
       interventionPath,
       writeScopeMode: String(params.writeScopeMode || process.env.DEVELOPMENT_CYCLE_OCTOPUS_WRITE_SCOPE_MODE || "adaptive").toLowerCase() === "strict" ? "strict" : "adaptive",
+      readScopeMode: params.readScopeMode,
+      projectWikiPath: String(params.projectWikiPath || ""),
+      planPath: String(params.planPath || ""),
+      runRoot: dir,
       observer: {
         sessionId: observerRootSessionId,
         agentHookPath: observerAgentHook,
@@ -2476,7 +2480,7 @@ async function launchCouncilCorrections(dir: string, status: any, council: any, 
   status = await clearActiveCorrectionsAttempt(dir);
   const observerObservationId = await createImplementationObserverSession(dir, { project, runId, command: "council-corrections", projectRoot, projectWikiPath, stdoutPath, stderrPath, status: "running", summary: `development_cycle council corrections ${project}`, message: "Development-cycle queued Octopus council corrections." });
   if (developmentCycleConfig.observer.enabled && !observerObservationId) return { ok: false, error: "observer_root_session_creation_failed" };
-  const launch = await createImplementationRunnerSession(dir, { project, runId: `${runId}-council-corrections-${count + 1}`, projectRoot, command: "tangle", prompt, kind: "corrections", implementationAdapter: "octopus", planPath: join(dir, "implementation_plan.md"), validationPath: feedbackPath, timeoutSeconds: Number(params.timeoutSeconds ?? params.timeout_ms ?? 0), observerObservationId, purpose: `development_cycle council corrections ${project}` });
+  const launch = await createImplementationRunnerSession(dir, { project, runId: `${runId}-council-corrections-${count + 1}`, projectRoot, projectWikiPath: projectWikiPath, readScopeMode: params.readScopeMode, command: "tangle", prompt, kind: "corrections", implementationAdapter: "octopus", planPath: join(dir, "implementation_plan.md"), validationPath: feedbackPath, timeoutSeconds: Number(params.timeoutSeconds ?? params.timeout_ms ?? 0), observerObservationId, purpose: `development_cycle council corrections ${project}` });
   if (!launch.ok) {
     const observerFinalization = await finalizeObserverSessions(dir, { ...status, observerCorrectionsObservationId: observerObservationId }, "failed");
     const failedAttempt = launch.statusPath ? { implementationCorrectionsSessionId: launch.sessionId, correctionsAttemptId: launch.attemptId, directCorrectionsStatus: launch.statusPath, directCorrectionsStdout: launch.stdoutPath, directCorrectionsStderr: launch.stderrPath, correctionsStdout: launch.stdoutPath, correctionsStderr: launch.stderrPath } : {};
@@ -3012,7 +3016,7 @@ Create or validate the implementation plan only. Do not implement. The plan must
       const next = await cycleStatus(dir, { phase: "implementation_failed", owner: "main", ok: false, error: "observer_root_session_creation_failed", projectRoot, projectWikiPath: containedProjectWikiPath, implementationCommand: command, implementationHandoffRequest: handoffRequest });
       return { ok: false, project, runId, dir, phase: next.phase, error: next.error };
     }
-    const launch = await createImplementationRunnerSession(dir, { project, runId, projectRoot, command, prompt, kind: "delivery", implementationAdapter: adapter, planPath: containedPlanPath, timeoutSeconds: Number(params.timeoutSeconds ?? params.timeout_ms ?? 0), observerObservationId, purpose: `development_cycle ${command} ${project}` });
+    const launch = await createImplementationRunnerSession(dir, { project, runId, projectRoot, projectWikiPath: containedProjectWikiPath, readScopeMode: params.readScopeMode, command, prompt, kind: "delivery", implementationAdapter: adapter, planPath: containedPlanPath, timeoutSeconds: Number(params.timeoutSeconds ?? params.timeout_ms ?? 0), observerObservationId, purpose: `development_cycle ${command} ${project}` });
     if (!launch.ok) {
       const observerFinalization = await finalizeObserverSessions(dir, { ...implementationAttemptBase, observerObservationId }, "failed");
       const failedAttempt = launch.statusPath ? { implementationSessionId: launch.sessionId, implementationAttemptId: launch.attemptId, directImplementationStatus: launch.statusPath, directImplementationStdout: launch.stdoutPath, directImplementationStderr: launch.stderrPath, implementationStdout: launch.stdoutPath, implementationStderr: launch.stderrPath } : {};
@@ -3149,7 +3153,7 @@ Create or validate the implementation plan only. Do not implement. The plan must
       const next = await cycleStatus(dir, { phase: "corrections_failed", owner: "main", ok: false, error: "observer_root_session_creation_failed", projectRoot, implementationCorrectionsRequest: requestPath });
       return { ok: false, project, runId, dir, phase: next.phase, error: next.error };
     }
-    const launch = await createImplementationRunnerSession(dir, { project, runId: `${runId}-corrections`, projectRoot, command, prompt, kind: "corrections", implementationAdapter: adapter, planPath: String(status.plan || join(dir, "implementation_plan.md")), validationPath: String(status.finalValidation || join(dir, "final_validation_response.md")), timeoutSeconds: Number(params.timeoutSeconds ?? params.timeout_ms ?? 0), observerObservationId, purpose: `development_cycle corrections ${project}` });
+    const launch = await createImplementationRunnerSession(dir, { project, runId: `${runId}-corrections`, projectRoot, projectWikiPath: resolveTrustedProjectWikiPath(params.project || project, params.projectWikiPath, status.projectWikiPath), readScopeMode: params.readScopeMode, command, prompt, kind: "corrections", implementationAdapter: adapter, planPath: String(status.plan || join(dir, "implementation_plan.md")), validationPath: String(status.finalValidation || join(dir, "final_validation_response.md")), timeoutSeconds: Number(params.timeoutSeconds ?? params.timeout_ms ?? 0), observerObservationId, purpose: `development_cycle corrections ${project}` });
     if (!launch.ok) {
       const observerFinalization = await finalizeObserverSessions(dir, { ...correctionsAttemptBase, observerCorrectionsObservationId: observerObservationId }, "failed");
       const failedAttempt = launch.statusPath ? { implementationCorrectionsSessionId: launch.sessionId, correctionsAttemptId: launch.attemptId, directCorrectionsStatus: launch.statusPath, directCorrectionsStdout: launch.stdoutPath, directCorrectionsStderr: launch.stderrPath, correctionsStdout: launch.stdoutPath, correctionsStderr: launch.stderrPath } : {};
@@ -3204,6 +3208,7 @@ export default defineToolPlugin({
         validationPath: Type.Optional(Type.String()),
         outputPath: Type.Optional(Type.String()),
         implementationAdapter: Type.Optional(lit("command", "octopus")),
+        readScopeMode: Type.Optional(lit("strict", "contextual")),
         implementationCommand: Type.Optional(Type.String()),
         force: Type.Optional(Type.Boolean()),
         timeoutSeconds: Type.Optional(Type.Number()),

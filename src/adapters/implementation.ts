@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const DEVELOPMENT_CYCLE_BIN_DIR = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", "bin");
@@ -14,6 +14,7 @@ export interface ImplementationAdapterConfig {
   octopusRoot: string;
   octopusSandbox: string;
   octopusWriteScopeMode: "strict" | "adaptive";
+  octopusReadScopeMode: "strict" | "contextual";
   loopUntilApproved: boolean;
 }
 
@@ -31,6 +32,10 @@ export interface ImplementationLaunchInput {
   command?: string;
   interventionPath?: string;
   writeScopeMode?: "strict" | "adaptive";
+  readScopeMode?: "strict" | "contextual";
+  projectWikiPath?: string;
+  runRoot?: string;
+  planPath?: string;
   observer?: {
     sessionId?: string;
     agentHookPath?: string;
@@ -163,6 +168,21 @@ export function buildImplementationLaunchSpec(
       throw new Error("octopus_attempt_id_required");
     }
     const sessionId = input.observer?.sessionId || "";
+    const readScopeMode = input.readScopeMode || config.octopusReadScopeMode || "contextual";
+    if (readScopeMode !== "strict" && readScopeMode !== "contextual") {
+      throw new Error("invalid_octopus_read_scope_mode");
+    }
+    // Parent-owned metadata only. Never derive authority from prompt text or
+    // grant the parent directory of an externally attached plan.
+    const readEntries = [...new Set([
+      input.projectRoot, input.projectWikiPath, input.runRoot, input.planPath,
+      input.requestPath, input.promptPath,
+    ].filter((value): value is string => Boolean(value)))];
+    for (const value of readEntries) {
+      if (!isAbsolute(value) || /[\r\n\0]/.test(value)) {
+        throw new Error("invalid_octopus_contextual_read_path");
+      }
+    }
     return {
       adapter,
       displayName: "Octopus",
@@ -180,6 +200,8 @@ export function buildImplementationLaunchSpec(
         OCTOPUS_CODEX_SANDBOX: config.octopusSandbox,
         OCTOPUS_TANGLE_RUN_ID: String(input.attemptId),
         OCTOPUS_TANGLE_WRITE_SCOPE_MODE: input.writeScopeMode || config.octopusWriteScopeMode,
+        OCTOPUS_TANGLE_READ_SCOPE_MODE: readScopeMode,
+        OCTOPUS_TANGLE_CONTEXTUAL_READ_ROOTS: readScopeMode === "contextual" ? readEntries.join("\n") : "",
         OCTOPUS_HUMAN_INTERVENTION_PATH: input.interventionPath || "",
         ...octopusRoutedSeatEnvironment(),
         OCTOPUS_PRESERVE_CALLER_PROCESS_GROUP: "true",

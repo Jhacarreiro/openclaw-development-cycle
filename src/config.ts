@@ -13,6 +13,7 @@ export interface DevelopmentCycleConfig {
     octopusRoot: string;
     octopusSandbox: string;
     octopusWriteScopeMode: "strict" | "adaptive";
+    octopusReadScopeMode: "strict" | "contextual";
     loopUntilApproved: boolean;
   };
   repositoryDelivery: {
@@ -93,6 +94,10 @@ export function loadDevelopmentCycleConfig(env: NodeJS.ProcessEnv = process.env)
     join(home, ".openclaw", "development-cycle"),
   );
   const observerRoot = text(env, "DEVELOPMENT_CYCLE_OBSERVER_ADAPTER_ROOT");
+  const readScopeMode = text(env, "DEVELOPMENT_CYCLE_OCTOPUS_READ_SCOPE_MODE", "contextual");
+  if (readScopeMode !== "strict" && readScopeMode !== "contextual") {
+    throw new Error("invalid_octopus_read_scope_mode");
+  }
 
   return {
     stateRoot,
@@ -109,6 +114,7 @@ export function loadDevelopmentCycleConfig(env: NodeJS.ProcessEnv = process.env)
       octopusRoot: text(env, "DEVELOPMENT_CYCLE_OCTOPUS_ROOT"),
       octopusSandbox: text(env, "DEVELOPMENT_CYCLE_OCTOPUS_SANDBOX", "danger-full-access"),
       octopusWriteScopeMode: text(env, "DEVELOPMENT_CYCLE_OCTOPUS_WRITE_SCOPE_MODE", "adaptive") === "strict" ? "strict" : "adaptive",
+      octopusReadScopeMode: readScopeMode,
       loopUntilApproved: boolean(env, "DEVELOPMENT_CYCLE_LOOP_UNTIL_APPROVED", true),
     },
     repositoryDelivery: {

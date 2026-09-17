@@ -34,6 +34,7 @@ test("command adapter receives the stable request JSON path", () => {
       args: ["--format", "json"],
       octopusRoot: "",
       octopusSandbox: "workspace-write",
+      octopusWriteScopeMode: "strict",
       loopUntilApproved: true,
     },
     baseInput,
@@ -53,6 +54,7 @@ test("Octopus adapter translates the generic request into orchestrate.sh", () =>
       args: [],
       octopusRoot: "/opt/octopus",
       octopusSandbox: "read-only",
+      octopusWriteScopeMode: "adaptive",
       loopUntilApproved: true,
     },
     {
@@ -60,7 +62,6 @@ test("Octopus adapter translates the generic request into orchestrate.sh", () =>
       adapter: "octopus",
       command: "tangle",
       interventionPath: "/tmp/run/intervention.json",
-      writeScopeMode: "adaptive",
       observer: {
         sessionId: "session-1",
         agentHookPath: "/opt/observer/hook.mjs",
@@ -122,6 +123,7 @@ test("Octopus adapter maps canonical role routes into Octopus review seat identi
         args: [],
         octopusRoot: "/opt/octopus",
         octopusSandbox: "workspace-write",
+        octopusWriteScopeMode: "strict",
         loopUntilApproved: true,
       },
       { ...baseInput, adapter: "octopus", command: "tangle" },
@@ -226,6 +228,7 @@ test("Octopus adapter does not invent routed review seats for non-exact role rou
         args: [],
         octopusRoot: "/opt/octopus",
         octopusSandbox: "workspace-write",
+        octopusWriteScopeMode: "strict",
         loopUntilApproved: true,
       },
       { ...baseInput, adapter: "octopus", command: "tangle" },
@@ -250,6 +253,7 @@ test("Octopus adapter omits timeout when the control plane delegates timeout pol
       args: [],
       octopusRoot: "/opt/octopus",
       octopusSandbox: "workspace-write",
+      octopusWriteScopeMode: "strict",
       loopUntilApproved: false,
     },
     {
@@ -287,7 +291,7 @@ test("jsonShellQuote encodes JSON then shell-quotes the result", () => {
 
 test("Octopus adapter requires an attempt id for deterministic Tangle handoff", () => {
   assert.throws(() => buildImplementationLaunchSpec(
-    { adapter: "octopus", command: "", args: [], octopusRoot: "/opt/octopus", octopusSandbox: "workspace-write", loopUntilApproved: true },
+    { adapter: "octopus", command: "", args: [], octopusRoot: "/opt/octopus", octopusSandbox: "workspace-write", octopusWriteScopeMode: "strict", loopUntilApproved: true },
     { ...baseInput, attemptId: "", adapter: "octopus", command: "tangle" },
   ), /octopus_attempt_id_required/);
 });

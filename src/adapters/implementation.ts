@@ -13,6 +13,7 @@ export interface ImplementationAdapterConfig {
   args: string[];
   octopusRoot: string;
   octopusSandbox: string;
+  octopusWriteScopeMode: "strict" | "adaptive";
   loopUntilApproved: boolean;
 }
 
@@ -178,7 +179,7 @@ export function buildImplementationLaunchSpec(
         PATH: `${DEVELOPMENT_CYCLE_BIN_DIR}:${process.env.PATH || ""}`,
         OCTOPUS_CODEX_SANDBOX: config.octopusSandbox,
         OCTOPUS_TANGLE_RUN_ID: String(input.attemptId),
-        OCTOPUS_TANGLE_WRITE_SCOPE_MODE: input.writeScopeMode || "adaptive",
+        OCTOPUS_TANGLE_WRITE_SCOPE_MODE: input.writeScopeMode || config.octopusWriteScopeMode,
         OCTOPUS_HUMAN_INTERVENTION_PATH: input.interventionPath || "",
         ...octopusRoutedSeatEnvironment(),
         OCTOPUS_PRESERVE_CALLER_PROCESS_GROUP: "true",

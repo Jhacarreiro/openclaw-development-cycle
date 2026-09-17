@@ -12,6 +12,7 @@ export interface DevelopmentCycleConfig {
     args: string[];
     octopusRoot: string;
     octopusSandbox: string;
+    octopusWriteScopeMode: "strict" | "adaptive";
     loopUntilApproved: boolean;
   };
   repositoryDelivery: {
@@ -106,7 +107,8 @@ export function loadDevelopmentCycleConfig(env: NodeJS.ProcessEnv = process.env)
       command: text(env, "DEVELOPMENT_CYCLE_IMPLEMENTATION_COMMAND"),
       args: stringArray(env, "DEVELOPMENT_CYCLE_IMPLEMENTATION_ARGS_JSON"),
       octopusRoot: text(env, "DEVELOPMENT_CYCLE_OCTOPUS_ROOT"),
-      octopusSandbox: text(env, "DEVELOPMENT_CYCLE_OCTOPUS_SANDBOX", "workspace-write"),
+      octopusSandbox: text(env, "DEVELOPMENT_CYCLE_OCTOPUS_SANDBOX", "danger-full-access"),
+      octopusWriteScopeMode: text(env, "DEVELOPMENT_CYCLE_OCTOPUS_WRITE_SCOPE_MODE", "adaptive") === "strict" ? "strict" : "adaptive",
       loopUntilApproved: boolean(env, "DEVELOPMENT_CYCLE_LOOP_UNTIL_APPROVED", true),
     },
     repositoryDelivery: {

@@ -172,7 +172,8 @@ This can wrap Codex CLI, Claude Code, Aider, a company runner, a CI dispatcher, 
 ```bash
 export DEVELOPMENT_CYCLE_IMPLEMENTATION_ADAPTER=octopus
 export DEVELOPMENT_CYCLE_OCTOPUS_ROOT=/path/to/claude-octopus
-export DEVELOPMENT_CYCLE_OCTOPUS_SANDBOX=workspace-write
+export DEVELOPMENT_CYCLE_OCTOPUS_SANDBOX=danger-full-access
+export DEVELOPMENT_CYCLE_OCTOPUS_WRITE_SCOPE_MODE=adaptive
 ```
 
 The adapter translates the generic cycle request into Octopus `scripts/orchestrate.sh` calls. For Codex seats, it prepends an owned compatibility bridge that reads the existing OpenClaw `openai` OAuth profile directly from the public auth-profile store at runtime and passes ephemeral ChatGPT auth to `codex app-server`. It does not require or persist a separate Codex CLI login under `CODEX_HOME`. Non-Codex providers and Octopus model routing remain unchanged.

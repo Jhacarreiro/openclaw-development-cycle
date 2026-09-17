@@ -11,7 +11,8 @@ test("configuration uses portable, command-first defaults", () => {
   assert.equal(config.implementation.command, "");
   assert.deepEqual(config.implementation.args, []);
   assert.equal(config.implementation.octopusRoot, "");
-  assert.equal(config.implementation.octopusSandbox, "workspace-write");
+  assert.equal(config.implementation.octopusSandbox, "danger-full-access");
+  assert.equal(config.implementation.octopusWriteScopeMode, "adaptive");
   assert.equal(config.implementation.loopUntilApproved, true);
   assert.equal(config.runner.defaultTimeoutSeconds, 0);
   assert.equal(config.notifications.enabled, false);
@@ -32,6 +33,7 @@ test("configuration accepts command and Octopus adapter overrides", () => {
     DEVELOPMENT_CYCLE_IMPLEMENTATION_ARGS_JSON: '["--format","json"]',
     DEVELOPMENT_CYCLE_OCTOPUS_ROOT: "/opt/octopus",
     DEVELOPMENT_CYCLE_OCTOPUS_SANDBOX: "read-only",
+    DEVELOPMENT_CYCLE_OCTOPUS_WRITE_SCOPE_MODE: "strict",
     DEVELOPMENT_CYCLE_LOOP_UNTIL_APPROVED: "false",
     DEVELOPMENT_CYCLE_HEARTBEAT_INTERVAL_SECONDS: "15",
     DEVELOPMENT_CYCLE_DEFAULT_TIMEOUT_SECONDS: "900",
@@ -50,6 +52,7 @@ test("configuration accepts command and Octopus adapter overrides", () => {
   assert.deepEqual(config.implementation.args, ["--format", "json"]);
   assert.equal(config.implementation.octopusRoot, "/opt/octopus");
   assert.equal(config.implementation.octopusSandbox, "read-only");
+  assert.equal(config.implementation.octopusWriteScopeMode, "strict");
   assert.equal(config.implementation.loopUntilApproved, false);
   assert.equal(config.runner.heartbeatIntervalSeconds, 15);
   assert.equal(config.runner.defaultTimeoutSeconds, 900);

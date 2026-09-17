@@ -82,7 +82,8 @@ Configuration:
 ```bash
 export DEVELOPMENT_CYCLE_IMPLEMENTATION_ADAPTER=octopus
 export DEVELOPMENT_CYCLE_OCTOPUS_ROOT=/path/to/claude-octopus
-export DEVELOPMENT_CYCLE_OCTOPUS_SANDBOX=workspace-write
+export DEVELOPMENT_CYCLE_OCTOPUS_SANDBOX=danger-full-access
+export DEVELOPMENT_CYCLE_OCTOPUS_WRITE_SCOPE_MODE=adaptive
 ```
 
 When the optional observer integration is enabled, the adapter maps generic observer metadata to the Octopus and Crabfleet lifecycle environment expected by that ecosystem.

@@ -24,7 +24,8 @@ The command adapter is the portable default.
 | `DEVELOPMENT_CYCLE_IMPLEMENTATION_COMMAND` | empty | Absolute executable path for the command adapter. |
 | `DEVELOPMENT_CYCLE_IMPLEMENTATION_ARGS_JSON` | `[]` | JSON array of fixed string arguments placed before the request path. |
 | `DEVELOPMENT_CYCLE_OCTOPUS_ROOT` | empty | Root of an optional Octopus checkout. |
-| `DEVELOPMENT_CYCLE_OCTOPUS_SANDBOX` | `workspace-write` | Sandbox value passed by the Octopus adapter. |
+| `DEVELOPMENT_CYCLE_OCTOPUS_SANDBOX` | `danger-full-access` | Codex sandbox value passed by the Octopus adapter. |
+| `DEVELOPMENT_CYCLE_OCTOPUS_WRITE_SCOPE_MODE` | `adaptive` | Tangle write-scope policy: `adaptive` or `strict`. |
 | `DEVELOPMENT_CYCLE_LOOP_UNTIL_APPROVED` | `true` | Retry failed Octopus subtasks until the configured quality retry limit is reached. Set `false` only for deliberate one-shot runs. |
 
 Example command adapter:

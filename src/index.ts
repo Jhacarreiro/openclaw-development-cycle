@@ -18,6 +18,7 @@ import { inferDeliveryClassification } from "./core/delivery-classification.js";
 import { findProviderProcessesOutsideObservedTree } from "./core/process-observation.js";
 import { transientRuntimeObservationRecoveryPatch } from "./core/runtime-failure.js";
 import { phaseNotificationForTransition } from "./core/phase-notifications.js";
+import { buildGatewayMessageInvokePayload } from "./core/message-notifications.js";
 import { loadDevelopmentCycleConfig } from "./config.js";
 import { acquireLock, createFilesystemStore } from "./storage/filesystem.js";
 import { buildImplementationLaunchSpec, jsonShellQuote, renderShellCommand, renderShellEnvironment, shellQuote } from "./adapters/implementation.js";
@@ -2443,18 +2444,65 @@ async function sendCycleMessage(params: any, title: string, text: string) {
     return { ok: true, skipped: true, reason: "notification_destination_missing", channel, target };
   }
 
-  const args = ["message", "send", "--channel", channel, "--target", target, "--message", `${title}\n\n${excerpt(text, 2500)}`, "--json"];
-  if (account) args.push("--account", account);
-  if (deliveryJson) args.push("--delivery", deliveryJson);
-  if (params.notificationDryRun === true) args.push("--dry-run");
+  const gatewayUrl = String(
+    params.notificationGatewayUrl
+      || process.env.DEVELOPMENT_CYCLE_GATEWAY_URL
+      || process.env.OPENCLAW_GATEWAY_URL
+      || "http://127.0.0.1:18789",
+  ).trim().replace(/\/$/, "");
+  const gatewayToken = String(params.notificationGatewayToken || process.env.OPENCLAW_GATEWAY_TOKEN || "").trim();
+  const payload = buildGatewayMessageInvokePayload({
+    channel,
+    target,
+    message: `${title}\n\n${excerpt(text, 2500)}`,
+    account: account || undefined,
+    deliveryJson: deliveryJson || undefined,
+    dryRun: params.notificationDryRun === true,
+  });
 
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 15000);
   try {
-    const res = await execFileAsync(developmentCycleConfig.openclawBin, args, { timeout: 20000, maxBuffer: 1024 * 1024 });
-    return { ok: true, channel, target, account: account || null, stdout: excerpt(res.stdout || "", 2000), stderr: excerpt(res.stderr || "", 1000) };
+    const headers: Record<string, string> = { "Content-Type": "application/json" };
+    if (gatewayToken) headers.Authorization = `Bearer ${gatewayToken}`;
+    const response = await fetch(`${gatewayUrl}/tools/invoke`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(payload),
+      signal: controller.signal,
+    });
+    const raw = await response.text();
+    let parsed: any = null;
+    try { parsed = raw ? JSON.parse(raw) : null; } catch { /* keep raw for diagnostics */ }
+    if (!response.ok) {
+      return {
+        ok: false,
+        channel,
+        target,
+        account: account || null,
+        error: `gateway_message_http_${response.status}`,
+        response: excerpt(raw, 2000),
+      };
+    }
+    const toolResult = parsed?.result;
+    if (toolResult && toolResult.ok === false) {
+      return {
+        ok: false,
+        channel,
+        target,
+        account: account || null,
+        error: String(toolResult.error || "gateway_message_tool_failed"),
+        response: parsed,
+      };
+    }
+    return { ok: true, channel, target, account: account || null, response: parsed ?? excerpt(raw, 2000) };
   } catch (err: any) {
-    return { ok: false, channel, target, account: account || null, error: String(err?.message || err), stdout: excerpt(err?.stdout || "", 1000), stderr: excerpt(err?.stderr || "", 1000) };
+    return { ok: false, channel, target, account: account || null, error: String(err?.message || err) };
+  } finally {
+    clearTimeout(timeout);
   }
 }
+
 
 async function clearActiveImplementationAttempt(dir: string) {
   return await cycleStatus(dir, {

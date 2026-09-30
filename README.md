@@ -202,6 +202,8 @@ When notifications are enabled, the plugin sends best-effort, deduplicated messa
 
 Lifecycle notification dedupe is persisted per run in `telegram_update_state.json`; audit events are appended to `telegram_update_events.jsonl`. Notification delivery failures are recorded in those event files but do not mutate the Development Cycle phase or fail the lifecycle action.
 
+Notification delivery uses the already-running local OpenClaw Gateway `/tools/invoke` message tool, authenticated by `OPENCLAW_GATEWAY_TOKEN`; it does not spawn a nested `openclaw message send` CLI process. `DEVELOPMENT_CYCLE_GATEWAY_URL` may override the default local Gateway URL when needed.
+
 ## Safety model
 
 - mutating actions are phase-gated;

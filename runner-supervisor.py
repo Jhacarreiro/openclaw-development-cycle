@@ -34,6 +34,40 @@ def reap_all(runners: dict[int, int]) -> list[tuple[int, int]]:
     return exited
 
 
+
+def atomic_write_text(path: Path, text: str) -> None:
+    tmp = path.with_name(f"{path.name}.tmp.{os.getpid()}")
+    tmp.write_text(text)
+    os.replace(tmp, path)
+
+
+def persist_terminal_state_if_missing(cwd: str, wait_status: int) -> None:
+    session_dir = Path(cwd)
+    exit_code_path = session_dir / 'exit-code.txt'
+    if exit_code_path.exists():
+        return
+    try:
+        exit_code = os.waitstatus_to_exitcode(wait_status)
+    except ValueError:
+        exit_code = 1
+    exited_at = time.strftime('%Y-%m-%dT%H:%M:%S%z')
+    atomic_write_text(exit_code_path, f"{exit_code}\n")
+    atomic_write_text(session_dir / 'exited-at.txt', f"{exited_at}\n")
+    status_path = session_dir / 'status.json'
+    try:
+        status = json.loads(status_path.read_text()) if status_path.exists() else {}
+    except (OSError, json.JSONDecodeError):
+        status = {}
+    status.update({
+        'status': 'completed' if exit_code == 0 else 'failed',
+        'launchState': 'exited',
+        'exitCode': exit_code,
+        'exitedAt': exited_at,
+        'updatedAt': exited_at,
+        'message': 'Runner terminal state materialized by supervisor after missing finalizer markers.',
+    })
+    atomic_write_text(status_path, json.dumps(status, indent=2) + '\n')
+
 def group_members(pgid: int) -> list[int]:
     members = []
     for entry in Path('/proc').iterdir():
@@ -123,6 +157,7 @@ def serve(socket_path: str) -> None:
     server.listen(16)
     server.settimeout(0.2)
     runners: dict[int, int] = {}
+    runner_cwds: dict[int, str] = {}
     launch_in_flight = False
     shutdown_requested = False
 
@@ -184,6 +219,7 @@ def serve(socket_path: str) -> None:
                         try:
                             pid = launch_runner(runner_path, cwd)
                             runners[pid] = pid
+                            runner_cwds[pid] = cwd
                             response = {'ok': True, 'pid': pid, 'pgid': pid, 'supervisorPid': os.getpid()}
                         finally:
                             launch_in_flight = False
@@ -200,10 +236,17 @@ def serve(socket_path: str) -> None:
                     # the supervisor (it is the subreaper for running sessions).
                     pass
 
-        for pid, _status in reap_all(runners):
+        for pid, wait_status in reap_all(runners):
+            cwd = runner_cwds.get(pid)
+            if cwd:
+                try:
+                    persist_terminal_state_if_missing(cwd, wait_status)
+                except BaseException:
+                    pass
             pgid = runners.get(pid, pid)
             terminate_group(pgid, runners)
             runners.pop(pid, None)
+            runner_cwds.pop(pid, None)
             reap_all(runners)
 
 

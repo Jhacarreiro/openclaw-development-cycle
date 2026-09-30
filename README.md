@@ -178,6 +178,8 @@ export DEVELOPMENT_CYCLE_OCTOPUS_WRITE_SCOPE_MODE=adaptive
 
 The adapter translates the generic cycle request into Octopus `scripts/orchestrate.sh` calls. For Codex seats, it prepends an owned compatibility bridge that reads the existing OpenClaw `openai` OAuth profile directly from the public auth-profile store at runtime and passes ephemeral ChatGPT auth to `codex app-server`. It does not require or persist a separate Codex CLI login under `CODEX_HOME`. Non-Codex providers and Octopus model routing remain unchanged.
 
+Managed Octopus launches fail closed on review routing. `~/.claude-octopus/config/providers.json` must define every canonical role used by Design Review and contextual review as an exact `{provider, model}` object. Missing/malformed routes abort launch instead of allowing Octopus to fall back silently to its standalone defaults. The adapter also sets `OCTOPUS_REQUIRE_EXPLICIT_REVIEW_ROUTING=true` so compatible Octopus versions refuse seat substitution after launch.
+
 Octopus council review remains available only when this adapter is active.
 
 See [Adapters](docs/adapters.md) and [Configuration](docs/configuration.md).

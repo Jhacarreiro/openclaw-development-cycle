@@ -90,54 +90,56 @@ const OCTOPUS_ROUTED_SEAT_ROLE_ENV: ReadonlyArray<readonly [string, string]> = [
 
 /**
  * Keep Octopus ceremony/review seats aligned with the exact canonical role
- * routes in providers.json. Seat-specific upstream environment variables are
- * launch-time transport only; providers.json remains the single model source
- * of truth.
+ * routes in providers.json. Development Cycle launches are supervised runs, so
+ * invalid or incomplete canonical routing is a launch error rather than a
+ * reason to fall back silently to upstream defaults.
  *
- * Explicit process-level seat overrides win. If the Octopus config is missing,
- * malformed, or a role route is not an exact {provider, model} object, no value
- * is invented and upstream behavior remains unchanged for that seat.
+ * Explicit process-level seat overrides may replace a derived seat identity,
+ * but they do not waive validation of the canonical eight routing roles.
  */
 function octopusRoutedSeatEnvironment(): Record<string, string> {
-  const env: Record<string, string> = {};
-  const pending: Array<readonly [string, string]> = [];
-
-  for (const [role, envName] of OCTOPUS_ROUTED_SEAT_ROLE_ENV) {
-    const explicit = String(process.env[envName] || "").trim();
-    if (explicit) {
-      env[envName] = explicit;
-    } else {
-      pending.push([role, envName]);
-    }
-  }
-
-  if (pending.length === 0) return env;
-
   const home = String(process.env.HOME || "").trim();
-  if (!home) return env;
+  if (!home) throw new Error("octopus_routing_home_missing");
 
+  const configPath = join(home, ".claude-octopus", "config", "providers.json");
+  let parsed: { routing?: { roles?: Record<string, unknown> } };
   try {
-    const configPath = join(home, ".claude-octopus", "config", "providers.json");
-    const parsed = JSON.parse(readFileSync(configPath, "utf8")) as {
+    parsed = JSON.parse(readFileSync(configPath, "utf8")) as {
       routing?: { roles?: Record<string, unknown> };
     };
-    const roles = parsed?.routing?.roles;
-    if (!roles || typeof roles !== "object") return env;
-
-    for (const [role, envName] of pending) {
-      const route = roles[role];
-      if (!route || typeof route !== "object" || Array.isArray(route)) continue;
-      const target = route as Record<string, unknown>;
-      const provider = typeof target.provider === "string" ? target.provider.trim() : "";
-      const model = typeof target.model === "string" ? target.model.trim() : "";
-      if (provider && model) env[envName] = `${provider}:${model}`;
-    }
-  } catch {
-    // Missing or malformed Octopus config: preserve upstream behavior.
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException)?.code;
+    if (code === "ENOENT") throw new Error(`octopus_routing_config_missing:${configPath}`);
+    throw new Error(`octopus_routing_config_invalid:${configPath}`);
   }
 
+  const roles = parsed?.routing?.roles;
+  if (!roles || typeof roles !== "object" || Array.isArray(roles)) {
+    throw new Error("octopus_routing_roles_missing");
+  }
+
+  const canonicalRoles = [...new Set(OCTOPUS_ROUTED_SEAT_ROLE_ENV.map(([role]) => role))];
+  const validated = new Map<string, string>();
+  for (const role of canonicalRoles) {
+    const route = roles[role];
+    if (!route || typeof route !== "object" || Array.isArray(route)) {
+      throw new Error(`octopus_routing_role_invalid:${role}`);
+    }
+    const target = route as Record<string, unknown>;
+    const provider = typeof target.provider === "string" ? target.provider.trim() : "";
+    const model = typeof target.model === "string" ? target.model.trim() : "";
+    if (!provider || !model) throw new Error(`octopus_routing_role_invalid:${role}`);
+    validated.set(role, `${provider}:${model}`);
+  }
+
+  const env: Record<string, string> = {};
+  for (const [role, envName] of OCTOPUS_ROUTED_SEAT_ROLE_ENV) {
+    const explicit = String(process.env[envName] || "").trim();
+    env[envName] = explicit || String(validated.get(role));
+  }
   return env;
 }
+
 
 export function buildImplementationLaunchSpec(
   config: ImplementationAdapterConfig,
@@ -204,6 +206,7 @@ export function buildImplementationLaunchSpec(
         OCTOPUS_TANGLE_CONTEXTUAL_READ_ROOTS: readScopeMode === "contextual" ? readEntries.join("\n") : "",
         OCTOPUS_HUMAN_INTERVENTION_PATH: input.interventionPath || "",
         ...octopusRoutedSeatEnvironment(),
+        OCTOPUS_REQUIRE_EXPLICIT_REVIEW_ROUTING: "true",
         OCTOPUS_PRESERVE_CALLER_PROCESS_GROUP: "true",
         LOOP_UNTIL_APPROVED: config.loopUntilApproved ? "true" : "false",
         OCTOPUS_AGENT_LIFECYCLE_HOOK: input.observer?.agentHookPath || "",

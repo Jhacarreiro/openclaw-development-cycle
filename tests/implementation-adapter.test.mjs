@@ -26,6 +26,34 @@ const baseInput = {
   command: "implement",
 };
 
+const canonicalRouting = {
+  architect: { provider: "commandcode", model: "xiaomi/mimo-v2.6-pro" },
+  strategist: { provider: "commandcode", model: "qwen/qwen3.8-max-0902" },
+  "security-reviewer": { provider: "commandcode", model: "xai/grok-4.7" },
+  "code-reviewer": { provider: "claude", model: "claude-sonnet-5-5" },
+  implementer: { provider: "commandcode", model: "xiaomi/mimo-v2.6-pro" },
+  "implementer-heavy": { provider: "codex", model: "gpt-6.1-sol" },
+  synthesizer: { provider: "claude", model: "claude-sonnet-5-5" },
+  researcher: { provider: "codex", model: "gpt-6.1-sol" },
+};
+
+function withCanonicalRoutingHome(callback) {
+  const previousHome = process.env.HOME;
+  const home = mkdtempSync(join(tmpdir(), "development-cycle-octopus-"));
+  const configDir = join(home, ".claude-octopus", "config");
+  mkdirSync(configDir, { recursive: true });
+  writeFileSync(join(configDir, "providers.json"), JSON.stringify({ routing: { roles: canonicalRouting } }));
+  try {
+    process.env.HOME = home;
+    return callback();
+  } finally {
+    if (previousHome === undefined) delete process.env.HOME;
+    else process.env.HOME = previousHome;
+    rmSync(home, { recursive: true, force: true });
+  }
+}
+
+
 test("command adapter receives the stable request JSON path", () => {
   const spec = buildImplementationLaunchSpec(
     {
@@ -46,7 +74,7 @@ test("command adapter receives the stable request JSON path", () => {
   assert.equal(spec.env.DEVELOPMENT_CYCLE_REQUEST_PATH, "/tmp/run/request.json");
 });
 
-test("Octopus adapter translates the generic request into orchestrate.sh", () => {
+test("Octopus adapter translates the generic request into orchestrate.sh", () => withCanonicalRoutingHome(() => {
   const spec = buildImplementationLaunchSpec(
     {
       adapter: "command",
@@ -89,7 +117,8 @@ test("Octopus adapter translates the generic request into orchestrate.sh", () =>
   assert.equal(spec.env.LOOP_UNTIL_APPROVED, "true");
   assert.equal(spec.env.OCTOPUS_AGENT_ROOT_SESSION_ID, "session-1");
   assert.equal(spec.env.CRABFLEET_ROOT_SESSION_ID, "session-1");
-});
+  assert.equal(spec.env.OCTOPUS_REQUIRE_EXPLICIT_REVIEW_ROUTING, "true");
+}));
 
 test("Octopus adapter maps canonical role routes into Octopus review seat identities", () => {
   const previousHome = process.env.HOME;
@@ -202,7 +231,7 @@ test("Codex bridge discovers and forwards to the real CLI for non-exec commands"
   }
 });
 
-test("Octopus adapter does not invent routed review seats for non-exact role routes", () => {
+test("Octopus adapter fails closed for non-exact canonical role routes", () => {
   const previousHome = process.env.HOME;
   const home = mkdtempSync(join(tmpdir(), "development-cycle-octopus-"));
   const configDir = join(home, ".claude-octopus", "config");
@@ -221,7 +250,7 @@ test("Octopus adapter does not invent routed review seats for non-exact role rou
 
   try {
     process.env.HOME = home;
-    const spec = buildImplementationLaunchSpec(
+    assert.throws(() => buildImplementationLaunchSpec(
       {
         adapter: "octopus",
         command: "",
@@ -232,12 +261,7 @@ test("Octopus adapter does not invent routed review seats for non-exact role rou
         loopUntilApproved: true,
       },
       { ...baseInput, adapter: "octopus", command: "tangle" },
-    );
-
-    assert.equal(spec.env.OCTOPUS_DESIGN_REVIEW_IMPLEMENTER_AGENT, undefined);
-    assert.equal(spec.env.OCTOPUS_DESIGN_REVIEW_RESEARCHER_AGENT, undefined);
-    assert.equal(spec.env.OCTOPUS_REVIEW_CVE_AGENT, undefined);
-    assert.equal(spec.env.OCTOPUS_REVIEW_DEBATER_AGENT, undefined);
+    ), /octopus_routing_role_invalid:implementer/);
   } finally {
     if (previousHome === undefined) delete process.env.HOME;
     else process.env.HOME = previousHome;
@@ -245,7 +269,7 @@ test("Octopus adapter does not invent routed review seats for non-exact role rou
   }
 });
 
-test("Octopus adapter omits timeout when the control plane delegates timeout policy", () => {
+test("Octopus adapter omits timeout when the control plane delegates timeout policy", () => withCanonicalRoutingHome(() => {
   const spec = buildImplementationLaunchSpec(
     {
       adapter: "octopus",
@@ -265,7 +289,7 @@ test("Octopus adapter omits timeout when the control plane delegates timeout pol
   );
   assert.deepEqual(spec.args.slice(0, 3), ["--dir", "/tmp/project", "tangle"]);
   assert.equal(spec.env.LOOP_UNTIL_APPROVED, "false");
-});
+}));
 
 test("shell rendering quotes executable, arguments and environment values", () => {
   assert.equal(shellQuote("a'b"), `'a'"'"'b'`);

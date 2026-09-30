@@ -20,6 +20,7 @@ import { transientRuntimeObservationRecoveryPatch } from "./core/runtime-failure
 import { phaseNotificationForTransition } from "./core/phase-notifications.js";
 import { buildGatewayMessageInvokePayload } from "./core/message-notifications.js";
 import { classifyAutomaticImplementationRecovery } from "./core/automatic-recovery.js";
+import { createDeferredDeliveryQueue } from "./core/deferred-delivery.js";
 import { loadDevelopmentCycleConfig } from "./config.js";
 import { acquireLock, createFilesystemStore } from "./storage/filesystem.js";
 import { buildImplementationLaunchSpec, jsonShellQuote, renderShellCommand, renderShellEnvironment, shellQuote } from "./adapters/implementation.js";
@@ -167,7 +168,19 @@ async function cycleStatus(dir: string, patch: any) {
   const state = await filesystemStore.loadJson<any>(statePath);
   if (state?.lastSignature === signature) return next;
 
-  const result = await sendCycleMessage({}, notice.title, notice.text).catch((error: any) => ({
+  const deliveryCallback = async (delivery: any) => {
+    await filesystemStore.appendJsonl(eventsPath, {
+      eventType: "development_cycle.telegram_delivery",
+      createdAt: new Date().toISOString(),
+      project: next?.project || previous?.project || "",
+      runId: next?.runId || previous?.runId || "",
+      phase: notice.phase,
+      title: notice.title,
+      notification: delivery,
+      signature,
+    });
+  };
+  const result = await sendCycleMessage({ __notificationResultCallback: deliveryCallback }, notice.title, notice.text).catch((error: any) => ({
     ok: false,
     error: String(error?.message || error),
   }));
@@ -2524,7 +2537,7 @@ async function writeCouncilOnePager(dir: string, status: any, council: any, para
   return { path: out, content, status: next };
 }
 
-async function sendCycleMessage(params: any, title: string, text: string) {
+async function deliverCycleMessageNow(params: any, title: string, text: string) {
   const enabled = params.notify === undefined
     ? developmentCycleConfig.notifications.enabled
     : Boolean(params.notify);
@@ -2597,6 +2610,57 @@ async function sendCycleMessage(params: any, title: string, text: string) {
   }
 }
 
+
+
+type DeferredCycleMessage = {
+  params: any;
+  title: string;
+  text: string;
+};
+
+const cycleMessageDeliveryQueue = createDeferredDeliveryQueue<DeferredCycleMessage, any>(
+  async (job) => await deliverCycleMessageNow(job.params, job.title, job.text),
+);
+
+async function sendCycleMessage(params: any, title: string, text: string) {
+  const enabled = params.notify === undefined
+    ? developmentCycleConfig.notifications.enabled
+    : Boolean(params.notify);
+  if (!enabled) return { ok: true, skipped: true, reason: "notifications_disabled" };
+
+  const channel = String(params.notificationChannel || developmentCycleConfig.notifications.channel || "").trim();
+  const target = String(params.notificationTarget || developmentCycleConfig.notifications.target || "").trim();
+  if (!channel || !target) {
+    return { ok: true, skipped: true, reason: "notification_destination_missing", channel, target };
+  }
+
+  // Validate structured delivery JSON before acknowledging the queued notification.
+  buildGatewayMessageInvokePayload({
+    channel,
+    target,
+    message: `${title}\n\n${excerpt(text, 2500)}`,
+    account: String(params.notificationAccount || developmentCycleConfig.notifications.account || "").trim() || undefined,
+    deliveryJson: String(params.notificationDeliveryJson || developmentCycleConfig.notifications.deliveryJson || "").trim() || undefined,
+    dryRun: params.notificationDryRun === true,
+  });
+
+  const onResult = typeof params.__notificationResultCallback === "function"
+    ? params.__notificationResultCallback
+    : undefined;
+  const queuedAt = new Date().toISOString();
+  const queued = cycleMessageDeliveryQueue.enqueue({
+    payload: { params: { ...params, __notificationResultCallback: undefined }, title, text },
+    onResult,
+  });
+  return {
+    ok: true,
+    queued: true,
+    queuedAt,
+    channel,
+    target,
+    pending: queued.pending,
+  };
+}
 
 async function clearActiveImplementationAttempt(dir: string) {
   return await cycleStatus(dir, {
@@ -3431,7 +3495,14 @@ export default defineToolPlugin({
         repositoryBaseBranch: Type.Optional(Type.String()),
         repositoryDeliveryTimeoutMs: Type.Optional(Type.Number()),
       }),
-      execute: async (params) => await projectCycle(params),
+      execute: async (params) => {
+        cycleMessageDeliveryQueue.beginExecution();
+        try {
+          return await projectCycle(params);
+        } finally {
+          cycleMessageDeliveryQueue.endExecution();
+        }
+      },
     }),
   ],
 });

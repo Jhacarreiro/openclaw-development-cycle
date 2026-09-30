@@ -204,6 +204,8 @@ Lifecycle notification dedupe is persisted per run in `telegram_update_state.jso
 
 Notification delivery uses the already-running local OpenClaw Gateway `/tools/invoke` message tool, authenticated by `OPENCLAW_GATEWAY_TOKEN`; it does not spawn a nested `openclaw message send` CLI process. `DEVELOPMENT_CYCLE_GATEWAY_URL` may override the default local Gateway URL when needed.
 
+Gateway message delivery is deferred until the current `development_cycle` tool execution has returned. Notifications are queued in-process while one or more Development Cycle actions are active, then drained when the active-action count reaches zero. This prevents reentrant `/tools/invoke` calls from deadlocking or timing out the action that generated the notification. Phase delivery results are appended asynchronously to `telegram_update_events.jsonl`.
+
 Implementation runners also perform one best-effort `reconcile` callback through the local Gateway after exit. This lets the control plane observe terminal runner state without polling. For one narrowly classified Octopus planner-reconsideration contract failure, `reconcile` may automatically relaunch the same approved plan exactly once, but only when the attempt worktree is pristine, its HEAD still matches the source checkout, and there is no pending human intervention. Unknown failures, dirty/committed worktrees, interventions, or a second occurrence fail closed and require normal operator handling. Recovery events are appended to `automatic_recovery_events.jsonl`.
 
 ## Safety model

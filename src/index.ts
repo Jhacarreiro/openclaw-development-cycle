@@ -17,6 +17,7 @@ import { councilNeedsCorrectionsText, resolveAutoCouncilCorrectionsMax } from ".
 import { inferDeliveryClassification } from "./core/delivery-classification.js";
 import { findProviderProcessesOutsideObservedTree } from "./core/process-observation.js";
 import { transientRuntimeObservationRecoveryPatch } from "./core/runtime-failure.js";
+import { phaseNotificationForTransition } from "./core/phase-notifications.js";
 import { loadDevelopmentCycleConfig } from "./config.js";
 import { acquireLock, createFilesystemStore } from "./storage/filesystem.js";
 import { buildImplementationLaunchSpec, jsonShellQuote, renderShellCommand, renderShellEnvironment, shellQuote } from "./adapters/implementation.js";
@@ -152,7 +153,41 @@ async function ensureRunnerSupervisor() {
 const cycleDir = filesystemStore.runDir;
 const loadJson = filesystemStore.loadJson;
 const saveJson = filesystemStore.saveJson;
-const cycleStatus = filesystemStore.updateStatus;
+async function cycleStatus(dir: string, patch: any) {
+  const previous = await filesystemStore.loadJson<any>(join(dir, "status.json"));
+  const next = await filesystemStore.updateStatus(dir, patch);
+  const notice = phaseNotificationForTransition(previous, next);
+  if (!notice) return next;
+
+  const statePath = join(dir, "telegram_update_state.json");
+  const eventsPath = join(dir, "telegram_update_events.jsonl");
+  const signature = JSON.stringify({ phase: notice.phase, project: next?.project || "", runId: next?.runId || "" });
+  const state = await filesystemStore.loadJson<any>(statePath);
+  if (state?.lastSignature === signature) return next;
+
+  const result = await sendCycleMessage({}, notice.title, notice.text).catch((error: any) => ({
+    ok: false,
+    error: String(error?.message || error),
+  }));
+  const event = {
+    eventType: "development_cycle.telegram_update",
+    createdAt: new Date().toISOString(),
+    project: next?.project || previous?.project || "",
+    runId: next?.runId || previous?.runId || "",
+    previousPhase: previous?.phase || "",
+    phase: notice.phase,
+    title: notice.title,
+    notification: result,
+    signature,
+  };
+  await filesystemStore.appendJsonl(eventsPath, event);
+  await filesystemStore.saveJson(statePath, {
+    lastSignature: signature,
+    lastEvent: event,
+    updatedAt: event.createdAt,
+  });
+  return next;
+}
 const appendJsonl = filesystemStore.appendJsonl;
 function newRunId(project: string) { return createRunId(project); }
 function dcShort(x: any, n = 1200) { const s = String(x || ""); return s.length <= n ? s : s.slice(0, n - 3) + "..."; }

@@ -196,6 +196,10 @@ export DEVELOPMENT_CYCLE_NOTIFICATION_TARGET='channel:C0123456789'
 
 Any channel supported by `openclaw message send` can be used.
 
+When notifications are enabled, the plugin sends best-effort, deduplicated messages for material lifecycle phase transitions only. Heartbeats and same-phase status refreshes remain silent. Current material notifications include implementation launch/running/delivery/failure, correction rounds, mechanical validation outcomes, council review outcomes, final validation decisions, stop, repository delivery, merge and close. Human-intervention/council-interrupt messages keep their dedicated notification paths and are not duplicated by the phase notifier.
+
+Lifecycle notification dedupe is persisted per run in `telegram_update_state.json`; audit events are appended to `telegram_update_events.jsonl`. Notification delivery failures are recorded in those event files but do not mutate the Development Cycle phase or fail the lifecycle action.
+
 ## Safety model
 
 - mutating actions are phase-gated;

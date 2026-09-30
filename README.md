@@ -106,6 +106,8 @@ development_cycle action=record_plan project=my-project runId=<run-id> planPath=
 
 development_cycle action=start_implementation project=my-project runId=<run-id> projectRoot=/path/to/repo
 
+`start_implementation` is the host's explicit authorization to execute the already-approved plan for that run. Generic plan wording such as `draft for human approval`, `after human approval`, or `do not start until approved` is therefore satisfied by the action itself and must not trigger a second approval gate. If a new risky/protected/out-of-scope decision arises after launch, the implementation must use the structured intervention protocol (`intervention.json` -> `implementation_waiting_human` -> `answer_intervention`) rather than leaving the request only as prose in review output.
+
 development_cycle action=reconcile project=my-project runId=<run-id>
 
 development_cycle action=request_final_validation project=my-project runId=<run-id>

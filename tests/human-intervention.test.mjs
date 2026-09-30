@@ -157,8 +157,10 @@ test("implementation intervention waits for human and answer resumes the same ru
   assert.equal(response.id, "choose-auth-mode");
   assert.equal(response.response, "Choose A; preserve the existing API shape.");
   const request = await readFile(join(dir, "implementation_request.md"), "utf8");
+  assert.match(request, /HOST_AUTHORIZATION_CONTEXT/);
   assert.match(request, /HUMAN_INTERVENTION_RESOLUTION/);
   assert.match(request, /Choose A; preserve the existing API shape\./);
+  assert.match(request, /intervention\.json/);
   const finalStatus = JSON.parse(await readFile(statusPath, "utf8"));
   assert.equal(finalStatus.implementationInterventionResolved.id, "choose-auth-mode");
   assert.equal(finalStatus.implementationInterventionResolved.response, "Choose A; preserve the existing API shape.");

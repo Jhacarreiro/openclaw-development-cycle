@@ -883,6 +883,9 @@ test("start_implementation keeps wiki root pinned between containment and plan r
   const request = await readFile(join(req.details.dir, "implementation_request.md"), "utf8");
   assert.match(request, /SAFE_WIKI_HANDOFF_PLAN/);
   assert.doesNotMatch(request, /SECRET_WIKI_HANDOFF_SWAP/);
+  assert.match(request, /HOST_AUTHORIZATION_CONTEXT/);
+  assert.match(request, /explicitly authorized implementation for this run by invoking development_cycle start_implementation/);
+  assert.match(request, /intervention\.json/);
 });
 
 

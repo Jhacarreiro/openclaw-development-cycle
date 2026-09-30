@@ -19,6 +19,7 @@ import { findProviderProcessesOutsideObservedTree } from "./core/process-observa
 import { transientRuntimeObservationRecoveryPatch } from "./core/runtime-failure.js";
 import { phaseNotificationForTransition } from "./core/phase-notifications.js";
 import { buildGatewayMessageInvokePayload } from "./core/message-notifications.js";
+import { classifyAutomaticImplementationRecovery } from "./core/automatic-recovery.js";
 import { loadDevelopmentCycleConfig } from "./config.js";
 import { acquireLock, createFilesystemStore } from "./storage/filesystem.js";
 import { buildImplementationLaunchSpec, jsonShellQuote, renderShellCommand, renderShellEnvironment, shellQuote } from "./adapters/implementation.js";
@@ -379,6 +380,16 @@ finalize() {
     rm -f "$status_tmp"
   fi
   cleanup_process_group
+  if [ -n "\${OPENCLAW_GATEWAY_TOKEN:-}" ]; then
+    (
+      sleep 1
+      reconcile_body=$(jq -nc --arg tool development_cycle --arg action reconcile --arg project ${jsonShellQuote(request.project)} --arg runId ${jsonShellQuote(request.runId)} '{tool:$tool,action:$action,args:{project:$project,runId:$runId}}')
+      curl -sS --connect-timeout 2 --max-time 20 http://127.0.0.1:18789/tools/invoke \
+        -H "Authorization: Bearer $OPENCLAW_GATEWAY_TOKEN" \
+        -H "Content-Type: application/json" \
+        -d "$reconcile_body" >/dev/null 2>&1 || true
+    ) >/dev/null 2>&1 &
+  fi
 }
 trap finalize EXIT
 trap 'exit 143' TERM
@@ -1611,6 +1622,89 @@ async function finalizeObserverSessions(dir: string, status: any, terminal: stri
   return { ok: results.every((entry) => entry.ok), terminal, results };
 }
 
+async function octopusAttemptPristine(status: any) {
+  const attemptId = cleanId(status?.implementationAttemptId || "", "attempt");
+  const projectRoot = String(status?.projectRoot || "").trim();
+  if (!attemptId || !projectRoot) return { pristine: false, reason: "attempt_or_project_root_missing" };
+  const worktreePath = join(runtimeHome, ".claude-octopus", "worktrees", "tangle", attemptId, "integration");
+  const sourcePinned = await pinTrustedProjectRoot(projectRoot);
+  const worktreePinned = await pinTrustedProjectRoot(worktreePath);
+  try {
+    if (!sourcePinned || !worktreePinned) return { pristine: false, reason: "worktree_missing_or_untrusted", worktreePath };
+    const [sourceHead, worktreeHead, worktreeStatus] = await Promise.all([
+      execGit(["rev-parse", "HEAD"], sourcePinned.procPath, 10000),
+      execGit(["rev-parse", "HEAD"], worktreePinned.procPath, 10000),
+      execGit(["status", "--porcelain"], worktreePinned.procPath, 10000),
+    ]);
+    if (!sourceHead.ok || !worktreeHead.ok || !worktreeStatus.ok) return { pristine: false, reason: "git_probe_failed", worktreePath };
+    const source = String(sourceHead.stdout || "").trim();
+    const head = String(worktreeHead.stdout || "").trim();
+    const dirty = String(worktreeStatus.stdout || "").trim();
+    return {
+      pristine: Boolean(source && head && source === head && !dirty),
+      reason: source !== head ? "worktree_has_commits" : dirty ? "worktree_dirty" : "pristine",
+      worktreePath: worktreePinned.realPath,
+      sourceHead: source,
+      worktreeHead: head,
+    };
+  } finally {
+    await sourcePinned?.handle.close().catch(() => null);
+    await worktreePinned?.handle.close().catch(() => null);
+  }
+}
+
+async function maybeAutoRecoverImplementationFailure(dir: string, status: any, params: any) {
+  if (String(status?.phase || "") !== "implementation_failed") return { attempted: false, status };
+  const stdoutPath = String(status?.implementationStdout || status?.directImplementationStdout || "");
+  const stderrPath = String(status?.implementationStderr || status?.directImplementationStderr || "");
+  const [stdout, stderr, pristineState] = await Promise.all([
+    textTail(stdoutPath, 60000),
+    textTail(stderrPath, 30000),
+    octopusAttemptPristine(status),
+  ]);
+  const classification = classifyAutomaticImplementationRecovery({
+    phase: status?.phase,
+    adapter: status?.implementationAdapter,
+    stdout,
+    stderr,
+    recoveryCount: Number(status?.automaticPlannerRecoveryCount || 0),
+    hasIntervention: Boolean(status?.implementationIntervention || status?.implementationInterventionPath),
+    pristine: pristineState.pristine,
+  });
+  if (!classification.eligible) return { attempted: false, classification, pristineState, status };
+
+  const recoveryCount = Number(status?.automaticPlannerRecoveryCount || 0) + 1;
+  const recoveryEvent = {
+    schemaVersion: 1,
+    detectedAt: new Date().toISOString(),
+    failureClass: classification.reason,
+    recoveryCount,
+    previousAttemptId: status?.implementationAttemptId || null,
+    pristineState,
+  };
+  await filesystemStore.appendJsonl(join(dir, "automatic_recovery_events.jsonl"), recoveryEvent);
+  const marked = await cycleStatus(dir, {
+    automaticPlannerRecoveryCount: recoveryCount,
+    automaticRecoveryLast: recoveryEvent,
+    nextAction: "Automatically relaunching the same approved implementation after a recoverable planner-contract failure with a pristine worktree.",
+  });
+  await sendCycleMessage({}, `♻️ Development Cycle auto-recovery — ${status?.project || "project"}`, `Run: ${status?.runId || ""}\nReason: ${classification.reason}\nAttempt: ${recoveryCount}/1\nWorktree: pristine\nAction: relaunching the same approved plan.`).catch(() => null);
+  const relaunch = await projectCycle({
+    action: "start_implementation",
+    project: status?.project || params?.project,
+    runId: status?.runId || params?.runId,
+    projectRoot: status?.projectRoot,
+    projectWikiPath: status?.projectWikiPath,
+    planPath: status?.plan,
+    implementationAdapter: status?.implementationAdapter || "octopus",
+    [resolvedCycleDir]: dir,
+    [lifecycleLockHeld]: true,
+    automaticRecovery: true,
+  });
+  const nextStatus = await loadJson(join(dir, "status.json"));
+  return { attempted: true, classification, pristineState, recoveryEvent, relaunch, status: nextStatus || marked };
+}
+
 async function refreshLaunchedImplementationStatus(dir: string, status: any) {
   const phase = String(status?.phase || "");
   if (!["implementation_launched", "implementation_running", "implementation_failed", "implementation_delivered", "corrections_launched", "corrections_running", "corrections_failed", "corrections_completed"].includes(phase)) return status;
@@ -2808,6 +2902,13 @@ async function projectCycle(params: any) {
   if (action === "reconcile") {
     const refreshedStatus = await refreshLaunchedImplementationStatus(dir, status);
     let effectiveStatus = refreshedStatus;
+    const automaticRecovery = await maybeAutoRecoverImplementationFailure(dir, { ...effectiveStatus, project, runId }, params);
+    effectiveStatus = automaticRecovery.status || effectiveStatus;
+    if (automaticRecovery.attempted && automaticRecovery.relaunch?.ok) {
+      const files = (await readdir(dir).catch(() => [])).sort();
+      const runtime = await cycleRuntimeSummary(dir, effectiveStatus);
+      return { ok: true, project, runId, dir, phase: effectiveStatus?.phase, status: effectiveStatus, files, runtime, automaticRecovery };
+    }
     const repositoryDeliveryReconcile = await reconcileRepositoryDeliveryState(dir, { ...effectiveStatus, project, runId }, params);
     effectiveStatus = repositoryDeliveryReconcile?.status || effectiveStatus;
     let automaticValidation: any = null;

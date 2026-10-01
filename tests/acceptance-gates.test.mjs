@@ -41,9 +41,9 @@ for (const [synthesis, expected] of [["NO-GO: unresolved security vulnerability"
   test(`completed council review refuses ${synthesis}`, { skip: process.platform !== "linux" }, async t => {
     const octopusRoot = await mkdtemp(join(tmpdir(), "development-cycle-council-"));
     t.after(() => rm(octopusRoot, { recursive: true, force: true }));
-    const { checkout, call, seed, dir } = await fixture(t, { DEVELOPMENT_CYCLE_OCTOPUS_ROOT: octopusRoot });
+    const { checkout, call, seed } = await fixture(t, { DEVELOPMENT_CYCLE_OCTOPUS_ROOT: octopusRoot });
     await mkdir(join(octopusRoot, "scripts"), { recursive: true });
-    await writeFile(join(octopusRoot, "scripts", "orchestrate.sh"), `#!/bin/sh\nmkdir -p '${dir}/council-code-review/result'\nprintf '%s' '{"status":"completed"}' > '${dir}/council-code-review/result/summary.json'\nprintf '%s' '${synthesis}' > '${dir}/council-code-review/result/synthesis.md'\n`, { mode: 0o755 });
+    await writeFile(join(octopusRoot, "scripts", "orchestrate.sh"), `#!/bin/sh\nwhile [ "$#" -gt 0 ]; do if [ "$1" = --output-dir ]; then output="$2"; break; fi; shift; done\nmkdir -p "$output/result"\nprintf '%s' '{"status":"completed"}' > "$output/result/summary.json"\nprintf '%s' '${synthesis}' > "$output/result/synthesis.md"\n`, { mode: 0o755 });
     await seed({ phase: "external_validation_passed", implementationAdapter: "octopus", outputPath: checkout });
     const result = await call("reconcile", { autoRunCouncilReview: true, notifyMain: false, autoStopStalled: false });
     assert.equal(result.status.phase, expected, JSON.stringify(result));
@@ -52,6 +52,27 @@ for (const [synthesis, expected] of [["NO-GO: unresolved security vulnerability"
     assert.match(result.councilEndgate.council.status.nextAction, /rejected|inconclusive/);
   });
 }
+
+test("revalidation clears the council cache and cannot consume an earlier review artifact", { skip: process.platform !== "linux" }, async t => {
+  const octopusRoot = await mkdtemp(join(tmpdir(), "development-cycle-council-cache-"));
+  t.after(() => rm(octopusRoot, { recursive: true, force: true }));
+  const { checkout, call, seed, dir } = await fixture(t, { DEVELOPMENT_CYCLE_OCTOPUS_ROOT: octopusRoot });
+  const previousRoot = join(dir, "council-code-review", "previous");
+  await mkdir(previousRoot, { recursive: true });
+  const previousSummary = join(previousRoot, "summary.json");
+  await writeFile(previousSummary, '{"status":"completed"}');
+  await writeFile(join(previousRoot, "synthesis.md"), "GO\nNo blockers");
+  await seed({ phase: "council_validated", implementationAdapter: "octopus", outputPath: checkout, councilReviewSummary: previousSummary, councilReviewSynthesis: join(previousRoot, "synthesis.md") });
+  const validated = await call("run_final_validation");
+  assert.equal(validated.ok, true, JSON.stringify(validated));
+  assert.equal(validated.status.councilReviewSummary, "");
+  await mkdir(join(octopusRoot, "scripts"), { recursive: true });
+  await writeFile(join(octopusRoot, "scripts", "orchestrate.sh"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+  const reviewed = await call("reconcile", { autoRunCouncilReview: true, notifyMain: false, autoStopStalled: false });
+  assert.equal(reviewed.status.phase, "council_review_failed", JSON.stringify(reviewed));
+  assert.equal(reviewed.councilEndgate.council.summaryPath, "");
+  assert.equal(reviewed.councilEndgate.corrections, null);
+});
 
 test("corrupted status returns an actionable error without erasing history", async t => {
   const { call, statusPath } = await fixture(t);

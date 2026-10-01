@@ -11,6 +11,7 @@ The format is based on Keep a Changelog and the project follows Semantic Version
 - Council NO-GO, FAIL, STOP and inconclusive reviews no longer count as acceptance; rejected reviews do not auto-launch corrections.
 - Requested delivery classification cannot promote failed phases to success or auto-merge.
 - Resumed finalization enforces mechanical validation and rechecks checkout evidence before GO and successful publication.
+- Revalidation clears previous council verdicts, and each council invocation uses a fresh output directory so old review artifacts cannot be reused.
 - Invalid validation policy stops acceptance; stopped mechanical validation supports retry or partial finalization.
 - Corrupt status blocks updates without discarding history; atomic status writes synchronize files and retain the previous valid state.
 - Notification jobs survive plugin restarts, retry failed delivery and retain exhausted attempts for inspection.

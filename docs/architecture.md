@@ -140,6 +140,8 @@ Successful mechanical validation records the attempt ID, implementation root, HE
 
 There are no legacy Octopus action or phase aliases in the public contract.
 
+Revalidation clears the earlier council verdict. Each council invocation searches only its own new output directory, so an empty or failed invocation cannot consume artifacts from a previous review.
+
 ## Process supervision
 
 The packaged supervisor:

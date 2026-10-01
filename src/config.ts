@@ -23,7 +23,6 @@ export interface DevelopmentCycleConfig {
     autoMergeSuccessful: boolean;
     baseBranch: string;
   };
-  retentionDays: number;
   notifications: {
     enabled: boolean;
     channel: string;
@@ -123,7 +122,6 @@ export function loadDevelopmentCycleConfig(env: NodeJS.ProcessEnv = process.env)
       autoMergeSuccessful: boolean(env, "DEVELOPMENT_CYCLE_REPOSITORY_DELIVERY_AUTO_MERGE_SUCCESSFUL", true),
       baseBranch: text(env, "DEVELOPMENT_CYCLE_REPOSITORY_DELIVERY_BASE_BRANCH", "main"),
     },
-    retentionDays: positiveInteger(env, "DEVELOPMENT_CYCLE_RETENTION_DAYS", 30),
     notifications: {
       enabled: boolean(env, "DEVELOPMENT_CYCLE_NOTIFICATIONS_ENABLED", false),
       channel: text(env, "DEVELOPMENT_CYCLE_NOTIFICATION_CHANNEL"),

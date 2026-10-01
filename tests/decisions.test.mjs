@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { parseFinalDecision } from "../dist/decisions.js";
+import { parseFinalDecision } from "../dist/core/decisions.js";
 
 test("accepts the three contractual decisions", () => {
   assert.deepEqual(parseFinalDecision("go\nAll checks passed."), { ok: true, decision: "go" });

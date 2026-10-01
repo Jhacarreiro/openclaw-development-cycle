@@ -11,7 +11,7 @@ test("blocked mechanical validation can be rerun or finalized as partial", () =>
     assert.equal(checkActionTransition("run_final_validation", phase).ok, true);
   }
 });
-import { checkActionTransition } from "../dist/state-machine.js";
+import { checkActionTransition } from "../dist/core/state-machine.js";
 
 test("status and reconcile are always allowed", () => {
   assert.equal(checkActionTransition("status", "implementation_launched").ok, true);

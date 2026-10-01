@@ -27,6 +27,7 @@ The format is based on Keep a Changelog and the project follows Semantic Version
 - The unused OpenClaw CLI binary configuration option and its obsolete test assertions.
 - The unused retention-days configuration option, which had no runtime consumer or retention implementation.
 - An unused filesystem helper import.
+- Root `dist/decisions.js` and `dist/state-machine.js` re-export shims; import from `dist/core/` instead.
 
 ### Changed
 

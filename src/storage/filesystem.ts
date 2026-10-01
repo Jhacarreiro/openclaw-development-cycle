@@ -1,11 +1,11 @@
-import { appendFile, mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, open, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { lstatSync, realpathSync } from "node:fs";
 import { dirname, join, relative, sep } from "node:path";
 import { idPathCandidates, projectPathCandidates } from "../core/ids.js";
 
 // mkdir-based lock: atomic on POSIX. An owner token (pid:nonce) is written
 // into the lock dir so release/write can refuse to touch a replacement lock.
-// Stale takeover requires both age > timeout and a dead owner pid; a live
+// Stale takeover requires age beyond the stale grace and a dead owner pid; a live
 // holder is never evicted just because it paused past the timeout.
 function isProcessAlive(pid: number): boolean {
   if (!Number.isInteger(pid) || pid <= 0) return false;
@@ -28,6 +28,7 @@ export async function acquireLock(lockDir: string, timeoutMs = 5000, renameLock 
   const acquireDir = `${lockDir}.acquire-${ownerId.replace(/[^a-zA-Z0-9_.-]/g, "-")}`;
   const acquireOwnerPath = join(acquireDir, "owner");
   const deadline = Date.now() + timeoutMs;
+  const staleAfterMs = Math.min(timeoutMs, 5000);
   for (;;) {
     try {
       await mkdir(acquireDir);
@@ -44,8 +45,8 @@ export async function acquireLock(lockDir: string, timeoutMs = 5000, renameLock 
       const ownerStat = ownerMatch ? await stat(ownerPath).catch(() => null) : null;
       const lockStat = await stat(lockDir).catch(() => null);
       const ownerPid = ownerMatch ? Number.parseInt(ownerMatch[1] ?? "", 10) : Number.NaN;
-      const ownerlessStale = !ownerMatch && lockStat && Date.now() - lockStat.mtimeMs > timeoutMs;
-      const ownedStale = ownerMatch && ownerStat && Date.now() - ownerStat.mtimeMs > timeoutMs && !isProcessAlive(ownerPid);
+      const ownerlessStale = !ownerMatch && lockStat && Date.now() - lockStat.mtimeMs > staleAfterMs;
+      const ownedStale = ownerMatch && ownerStat && Date.now() - ownerStat.mtimeMs > staleAfterMs && !isProcessAlive(ownerPid);
 
       if (ownerlessStale || ownedStale) {
         const recoveryDir = join(lockDir, ".recovery");
@@ -79,7 +80,7 @@ export async function acquireLock(lockDir: string, timeoutMs = 5000, renameLock 
             const stillPid = stillMatch ? Number.parseInt(stillMatch[1] ?? "", 10) : Number.NaN;
             const currentLockStat = await stat(lockDir).catch(() => null);
             const sameLockInstance = Boolean(lockStat && currentLockStat && lockStat.dev === currentLockStat.dev && lockStat.ino === currentLockStat.ino);
-            const stillOwnerlessStale = !stillMatch && sameLockInstance && Boolean(lockStat && Date.now() - lockStat.mtimeMs > timeoutMs);
+            const stillOwnerlessStale = !stillMatch && sameLockInstance && Boolean(lockStat && Date.now() - lockStat.mtimeMs > staleAfterMs);
             const stillOwnedStale = still === observed && stillMatch && sameLockInstance && !isProcessAlive(stillPid);
             if (stillOwnerlessStale || stillOwnedStale) {
               await renameLock(lockDir, trash);
@@ -111,10 +112,16 @@ export async function acquireLock(lockDir: string, timeoutMs = 5000, renameLock 
     releasePromise = (async () => {
       if (!(await isHeld())) return;
       const trash = `${lockDir}.release-${ownerId.replace(/[^a-zA-Z0-9_.-]/g, "-")}`;
-      try {
-        await renameLock(lockDir, trash);
-      } catch {
-        return;
+      const releaseDeadline = Date.now() + 5000;
+      for (;;) {
+        if (!(await isHeld())) return;
+        try {
+          await renameLock(lockDir, trash);
+          break;
+        } catch (error: any) {
+          if (!["EPERM", "EACCES", "EBUSY"].includes(String(error?.code)) || Date.now() >= releaseDeadline) throw error;
+          await new Promise(resolve => setTimeout(resolve, 25));
+        }
       }
       await rm(trash, { recursive: true, force: true }).catch(() => undefined);
     })();
@@ -189,15 +196,12 @@ export function createFilesystemStore(stateRoot: string, now: () => Date = () =>
 
   const loadJson = async <T extends object = Record<string, unknown>>(path: string): Promise<T> => {
     try {
-      return JSON.parse(await readFile(path, "utf8")) as T;
+      const value: unknown = JSON.parse(await readFile(path, "utf8"));
+      if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("state_object_required");
+      return value as T;
     } catch (err: any) {
-      // ENOENT = first run (expected). Anything else (syntax error,
-      // partial write survivor, disk corruption) -> log so corrupt state
-      // cannot silently reset merges or bypass dedup.
-      if (err && err.code !== "ENOENT") {
-        console.error(`[filesystemStore] unreadable state file; using empty object: ${path}:`, err?.message || err);
-      }
-      return {} as T;
+      if (err?.code === "ENOENT") return {} as T;
+      throw new Error(`state_unreadable: ${path}`, { cause: err });
     }
   };
 
@@ -205,8 +209,23 @@ export function createFilesystemStore(stateRoot: string, now: () => Date = () =>
     await mkdir(dirname(path), { recursive: true });
     const temporaryPath = `${path}.tmp-${process.pid}-${Math.random().toString(16).slice(2)}`;
     try {
-      await writeFile(temporaryPath, `${JSON.stringify(data, null, 2)}\n`);
-      await rename(temporaryPath, path);
+      const handle = await open(temporaryPath, "wx", 0o600);
+      try {
+        await handle.writeFile(`${JSON.stringify(data, null, 2)}\n`);
+        await handle.sync();
+      } finally { await handle.close(); }
+      const renameDeadline = Date.now() + 5000;
+      for (;;) {
+        try { await rename(temporaryPath, path); break; }
+        catch (error: any) {
+          if (process.platform !== "win32" || !["EPERM", "EACCES", "EBUSY"].includes(String(error?.code)) || Date.now() >= renameDeadline) throw error;
+          await new Promise(resolve => setTimeout(resolve, 25));
+        }
+      }
+      if (process.platform !== "win32") {
+        const parent = await open(dirname(path), "r");
+        try { await parent.sync(); } finally { await parent.close(); }
+      }
     } catch (error) {
       await rm(temporaryPath, { force: true }).catch(() => undefined);
       throw error;
@@ -223,13 +242,14 @@ export function createFilesystemStore(stateRoot: string, now: () => Date = () =>
     // otherwise interleave load->merge->save and drop each other's
     // updates (last-writer-wins).
     const lockDir = join(dir, ".status.lock");
-    const lock = await acquireLock(lockDir);
+    const lock = await acquireLock(lockDir, 30000);
     try {
       const current = await loadJson<Record<string, unknown>>(path);
       const next = { ...current, ...patch, updatedAt: now().toISOString() } as T & { updatedAt: string };
       if (!(await lock.isHeld())) {
         throw new Error(`lost status lock ${lockDir} before write`);
       }
+      if (Object.keys(current).length > 0) await saveJson(join(dir, "status.previous.json"), current);
       await saveJson(path, next);
       return next;
     } finally {

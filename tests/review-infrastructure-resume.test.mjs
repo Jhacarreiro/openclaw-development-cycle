@@ -134,6 +134,28 @@ test("review infrastructure failure preserves and resumes the exact Octopus outp
   assert.match(resumed.status.nextAction, /run_final_validation/);
   await assert.rejects(access(deliveryMarker));
 
+  const bypass = detailsOf(await tool.execute("bypass", { action: "request_final_validation", ...params }, undefined, undefined));
+  assert.equal(bypass.ok, false);
+  assert.equal(bypass.error, "mechanical_validation_required");
+  const validation = detailsOf(await tool.execute("mechanical", { action: "run_final_validation", ...params, autoRunCouncilReview: false }, undefined, undefined));
+  assert.equal(validation.ok, true, JSON.stringify(validation));
+  assert.equal(validation.status.validationEvidence.attemptId, attemptId);
+  const requestedFinal = detailsOf(await tool.execute("request-final", { action: "request_final_validation", ...params }, undefined, undefined));
+  assert.equal(requestedFinal.ok, true, JSON.stringify(requestedFinal));
+  await writeFile(join(outputPath, "delivery.txt"), "changed after tests\n");
+  const stale = detailsOf(await tool.execute("stale", { action: "record_final_validation", ...params, validationText: "go" }, undefined, undefined));
+  assert.equal(stale.ok, false);
+  assert.equal(stale.error, "validation_evidence_stale");
+  const rerun = detailsOf(await tool.execute("mechanical-rerun", { action: "run_final_validation", ...params, autoRunCouncilReview: false }, undefined, undefined));
+  assert.equal(rerun.ok, true, JSON.stringify(rerun));
+  await tool.execute("request-final-again", { action: "request_final_validation", ...params }, undefined, undefined);
+  const accepted = detailsOf(await tool.execute("accept", { action: "record_final_validation", ...params, validationText: "go" }, undefined, undefined));
+  assert.equal(accepted.ok, true, JSON.stringify(accepted));
+  await writeFile(join(outputPath, "delivery.txt"), "changed before publication\n");
+  const publishStale = detailsOf(await tool.execute("publish-stale", { action: "finalize_delivery", ...params }, undefined, undefined));
+  assert.equal(publishStale.ok, false);
+  assert.equal(publishStale.delivery.error, "validation_evidence_stale");
+
   // A second run proves fail-closed behavior when "No changes" coexists with
   // a real provider/auth blocker. It must not become resume-eligible.
   const blockedRunId = `${runId}-auth-blocked`;

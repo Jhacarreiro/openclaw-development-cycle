@@ -42,6 +42,7 @@ Experimental. The state machine, storage, adapters, shell quoting, and process-s
 - Node.js 22.22.3+ on the 22.x line or 24.15.0+ on the 24.x line (the CI-tested versions supported by the pinned OpenClaw dependency)
 - Python 3
 - `jq`
+- GNU coreutils `timeout` for validation, council and delivery command process groups
 - OpenClaw `2026.5.17` or newer
 - an executable implementation adapter
 
@@ -204,9 +205,9 @@ Lifecycle notification dedupe is persisted per run in `telegram_update_state.jso
 
 Notification delivery uses `OPENCLAW_GATEWAY_TOKEN` for bearer authentication when set. The Gateway URL is selected from `DEVELOPMENT_CYCLE_GATEWAY_URL`, then `OPENCLAW_GATEWAY_URL`, then `http://127.0.0.1:18789`. See [Configuration](docs/configuration.md#openclaw-notifications) for notification settings.
 
-Gateway message delivery is deferred until the current `development_cycle` tool execution has returned. Notifications are queued in-process while one or more Development Cycle actions are active, then drained when the active-action count reaches zero. This prevents reentrant `/tools/invoke` calls from deadlocking or timing out the action that generated the notification. Phase delivery results are appended asynchronously to `telegram_update_events.jsonl`.
+Gateway message delivery is deferred until the current `development_cycle` tool execution has returned. Notifications are saved under `<state-root>/notification-outbox/` before they are queued, then drained when the active-action count reaches zero. Pending jobs are recovered when the plugin starts and checked every 30 seconds. Failed delivery retries up to five times with backoff; exhausted jobs remain on disk for inspection. Delivery is at least once: a crash after the Gateway sends a message but before acknowledgement is saved can cause a duplicate. Phase delivery results are appended asynchronously to `telegram_update_events.jsonl`.
 
-Implementation runners also perform one best-effort `reconcile` callback through the local Gateway after exit. This lets the control plane observe terminal runner state without polling. For one narrowly classified Octopus planner-reconsideration contract failure, `reconcile` may automatically relaunch the same approved plan exactly once, but only when the attempt worktree is pristine, its HEAD still matches the source checkout, and there is no pending human intervention. Unknown failures, dirty/committed worktrees, interventions, or a second occurrence fail closed and require normal operator handling. Recovery events are appended to `automatic_recovery_events.jsonl`.
+The supervisor performs one best-effort `reconcile` callback through the configured Gateway after runner exit and process-group cleanup. This lets the control plane observe terminal runner state without polling. For one narrowly classified Octopus planner-reconsideration contract failure, `reconcile` may automatically relaunch the same approved plan exactly once, but only when the attempt worktree is pristine, its HEAD still matches the source checkout, and there is no pending human intervention. Unknown failures, dirty/committed worktrees, interventions, or a second occurrence fail closed and require normal operator handling. Recovery events are appended to `automatic_recovery_events.jsonl`.
 
 ## Safety model
 

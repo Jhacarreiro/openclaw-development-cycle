@@ -6,21 +6,25 @@ import { constants as fsConstants, existsSync } from "node:fs";
 import { join, relative, resolve, sep, basename, dirname } from "node:path";
 import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
+import { fileURLToPath } from "node:url";
 import { setTimeout as sleep } from "node:timers/promises";
 import { randomUUID } from "node:crypto";
 import { ACTIONS, checkActionTransition } from "./core/state-machine.js";
 import { parseFinalDecision } from "./core/decisions.js";
+import { defaultValidationConfig, mergeValidationConfig, parseGitPorcelain, validationRuleMatches } from "./core/validation-config.js";
 import { cleanId, idPathCandidates, newRunId as createRunId, projectPathCandidates } from "./core/ids.js";
 import { pathWithin as nfcPathWithin, containedRelativePath } from "./core/paths.js";
 import { nextStallQuietAccounting } from "./core/stall-accounting.js";
-import { councilNeedsCorrectionsText, resolveAutoCouncilCorrectionsMax } from "./core/council-policy.js";
+import { parseCouncilDecision, resolveAutoCouncilCorrectionsMax } from "./core/council-policy.js";
 import { inferDeliveryClassification } from "./core/delivery-classification.js";
 import { findProviderProcessesOutsideObservedTree } from "./core/process-observation.js";
 import { transientRuntimeObservationRecoveryPatch } from "./core/runtime-failure.js";
 import { phaseNotificationForTransition } from "./core/phase-notifications.js";
-import { buildGatewayMessageInvokePayload } from "./core/message-notifications.js";
 import { classifyAutomaticImplementationRecovery } from "./core/automatic-recovery.js";
-import { createDeferredDeliveryQueue } from "./core/deferred-delivery.js";
+import { createNotificationService } from "./runtime/notifications.js";
+import { readTextTail } from "./storage/text.js";
+import { captureCheckoutIdentity, validationEvidenceMatches } from "./runtime/validation-evidence.js";
+import { execSupervisedCommand, readProcessIdentity, sameProcess, stopVerifiedProcessGroup } from "./runtime/processes.js";
 import { loadDevelopmentCycleConfig } from "./config.js";
 import { acquireLock, createFilesystemStore } from "./storage/filesystem.js";
 import { buildImplementationLaunchSpec, jsonShellQuote, renderShellCommand, renderShellEnvironment, shellQuote } from "./adapters/implementation.js";
@@ -156,6 +160,7 @@ async function ensureRunnerSupervisor() {
 const cycleDir = filesystemStore.runDir;
 const loadJson = filesystemStore.loadJson;
 const saveJson = filesystemStore.saveJson;
+const cycleMessageDeliveryQueue = createNotificationService(filesystemStore, cycleRoot, developmentCycleConfig.notifications);
 async function cycleStatus(dir: string, patch: any) {
   const previous = await filesystemStore.loadJson<any>(join(dir, "status.json"));
   const next = await filesystemStore.updateStatus(dir, patch);
@@ -168,22 +173,10 @@ async function cycleStatus(dir: string, patch: any) {
   const state = await filesystemStore.loadJson<any>(statePath);
   if (state?.lastSignature === signature) return next;
 
-  const deliveryCallback = async (delivery: any) => {
-    await filesystemStore.appendJsonl(eventsPath, {
-      eventType: "development_cycle.telegram_delivery",
-      createdAt: new Date().toISOString(),
-      project: next?.project || previous?.project || "",
-      runId: next?.runId || previous?.runId || "",
-      phase: notice.phase,
-      title: notice.title,
-      notification: delivery,
-      signature,
-    });
-  };
-  const result = await sendCycleMessage({ __notificationResultCallback: deliveryCallback }, notice.title, notice.text).catch((error: any) => ({
-    ok: false,
-    error: String(error?.message || error),
-  }));
+  const result = await sendCycleMessage({ __notificationAudit: { eventsPath, event: {
+    eventType: "development_cycle.telegram_delivery", project: next?.project || previous?.project || "",
+    runId: next?.runId || previous?.runId || "", phase: notice.phase, title: notice.title, signature,
+  } } }, notice.title, notice.text).catch((error: any) => ({ ok: false, error: String(error?.message || error) }));
   const event = {
     eventType: "development_cycle.telegram_update",
     createdAt: new Date().toISOString(),
@@ -354,6 +347,7 @@ async function createImplementationRunnerSession(dir: string, params: any) {
 
   const environment = renderShellEnvironment({ ...launchSpec.env, HOME: runtimeHome });
   const commandLine = renderShellCommand(launchSpec);
+  const boundedLogPath = resolve(dirname(fileURLToPath(import.meta.url)), "..", "bin", "bounded-log.py");
   const runnerScript = `#!/bin/sh
 set -u
 ${environment}
@@ -393,16 +387,6 @@ finalize() {
     rm -f "$status_tmp"
   fi
   cleanup_process_group
-  if [ -n "\${OPENCLAW_GATEWAY_TOKEN:-}" ]; then
-    (
-      sleep 1
-      reconcile_body=$(jq -nc --arg tool development_cycle --arg action reconcile --arg project ${jsonShellQuote(request.project)} --arg runId ${jsonShellQuote(request.runId)} '{tool:$tool,action:$action,args:{project:$project,runId:$runId}}')
-      curl -sS --connect-timeout 2 --max-time 20 http://127.0.0.1:18789/tools/invoke \
-        -H "Authorization: Bearer $OPENCLAW_GATEWAY_TOKEN" \
-        -H "Content-Type: application/json" \
-        -d "$reconcile_body" >/dev/null 2>&1 || true
-    ) >/dev/null 2>&1 &
-  fi
 }
 trap finalize EXIT
 trap 'exit 143' TERM
@@ -416,7 +400,7 @@ if [ "$actual_project_root_identity" != ${shellQuote(projectRootIdentity)} ]; th
   printf '%s\n' "projectRoot identity changed before execution" >&2
   exit 72
 fi
-${commandLine} > ${shellQuote(stdoutPath)} 2> ${shellQuote(stderrPath)}
+python3 ${shellQuote(boundedLogPath)} --stdout ${shellQuote(stdoutPath)} --stderr ${shellQuote(stderrPath)} -- /bin/sh -c ${shellQuote(commandLine)}
 `;
   await writeFile(runnerPath, runnerScript, { mode: 0o755 } as any);
 
@@ -474,7 +458,7 @@ ${commandLine} > ${shellQuote(stdoutPath)} 2> ${shellQuote(stderrPath)}
     supervisor = await ensureRunnerSupervisor();
     const launched = await execFileAsync("python3", [runnerSupervisorPath, "--socket", runnerSupervisorSocket, "launch", runnerPath, sessionDir], {
       cwd: sessionDir,
-      env: { ...process.env, HOME: runtimeHome },
+      env: { ...process.env, HOME: runtimeHome, DEVELOPMENT_CYCLE_RECONCILE_PROJECT: request.project, DEVELOPMENT_CYCLE_RECONCILE_RUN_ID: request.runId },
       timeout: 5000,
       maxBuffer: 64 * 1024,
     });
@@ -488,6 +472,7 @@ ${commandLine} > ${shellQuote(stdoutPath)} 2> ${shellQuote(stderrPath)}
       status: "running",
       launchState: "running",
       runnerPid,
+      runnerIdentity: await readProcessIdentity(runnerPid),
       processGroupId: Number(launchInfo?.pgid || runnerPid),
       runnerSupervisorPid: Number(launchInfo?.supervisorPid || supervisor?.pid || 0) || null,
       runnerSupervisorSocket,
@@ -1381,6 +1366,8 @@ async function resumeReviewInfrastructureFinalization(dir: string, status: any) 
     reviewInfrastructureRecoveredAt: recoveredAt,
     reviewInfrastructureRecovery: recoveryPath,
     resumedFromPhase: "review_infrastructure_failed",
+    requiredMechanicalValidation: true,
+    validationEvidence: null,
     nextAction: "Run run_final_validation against the preserved Octopus output before final review or repository delivery.",
   });
   return { ok: true, phase: next.phase, recoveryPath, outputHandoff, status: next };
@@ -1399,6 +1386,19 @@ function repositoryFindings(status: any, max = 12) {
   return out;
 }
 
+async function requiredValidationError(status: any): Promise<string | null> {
+  if (!status?.requiredMechanicalValidation && !status?.validationEvidence) return null;
+  if (status?.externalValidationDecision !== "go" || !status?.validationEvidence) return "mechanical_validation_required";
+  const pinned = await pinTrustedProjectRoot(effectiveImplementationRoot(status));
+  if (!pinned) return "validation_checkout_untrusted";
+  try {
+    const identity = await captureCheckoutIdentity(pinned.procPath);
+    const attemptId = String(status?.correctionsAttemptId || status?.implementationAttemptId || "");
+    return validationEvidenceMatches(status.validationEvidence, attemptId, pinned.realPath, identity) ? null : "validation_evidence_stale";
+  } catch { return "validation_identity_unreadable"; }
+  finally { await pinned.handle.close(); }
+}
+
 async function runRepositoryDeliveryAdapter(dir: string, status: any, params: any) {
   const project = cleanId(params.project || status?.project || "default");
   const runId = cleanId(params.runId || status?.runId || "run");
@@ -1406,23 +1406,33 @@ async function runRepositoryDeliveryAdapter(dir: string, status: any, params: an
   const projectRoot = missingRequiredOutput ? "" : effectiveImplementationRoot(status, params);
   const sourceProjectRoot = String(params.projectRoot || status?.projectRoot || "");
   const sourcePhase = String(status?.phase || "");
+  const requestPath = join(dir, "repository_delivery_request.json");
+  const previousRequest = await loadJson(requestPath);
+  const operation = params.repositoryDeliveryOperation || "publish";
+  const classificationPhase = sourcePhase === "repository_delivery_failed" || sourcePhase === "delivery_published"
+    ? String(status?.repositoryDeliverySourcePhase || previousRequest.acceptedSourcePhase || previousRequest.sourcePhase || "") : sourcePhase;
   const classification = missingRequiredOutput
     ? "invalid"
-    : inferDeliveryClassification(sourcePhase, params.deliveryClassification || status?.repositoryDelivery?.classification);
-  const requestPath = join(dir, "repository_delivery_request.json");
+    : operation === "status" ? String(status?.repositoryDelivery?.classification || "invalid")
+    : inferDeliveryClassification(classificationPhase, params.deliveryClassification || status?.repositoryDelivery?.classification);
+  if (classification === "success" && operation !== "status") {
+    const validationError = await requiredValidationError(status);
+    if (validationError) return { ok: false, classification, error: validationError };
+  }
   const resultPath = join(dir, "repository_delivery.json");
   const request = {
     schemaVersion: 1,
-    operation: params.repositoryDeliveryOperation || "publish",
+    operation,
     project,
     runId,
     projectRoot,
     sourceProjectRoot,
     outputPath: status?.outputPath || null,
     sourcePhase,
+    acceptedSourcePhase: classificationPhase,
     classification,
     baseBranch: String(params.repositoryBaseBranch || repositoryDeliveryConfig.baseBranch || "main"),
-    autoMerge: classification === "success" && repositoryDeliveryConfig.autoMergeSuccessful,
+    autoMerge: operation !== "status" && classification === "success" && repositoryDeliveryConfig.autoMergeSuccessful,
     findings: repositoryFindings(status),
     existingDelivery: status?.repositoryDelivery || null,
     createdAt: new Date().toISOString(),
@@ -1450,7 +1460,7 @@ async function runRepositoryDeliveryAdapter(dir: string, status: any, params: an
   if (!repositoryDeliveryConfig.command) return { ok: false, classification, error: "repository_delivery_command_missing", requestPath, resultPath };
   let execResult: any;
   try {
-    execResult = await execFileAsync(repositoryDeliveryConfig.command, [...repositoryDeliveryConfig.args, requestPath], {
+    execResult = await execSupervisedCommand(repositoryDeliveryConfig.command, [...repositoryDeliveryConfig.args, requestPath], {
       cwd: projectRoot,
       timeout: Number(params.repositoryDeliveryTimeoutMs || 120000),
       maxBuffer: 2 * 1024 * 1024,
@@ -1482,6 +1492,9 @@ async function runRepositoryDeliveryAdapter(dir: string, status: any, params: an
 }
 
 async function finalizeRepositoryDeliveryState(dir: string, status: any, params: any) {
+  if (["final_validated", "council_validated"].includes(String(status?.phase || ""))) {
+    await cycleStatus(dir, { repositoryDeliverySourcePhase: status.phase });
+  }
   const delivery = await runRepositoryDeliveryAdapter(dir, status, params);
   if (delivery.localOnly) {
     const phase = delivery.classification === "success" ? "closed_success" : "closed_partial";
@@ -1750,7 +1763,10 @@ async function refreshLaunchedImplementationStatus(dir: string, status: any) {
   const runnerPid = Number(session.runnerPid || session.pid || 0);
   if (exitCode === null && String(session.status || '').toLowerCase() === 'running' && runnerPid > 0) {
     let runnerAlive = true;
-    try { process.kill(runnerPid, 0); } catch { runnerAlive = false; }
+    try {
+      const identity = await readProcessIdentity(runnerPid);
+      runnerAlive = session.runnerIdentity ? sameProcess(session.runnerIdentity, identity) : Boolean(identity);
+    } catch { runnerAlive = false; }
     const heartbeatPath = String(session.heartbeatPath || '');
     const heartbeatStat = heartbeatPath ? await stat(heartbeatPath).catch(() => null) : null;
     const heartbeatAgeMs = heartbeatStat ? Date.now() - heartbeatStat.mtimeMs : null;
@@ -1931,9 +1947,7 @@ async function fileInfo(path: string) {
 }
 
 async function textTail(path: string, max = 40000) {
-  const text = await readTextIfExists(path);
-  if (!text) return "";
-  return text.length <= max ? text : text.slice(text.length - max);
+  return readTextTail(path, max);
 }
 
 function runtimeTimelineFromText(label: string, text: string) {
@@ -2079,38 +2093,6 @@ async function writeFinalValidationPack(dir: string, project: string, runId: str
   return { deliverySummary, artifactManifest, observerSessions, testEvidence, riskChecklist };
 }
 
-function defaultValidationConfig() {
-  return {
-    commands: "auto" as any,
-    commandTimeoutMs: 120000,
-    preserveDiff: true,
-    strictDirty: false,
-    allowedDirty: [] as string[],
-    ignoredDirty: [".claude-implementation/", "node_modules/", "dist/", "build/", "coverage/"] as string[],
-    forbiddenPaths: [".env", ".env.local", "config.json.test-backup"] as string[],
-    protectedDirty: [".env", ".env.local"] as string[],
-    portsMustBeFree: [] as number[],
-    requiredOpenApiPaths: [] as string[],
-    stall: { enabled: true, autoStop: true, quietSeconds: 900 },
-  };
-}
-
-function mergeValidationConfig(base: any, extra: any) {
-  if (!extra || typeof extra !== "object") return base;
-  return {
-    ...base,
-    ...extra,
-    commands: Array.isArray(extra.commands) || extra.commands === "auto" ? extra.commands : base.commands,
-    allowedDirty: Array.isArray(extra.allowedDirty) ? extra.allowedDirty : base.allowedDirty,
-    ignoredDirty: Array.isArray(extra.ignoredDirty) ? extra.ignoredDirty : base.ignoredDirty,
-    forbiddenPaths: Array.isArray(extra.forbiddenPaths) ? extra.forbiddenPaths : base.forbiddenPaths,
-    protectedDirty: Array.isArray(extra.protectedDirty) ? extra.protectedDirty : base.protectedDirty,
-    portsMustBeFree: Array.isArray(extra.portsMustBeFree) ? extra.portsMustBeFree : base.portsMustBeFree,
-    requiredOpenApiPaths: Array.isArray(extra.requiredOpenApiPaths) ? extra.requiredOpenApiPaths : base.requiredOpenApiPaths,
-    stall: { ...(base.stall || {}), ...(extra.stall || {}) },
-  };
-}
-
 async function loadProjectValidationConfig(project: string, status: any, params: any = {}, borrowedProjectRoot: any = null) {
   const lexicalProjectWikiPath = resolveTrustedProjectWikiPath(params.project || status?.project || project, params.projectWikiPath, status?.projectWikiPath);
   const pinnedProjectWiki = await pinContainedWikiDir(project, lexicalProjectWikiPath);
@@ -2144,8 +2126,8 @@ async function loadProjectValidationConfig(project: string, status: any, params:
     try {
       config = mergeValidationConfig(config, JSON.parse(loaded.text));
       path = loaded.path;
-    } catch {
-      return { config, path, projectWikiPath, rejectedValidationConfigPath: requested, error: "validation_config_invalid_json" };
+    } catch (error: any) {
+      return { config, path, projectWikiPath, rejectedValidationConfigPath: requested, error: error?.message === "validation_config_invalid_shape" ? error.message : "validation_config_invalid_json" };
     }
     return { config, path, projectWikiPath };
   }
@@ -2157,7 +2139,11 @@ async function loadProjectValidationConfig(project: string, status: any, params:
       try {
         config = mergeValidationConfig(config, JSON.parse(loaded.text));
         path = loaded.path;
-      } catch {}
+      } catch (error: any) {
+        return { config, path, projectWikiPath, rejectedValidationConfigPath: defaultCandidate, error: error?.message === "validation_config_invalid_shape" ? error.message : "validation_config_invalid_json" };
+      }
+    } else if (await lstat(defaultCandidate).catch(() => null)) {
+      return { config, path, projectWikiPath, rejectedValidationConfigPath: defaultCandidate, error: loaded.error };
     }
   }
   return { config, path, projectWikiPath };
@@ -2167,35 +2153,14 @@ async function loadProjectValidationConfig(project: string, status: any, params:
   }
 }
 
-function validationRuleMatches(path: string, rules: any[]) {
-  const p = String(path || "").replace(/^\.\//, "");
-  for (const raw of rules || []) {
-    const rule = String(raw || "").replace(/^\.\//, "");
-    if (!rule) continue;
-    if (rule.endsWith("/")) { if (p === rule.slice(0, -1) || p.startsWith(rule)) return true; }
-    else if (p === rule) return true;
-  }
-  return false;
-}
-
-function parseGitPorcelain(text: string) {
-  return String(text || "").split(/\r?\n/).map((line) => {
-    if (!line.trim()) return null;
-    const status = line.slice(0, 2);
-    let path = line.slice(3).trim();
-    if (path.includes(" -> ")) path = path.split(" -> ").pop() || path;
-    return { status, path };
-  }).filter(Boolean) as any[];
-}
-
 async function execValidationCommand(command: string, cwd: string, timeoutMs: number) {
   const startedAt = new Date().toISOString();
   const started = Date.now();
   try {
-    const res = await execFileAsync("sh", ["-lc", command], { cwd, timeout: timeoutMs, maxBuffer: 4 * 1024 * 1024 });
+    const res = await execSupervisedCommand("sh", ["-lc", command], { cwd, timeout: timeoutMs, maxBuffer: 4 * 1024 * 1024 });
     return { ok: true, command, exitCode: 0, startedAt, durationMs: Date.now() - started, stdout: res.stdout || "", stderr: res.stderr || "" };
   } catch (err: any) {
-    return { ok: false, command, exitCode: Number.isFinite(Number(err?.code)) ? Number(err.code) : null, signal: err?.signal || null, timedOut: /timed out|timeout/i.test(String(err?.message || "")) || err?.killed === true, startedAt, durationMs: Date.now() - started, stdout: err?.stdout || "", stderr: err?.stderr || "", error: String(err?.message || err) };
+    return { ok: false, command, exitCode: Number.isFinite(Number(err?.code)) ? Number(err.code) : null, signal: err?.signal || null, timedOut: [124, 137].includes(Number(err?.code)) || /timed out|timeout/i.test(String(err?.message || "")) || err?.killed === true, startedAt, durationMs: Date.now() - started, stdout: err?.stdout || "", stderr: err?.stderr || "", error: String(err?.message || err) };
   }
 }
 
@@ -2251,7 +2216,8 @@ async function requiredOpenApiPathCheck(projectRoot: string, paths: any[]) {
 
 async function dirtyWorktreeCheck(projectRoot: string, config: any) {
   const failures: any[] = [];
-  const res = await execValidationCommand("git status --porcelain", projectRoot, 30000);
+  const res = await execValidationCommand("git status --porcelain -z", projectRoot, 30000);
+  if (!res.ok) return { entries: [], ignored: [], considered: [], unexpected: [], failures: [{ check: "dirtyWorktree", severity: "stop", reason: res.error }] };
   const entries = parseGitPorcelain(res.stdout || "");
   const ignored = entries.filter((e) => validationRuleMatches(e.path, config.ignoredDirty || []));
   const considered = entries.filter((e) => !validationRuleMatches(e.path, config.ignoredDirty || []));
@@ -2297,6 +2263,7 @@ async function runExternalFinalValidation(dir: string, status: any, params: any 
   const resultPath = join(dir, "validation_result.json");
   const summaryPath = join(dir, "validation_summary.md");
   const failures: any[] = [];
+  if (loaded.error) failures.push({ check: "validationConfig", severity: "stop", reason: loaded.error });
   const commandResults: any[] = [];
   let preservedDiff: any = null;
 
@@ -2309,9 +2276,9 @@ async function runExternalFinalValidation(dir: string, status: any, params: any 
     const delayMs = Number(process.env.DEVELOPMENT_CYCLE_TEST_VALIDATION_ROOT_DELAY_MS || 0);
     if (Number.isFinite(delayMs) && delayMs > 0) await sleep(delayMs);
   }
-  if (rootStat?.isDirectory() && config.preserveDiff !== false) preservedDiff = await preserveValidationDiff(dir, validationRoot, `validation-${reason}`);
+  if (rootStat?.isDirectory() && !loaded.error && config.preserveDiff !== false) preservedDiff = await preserveValidationDiff(dir, validationRoot, `validation-${reason}`);
 
-  if (rootStat?.isDirectory()) {
+  if (rootStat?.isDirectory() && !loaded.error) {
     const validationCommands = await inferValidationCommands(validationRoot, config);
     config.resolvedCommands = validationCommands;
     for (const command of validationCommands) {
@@ -2326,17 +2293,30 @@ async function runExternalFinalValidation(dir: string, status: any, params: any 
     failures.push(...await requiredOpenApiPathCheck(validationRoot, config.requiredOpenApiPaths || []));
   }
 
+  let validationEvidence: any = null;
+  if (failures.length === 0) {
+    try {
+      validationEvidence = {
+        attemptId: String(status?.correctionsAttemptId || status?.implementationAttemptId || ""),
+        implementationRoot,
+        generatedAt: new Date().toISOString(),
+        identity: await captureCheckoutIdentity(validationRoot),
+      };
+    } catch (error: any) {
+      failures.push({ check: "validationIdentity", severity: "stop", reason: String(error?.message || error) });
+    }
+  }
   const stop = failures.some((f) => f.severity === "stop");
   const ok = failures.length === 0;
   const decision = ok ? "go" : stop ? "stop" : "revise";
-  const result = { ok, decision, reason, project, runId, generatedAt: new Date().toISOString(), projectRoot, outputPath: status?.outputPath || null, implementationRoot, validationConfigPath: loaded.path, rejectedValidationConfigPath: loaded.rejectedValidationConfigPath || null, error: loaded.error || null, config, preservedDiff, commandResults, failures };
+  const result = { ok, decision, reason, project, runId, generatedAt: new Date().toISOString(), projectRoot, outputPath: status?.outputPath || null, implementationRoot, validationEvidence, validationConfigPath: loaded.path, rejectedValidationConfigPath: loaded.rejectedValidationConfigPath || null, error: loaded.error || null, config, preservedDiff, commandResults, failures };
   await saveJson(resultPath, result);
   await writeFile(stdoutPath, commandResults.map((r) => `# ${r.command}\n\n${r.stdout || ""}`).join("\n\n---\n\n"));
   await writeFile(stderrPath, commandResults.map((r) => `# ${r.command}\n\n${r.stderr || r.error || ""}`).join("\n\n---\n\n"));
   await writeFile(summaryPath, `# Mechanical final validation\n\nProject: ${project}\nRun: ${runId}\nReason: ${reason}\nDecision: ${decision}\nOK: ${ok}\nGenerated: ${result.generatedAt}\nConfig: ${loaded.path}\nRejected config: ${loaded.rejectedValidationConfigPath || "none"}${loaded.error ? `\nConfig error: ${loaded.error}` : ""}\n\n## Commands\n\n${commandResults.map((r) => `- ${r.ok ? "PASS" : "FAIL"}: ${r.command}${r.timedOut ? " (timed out)" : ""}`).join("\n") || "none"}\n\n## Failures\n\n${failures.length ? failures.map((f) => `- [${f.severity || "revise"}] ${f.check}: ${f.reason || f.path || f.command}`).join("\n") : "none"}\n\n## Preserved diff\n\n${preservedDiff ? `- worktree: ${preservedDiff.worktreePatch} (${preservedDiff.worktreeBytes} bytes)\n- index: ${preservedDiff.indexPatch} (${preservedDiff.indexBytes} bytes)` : "not preserved"}\n`);
   const phase = ok ? "external_validation_passed" : decision === "stop" ? "external_validation_stopped" : "external_validation_needs_revision";
   const nextAction = ok ? "Mechanical validation passed; human/AI final review may record go or close when appropriate." : decision === "stop" ? "Stop and report the validation blocker to the operator." : "Send delta-only corrections to Implementation or apply a minimal manual fix, then rerun run_final_validation.";
-  const next = await cycleStatus(dir, { phase, owner: "main", ok, externalValidationDecision: decision, externalValidation: resultPath, validationSummary: summaryPath, validationStdout: stdoutPath, validationStderr: stderrPath, validationConfigPath: loaded.path, rejectedValidationConfigPath: loaded.rejectedValidationConfigPath || null, validationConfigError: loaded.error || null, nextAction });
+  const next = await cycleStatus(dir, { phase, owner: "main", ok, validationEvidence, externalValidationDecision: decision, externalValidation: resultPath, validationSummary: summaryPath, validationStdout: stdoutPath, validationStderr: stderrPath, validationConfigPath: loaded.path, rejectedValidationConfigPath: loaded.rejectedValidationConfigPath || null, validationConfigError: loaded.error || null, nextAction });
   return { ok, decision, project, runId, dir, phase: next.phase, validationResult: resultPath, validationSummary: summaryPath, validationStdout: stdoutPath, validationStderr: stderrPath, failures, commandResults: commandResults.map((r) => ({ command: r.command, ok: r.ok, exitCode: r.exitCode, timedOut: r.timedOut || false, durationMs: r.durationMs })), preservedDiff, rejectedValidationConfigPath: loaded.rejectedValidationConfigPath || null, validationConfigError: loaded.error || null, status: next };
   } finally {
     await pinnedImplementationRoot?.handle.close().catch(() => null);
@@ -2475,7 +2455,7 @@ async function runCouncilCodeReview(dir: string, status: any, params: any = {}) 
   const startedAt = new Date().toISOString();
   let execResult: any;
   try {
-    execResult = await execFileAsync(scriptPath, args, { cwd: projectRoot, env: { ...process.env, OCTOPUS_PROJECT_DIR: projectRoot, OCTOPUS_COUNCIL_AUTO_PROVIDERS: councilProviders, OCTOPUS_CODEX_MODEL: councilCodexModel }, timeout: Number(params.councilTimeoutMs || 900000), maxBuffer: 8 * 1024 * 1024 });
+    execResult = await execSupervisedCommand(scriptPath, args, { cwd: projectRoot, env: { ...process.env, OCTOPUS_PROJECT_DIR: projectRoot, OCTOPUS_COUNCIL_AUTO_PROVIDERS: councilProviders, OCTOPUS_CODEX_MODEL: councilCodexModel }, timeout: Number(params.councilTimeoutMs || 900000), maxBuffer: 8 * 1024 * 1024 });
   } catch (err: any) {
     execResult = { failed: true, code: err?.code ?? null, signal: err?.signal ?? null, stdout: err?.stdout || "", stderr: err?.stderr || "", error: String(err?.message || err) };
   }
@@ -2487,11 +2467,16 @@ async function runCouncilCodeReview(dir: string, status: any, params: any = {}) 
   const councilDir = summaryPath ? summaryPath.replace(/\/summary\.json$/, "") : outputRoot;
   const synthesisPath = summaryPath ? join(councilDir, "synthesis.md") : "";
   const synthesis = synthesisPath ? await readTextIfExists(synthesisPath) : "";
-  const needsCorrections = councilNeedsCorrectionsText(synthesis || JSON.stringify(summary || {}));
+  const councilDecision = parseCouncilDecision(synthesis, summary?.decision || summary?.verdict);
+  const needsCorrections = councilDecision === "revise" || councilDecision === "stop";
   const findings = extractCouncilFindings(synthesis || JSON.stringify(summary || {}));
-  const ok = Boolean(summaryPath && summary?.status === "completed" && !execResult.failed);
-  const next = await cycleStatus(dir, { phase: ok ? (needsCorrections ? "council_review_needs_corrections" : "council_validated") : "council_review_failed", owner: "main", ok: ok && !needsCorrections, councilReviewStartedAt: startedAt, councilReviewCompletedAt: new Date().toISOString(), councilReviewSummary: summaryPath, councilReviewSynthesis: synthesisPath, councilReviewStdout: stdoutPath, councilReviewStderr: stderrPath, councilReviewInput: input.taskPath, councilReviewNeedsCorrections: needsCorrections, councilReviewFindings: findings, nextAction: needsCorrections ? "Auto-launch Implementation corrections from council feedback." : "Council review passed; write/read one-pager and close or deploy." });
-  return { ok, project, runId, summaryPath, synthesisPath, stdoutPath, stderrPath, inputPath: input.taskPath, needsCorrections, findings, synthesis: excerpt(synthesis, 12000), status: next, execFailed: Boolean(execResult.failed) };
+  const ok = Boolean(summaryPath && summary?.status === "completed" && !execResult.failed && councilDecision !== "unknown");
+  const nextAction = !ok ? "Resolve the failed or inconclusive council review before acceptance."
+    : councilDecision === "stop" ? "Council rejected delivery; inspect findings before requesting corrections."
+    : needsCorrections ? "Launch Implementation corrections from council feedback."
+    : "Council review passed; write/read one-pager and close or deploy.";
+  const next = await cycleStatus(dir, { phase: ok ? (needsCorrections ? "council_review_needs_corrections" : "council_validated") : "council_review_failed", owner: "main", ok: ok && !needsCorrections, councilDecision, councilReviewStartedAt: startedAt, councilReviewCompletedAt: new Date().toISOString(), councilReviewSummary: summaryPath, councilReviewSynthesis: synthesisPath, councilReviewStdout: stdoutPath, councilReviewStderr: stderrPath, councilReviewInput: input.taskPath, councilReviewNeedsCorrections: needsCorrections, councilReviewFindings: findings, nextAction });
+  return { ok, decision: councilDecision, project, runId, summaryPath, synthesisPath, stdoutPath, stderrPath, inputPath: input.taskPath, needsCorrections, findings, synthesis: excerpt(synthesis, 12000), status: next, execFailed: Boolean(execResult.failed) };
 }
 
 async function writeCouncilOnePager(dir: string, status: any, council: any, params: any = {}) {
@@ -2504,7 +2489,9 @@ async function writeCouncilOnePager(dir: string, status: any, council: any, para
   const synthesis = council?.synthesis || (status?.councilReviewSynthesis ? await readTextIfExists(String(status.councilReviewSynthesis)) : "");
   const findings = council?.findings || status?.councilReviewFindings || extractCouncilFindings(synthesis);
   const decision = council?.needsCorrections ? "Corrections required before ship" : council?.ok ? "Council validated" : "Council review failed or inconclusive";
-  const nextSteps = council?.needsCorrections ? "Implementation corrections were/will be launched automatically from the council feedback. Re-run mechanical validation and council review after corrections." : "Ready for human deploy/commit decision after checking the worktree and excluding local runtime artifacts.";
+  const nextSteps = !council?.ok || council?.decision === "stop" ? "Inspect the failed or rejected review before any acceptance or retry."
+    : council?.needsCorrections ? "Run corrections from council feedback, then repeat mechanical validation and council review."
+    : "Ready for human deploy/commit decision after checking the worktree and excluding local runtime artifacts.";
   const content = `# ${project} — code review one-pager\n\nRun: ${runId}\nGenerated: ${new Date().toISOString()}\nDecision: **${decision}**\n\n## What the work was\n\nImplement the approved development-cycle plan for ${project}. The council reviewed the resulting code diff, not the planning document.\n\n## What changed\n\n\`\`\`text\n${excerpt(gitStat, 3000)}\n\`\`\`\n\nChanged files:\n\n\`\`\`text\n${excerpt(gitNames, 2000)}\n\`\`\`\n\n## Mechanical validation\n\n${excerpt(validation, 2500)}\n\n## Council verdict\n\n${excerpt(synthesis, 4500)}\n\n## Key findings\n\n${findings.length ? findings.map((f: string) => `- ${f}`).join("\n") : "- No key findings extracted."}\n\n## Next steps\n\n${nextSteps}\n\n## Artifacts\n\n- Council summary: ${council?.summaryPath || status?.councilReviewSummary || "not available"}\n- Council synthesis: ${council?.synthesisPath || status?.councilReviewSynthesis || "not available"}\n- Mechanical validation: ${status?.externalValidation || "not available"}\n- Run directory: ${dir}\n`;
   const projectWikiPath = await resolveContainedWikiDir(project, String(params.projectWikiPath || status?.projectWikiPath || ""));
   if (!projectWikiPath) {
@@ -2537,129 +2524,8 @@ async function writeCouncilOnePager(dir: string, status: any, council: any, para
   return { path: out, content, status: next };
 }
 
-async function deliverCycleMessageNow(params: any, title: string, text: string) {
-  const enabled = params.notify === undefined
-    ? developmentCycleConfig.notifications.enabled
-    : Boolean(params.notify);
-  if (!enabled) return { ok: true, skipped: true, reason: "notifications_disabled" };
-
-  const channel = String(params.notificationChannel || developmentCycleConfig.notifications.channel || "").trim();
-  const target = String(params.notificationTarget || developmentCycleConfig.notifications.target || "").trim();
-  const account = String(params.notificationAccount || developmentCycleConfig.notifications.account || "").trim();
-  const deliveryJson = String(params.notificationDeliveryJson || developmentCycleConfig.notifications.deliveryJson || "").trim();
-  if (!channel || !target) {
-    return { ok: true, skipped: true, reason: "notification_destination_missing", channel, target };
-  }
-
-  const gatewayUrl = String(
-    params.notificationGatewayUrl
-      || process.env.DEVELOPMENT_CYCLE_GATEWAY_URL
-      || process.env.OPENCLAW_GATEWAY_URL
-      || "http://127.0.0.1:18789",
-  ).trim().replace(/\/$/, "");
-  const gatewayToken = String(params.notificationGatewayToken || process.env.OPENCLAW_GATEWAY_TOKEN || "").trim();
-  const payload = buildGatewayMessageInvokePayload({
-    channel,
-    target,
-    message: `${title}\n\n${excerpt(text, 2500)}`,
-    account: account || undefined,
-    deliveryJson: deliveryJson || undefined,
-    dryRun: params.notificationDryRun === true,
-  });
-
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 15000);
-  try {
-    const headers: Record<string, string> = { "Content-Type": "application/json" };
-    if (gatewayToken) headers.Authorization = `Bearer ${gatewayToken}`;
-    const response = await fetch(`${gatewayUrl}/tools/invoke`, {
-      method: "POST",
-      headers,
-      body: JSON.stringify(payload),
-      signal: controller.signal,
-    });
-    const raw = await response.text();
-    let parsed: any = null;
-    try { parsed = raw ? JSON.parse(raw) : null; } catch { /* keep raw for diagnostics */ }
-    if (!response.ok) {
-      return {
-        ok: false,
-        channel,
-        target,
-        account: account || null,
-        error: `gateway_message_http_${response.status}`,
-        response: excerpt(raw, 2000),
-      };
-    }
-    const toolResult = parsed?.result;
-    if (toolResult && toolResult.ok === false) {
-      return {
-        ok: false,
-        channel,
-        target,
-        account: account || null,
-        error: String(toolResult.error || "gateway_message_tool_failed"),
-        response: parsed,
-      };
-    }
-    return { ok: true, channel, target, account: account || null, response: parsed ?? excerpt(raw, 2000) };
-  } catch (err: any) {
-    return { ok: false, channel, target, account: account || null, error: String(err?.message || err) };
-  } finally {
-    clearTimeout(timeout);
-  }
-}
-
-
-
-type DeferredCycleMessage = {
-  params: any;
-  title: string;
-  text: string;
-};
-
-const cycleMessageDeliveryQueue = createDeferredDeliveryQueue<DeferredCycleMessage, any>(
-  async (job) => await deliverCycleMessageNow(job.params, job.title, job.text),
-);
-
 async function sendCycleMessage(params: any, title: string, text: string) {
-  const enabled = params.notify === undefined
-    ? developmentCycleConfig.notifications.enabled
-    : Boolean(params.notify);
-  if (!enabled) return { ok: true, skipped: true, reason: "notifications_disabled" };
-
-  const channel = String(params.notificationChannel || developmentCycleConfig.notifications.channel || "").trim();
-  const target = String(params.notificationTarget || developmentCycleConfig.notifications.target || "").trim();
-  if (!channel || !target) {
-    return { ok: true, skipped: true, reason: "notification_destination_missing", channel, target };
-  }
-
-  // Validate structured delivery JSON before acknowledging the queued notification.
-  buildGatewayMessageInvokePayload({
-    channel,
-    target,
-    message: `${title}\n\n${excerpt(text, 2500)}`,
-    account: String(params.notificationAccount || developmentCycleConfig.notifications.account || "").trim() || undefined,
-    deliveryJson: String(params.notificationDeliveryJson || developmentCycleConfig.notifications.deliveryJson || "").trim() || undefined,
-    dryRun: params.notificationDryRun === true,
-  });
-
-  const onResult = typeof params.__notificationResultCallback === "function"
-    ? params.__notificationResultCallback
-    : undefined;
-  const queuedAt = new Date().toISOString();
-  const queued = cycleMessageDeliveryQueue.enqueue({
-    payload: { params: { ...params, __notificationResultCallback: undefined }, title, text },
-    onResult,
-  });
-  return {
-    ok: true,
-    queued: true,
-    queuedAt,
-    channel,
-    target,
-    pending: queued.pending,
-  };
+  return cycleMessageDeliveryQueue.send(params, title, text);
 }
 
 async function clearActiveImplementationAttempt(dir: string) {
@@ -2673,6 +2539,10 @@ async function clearActiveImplementationAttempt(dir: string) {
     implementationStderr: null,
     observerObservationId: null,
     implementationLaunch: null,
+    requiredMechanicalValidation: false,
+    validationEvidence: null,
+    externalValidationDecision: null,
+    repositoryDeliverySourcePhase: null,
     implementationAttemptResetAt: new Date().toISOString(),
   });
 }
@@ -2743,13 +2613,14 @@ async function maybeRunCouncilEndgate(dir: string, status: any, params: any = {}
   if (status?.councilReviewSummary) return null;
   const council = await runCouncilCodeReview(dir, status, params);
   const onePager = await writeCouncilOnePager(dir, council.status || status, council, params);
-  const title = `${cleanId(params.project || status?.project || "project")} council review: ${council.needsCorrections ? "corrections needed" : "validated"}`;
-  const text = `One-pager: ${onePager.path}\nCouncil summary: ${council.summaryPath || "not available"}\nDecision: ${council.needsCorrections ? "corrections needed; launching automatically" : "validated"}\nFindings:\n${(council.findings || []).slice(0, 6).map((f: string) => `- ${f}`).join("\n") || "- none extracted"}`;
+  const verdict = !council.ok ? "failed or inconclusive" : council.decision === "stop" ? "rejected" : council.needsCorrections ? "corrections needed" : "validated";
+  const title = `${cleanId(params.project || status?.project || "project")} council review: ${verdict}`;
+  const text = `One-pager: ${onePager.path}\nCouncil summary: ${council.summaryPath || "not available"}\nDecision: ${verdict}\nFindings:\n${(council.findings || []).slice(0, 6).map((f: string) => `- ${f}`).join("\n") || "- none extracted"}`;
   const notice = await sendCycleNotice(params, String(params.runId || status?.runId || "run"), title, text).catch((e: any) => ({ ok: false, error: String(e?.message || e) }));
   const notification = await sendCycleMessage(params, title, text);
   let corrections: any = null;
   let effectiveStatus = onePager.status || council.status || status;
-  if (council.needsCorrections && params.autoCouncilCorrections !== false) {
+  if (council.ok && council.decision === "revise" && params.autoCouncilCorrections !== false) {
     corrections = await launchCouncilCorrections(dir, effectiveStatus, council, params);
     effectiveStatus = corrections.status || effectiveStatus;
   }
@@ -2791,11 +2662,14 @@ async function stopDirectImplementationRunnerSession(statusPath: string, reason:
   if (!processGroupId && !runnerPid) return { ok: false, skipped: true, reason: "runner_pid_missing", statusPath, session };
 
   const signals: any[] = [];
-  if (processGroupId) signals.push(signalPid(-processGroupId, "SIGTERM"));
-  if (runnerPid && runnerPid !== processGroupId) signals.push(signalPid(runnerPid, "SIGTERM"));
-  await sleep(5000);
-  if (processGroupId) signals.push(signalPid(-processGroupId, "SIGKILL"));
-  if (runnerPid && runnerPid !== processGroupId) signals.push(signalPid(runnerPid, "SIGKILL"));
+  if (["completed", "failed", "stopped"].includes(String(session.status)) && session.launchState === "exited") return { ok: true, skipped: true, reason: "runner_already_exited", statusPath };
+  const verified = await stopVerifiedProcessGroup(session.runnerIdentity, readProcessIdentity, (target, signal) => {
+    const result = signalPid(target, signal);
+    signals.push(result);
+    if (!result.ok && result.error !== "ESRCH") throw new Error(result.error);
+    return true;
+  });
+  if (!verified.ok) return { ...verified, statusPath };
 
   const stoppedAt = new Date().toISOString();
   if (session.exitCodePath) await writeFile(String(session.exitCodePath), "143\n").catch(() => null);
@@ -2824,6 +2698,7 @@ async function stopLaunchedImplementation(dir: string, status: any, reason: stri
   if (!targets.length) return { ok: false, stopped: [], reason: "no_direct_implementation_status_paths" };
   const stopped = [];
   for (const target of targets) stopped.push(await stopDirectImplementationRunnerSession(target, reason));
+  if (stopped.some((result) => !result.ok)) return { ok: false, stopped, status };
   const stoppedAt = new Date().toISOString();
   const observerFinalization = await finalizeObserverSessions(dir, status, "stopped");
   const next = await cycleStatus(dir, {
@@ -3308,6 +3183,8 @@ Create or validate the implementation plan only. Do not implement. The plan must
   }
 
   if (action === "request_final_validation") {
+    const validationError = await requiredValidationError(status);
+    if (validationError) return { ok: false, error: validationError, project, runId, dir };
     const validationPack = await writeFinalValidationPack(dir, project, runId, status);
     const names = ["implementation_plan.md", "delivery_summary.md", "test_evidence.md", "risk_checklist.md", "observer_sessions.json", "artifact_manifest.json", "implementation_delivery_error.txt"];
     const parts: string[] = [];
@@ -3350,6 +3227,10 @@ Create or validate the implementation plan only. Do not implement. The plan must
     if (!String(validationText).trim()) return { ok: false, error: "validationText_or_validationPath_required", project, runId, dir };
     const parsedDecision = parseFinalDecision(validationText);
     if (!parsedDecision.ok) return { ok: false, project, runId, dir, ...parsedDecision };
+    if (parsedDecision.decision === "go") {
+      const validationError = await requiredValidationError(status);
+      if (validationError) return { ok: false, error: validationError, project, runId, dir };
+    }
     const file = join(dir, "final_validation_response.md");
     await writeFile(file, String(validationText));
     const phase = parsedDecision.decision === "go" ? "final_validated" : parsedDecision.decision === "stop" ? "stopped" : "final_revised";
@@ -3499,6 +3380,9 @@ export default defineToolPlugin({
         cycleMessageDeliveryQueue.beginExecution();
         try {
           return await projectCycle(params);
+        } catch (error: any) {
+          if (String(error?.message || "").startsWith("state_unreadable:")) return { ok: false, error: "state_unreadable", detail: error.message, nextAction: "Preserve the damaged state and inspect status.previous.json before explicitly restoring it." };
+          throw error;
         } finally {
           cycleMessageDeliveryQueue.endExecution();
         }

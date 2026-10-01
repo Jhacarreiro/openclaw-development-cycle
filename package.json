@@ -17,6 +17,7 @@
     "examples",
     "schemas",
     "runner-supervisor.py",
+    "scripts/github-delivery-runner.mjs",
     "openclaw.plugin.json",
     "README.md",
     "LICENSE",

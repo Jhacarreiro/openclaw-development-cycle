@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import test from "node:test";
+import { writeCanonicalRoutingConfig } from "./helpers/octopus-routing.mjs";
 
 const execFileAsync = promisify(execFile);
 function detailsOf(result) { return result?.details ?? result; }
@@ -35,6 +36,7 @@ async function setup(t, label) {
   const root = join(tmpdir(), `development-cycle-octopus-failure-${label}-${process.pid}-${Date.now()}`);
   t.after(() => rm(root, { recursive: true, force: true }));
   const home = join(root, "home");
+  writeCanonicalRoutingConfig(home);
   const checkout = join(root, "checkout");
   const project = `octopus-failure-${label}`;
   const runId = `run-octopus-failure-${label}`;

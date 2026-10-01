@@ -1,7 +1,7 @@
 import { appendFile, mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { lstatSync, realpathSync } from "node:fs";
 import { dirname, join, relative, sep } from "node:path";
-import { cleanId, idPathCandidates, projectPathCandidates } from "../core/ids.js";
+import { idPathCandidates, projectPathCandidates } from "../core/ids.js";
 
 // mkdir-based lock: atomic on POSIX. An owner token (pid:nonce) is written
 // into the lock dir so release/write can refuse to touch a replacement lock.

@@ -6,6 +6,17 @@ The format is based on Keep a Changelog and the project follows Semantic Version
 
 ## [Unreleased]
 
+### Fixed
+
+- Octopus launch tests now use a shared review-routing fixture instead of depending on the machine's home directory.
+- Notification documentation and tool parameter descriptions now describe Gateway message delivery and its connection settings.
+- README status, Node.js requirements, and basic usage formatting now match the current package and pinned OpenClaw dependency.
+
+### Removed
+
+- The unused OpenClaw CLI binary configuration option and its obsolete test assertions.
+- An unused filesystem helper import.
+
 ### Changed
 
 - Octopus Codex seats now reuse the existing OpenClaw OAuth profile through an owned ephemeral `codex app-server` bridge that reads the auth-profile store directly instead of requiring a second persistent Codex CLI login.

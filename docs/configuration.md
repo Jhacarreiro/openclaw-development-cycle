@@ -1,6 +1,6 @@
 # Configuration
 
-Configuration is read from environment variables when the plugin loads. Empty values are treated as unset.
+Configuration is read from environment variables when the plugin loads, except for the Gateway connection settings noted below, which are read when notifications are delivered. Empty values are treated as unset.
 
 ## Core paths
 
@@ -10,7 +10,6 @@ Configuration is read from environment variables when the plugin loads. Empty va
 | `DEVELOPMENT_CYCLE_PROJECT_DOCS_ROOT` | `<state-root>/projects` | Per-project documentation root. |
 | `DEVELOPMENT_CYCLE_PROJECT_DOCS_GIT_ROOT` | empty | Optional Git checkout containing project documentation. Enables scoped plan commits. |
 | `DEVELOPMENT_CYCLE_RETENTION_DAYS` | `30` | Retention policy value. |
-| `DEVELOPMENT_CYCLE_OPENCLAW_BIN` | `openclaw` | OpenClaw CLI used for events and messages. |
 
 `projectRoot` is always the source checkout. `projectWikiPath` is the tool parameter for the project documentation directory; it must not be used as the source checkout.
 
@@ -86,15 +85,25 @@ export DEVELOPMENT_CYCLE_REPOSITORY_DELIVERY_BASE_BRANCH=main
 
 ## OpenClaw notifications
 
-Notifications are disabled unless explicitly enabled. Both a channel and target are required.
+Notifications are disabled unless explicitly enabled. Both a channel and target are required. Delivery invokes the `message` tool with action `send` through the running OpenClaw Gateway's `/tools/invoke` endpoint.
 
 | Variable | Default | Description |
 | --- | --- | --- |
 | `DEVELOPMENT_CYCLE_NOTIFICATIONS_ENABLED` | `false` | Enable lifecycle messages. |
-| `DEVELOPMENT_CYCLE_NOTIFICATION_CHANNEL` | empty | Any channel supported by `openclaw message send`. |
+| `DEVELOPMENT_CYCLE_NOTIFICATION_CHANNEL` | empty | Channel configured in the Gateway and supported by its `message` tool. |
 | `DEVELOPMENT_CYCLE_NOTIFICATION_TARGET` | empty | Channel-specific destination. |
 | `DEVELOPMENT_CYCLE_NOTIFICATION_ACCOUNT` | empty | Optional OpenClaw channel account id. |
-| `DEVELOPMENT_CYCLE_NOTIFICATION_DELIVERY_JSON` | empty | Optional JSON passed to `openclaw message send --delivery`. |
+| `DEVELOPMENT_CYCLE_NOTIFICATION_DELIVERY_JSON` | empty | Optional JSON parsed into the message tool's structured `delivery` argument. Invalid JSON is rejected before queueing. |
+
+Gateway connection settings are read when each queued notification is delivered:
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `DEVELOPMENT_CYCLE_GATEWAY_URL` | `OPENCLAW_GATEWAY_URL` or `http://127.0.0.1:18789` | Base URL of the Gateway used for notifications. Takes precedence over `OPENCLAW_GATEWAY_URL`. |
+| `OPENCLAW_GATEWAY_URL` | `http://127.0.0.1:18789` | Fallback Gateway base URL when `DEVELOPMENT_CYCLE_GATEWAY_URL` is unset. |
+| `OPENCLAW_GATEWAY_TOKEN` | empty | Bearer token sent to the Gateway when set. Must match the Gateway's authentication configuration. |
+
+Messages are queued while Development Cycle actions are active and drained after the active-action count reaches zero. Gateway delivery failures are recorded without failing the lifecycle action; phase notification results are appended to `telegram_update_events.jsonl`.
 
 Per-call values take precedence:
 

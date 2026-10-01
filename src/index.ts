@@ -3482,7 +3482,7 @@ export default defineToolPlugin({
         notificationChannel: Type.Optional(Type.String({ description: "OpenClaw channel name, for example slack, telegram, whatsapp, signal, discord or matrix." })),
         notificationTarget: Type.Optional(Type.String({ description: "Channel-specific recipient or destination." })),
         notificationAccount: Type.Optional(Type.String({ description: "Optional OpenClaw channel account id." })),
-        notificationDeliveryJson: Type.Optional(Type.String({ description: "Optional JSON string passed to openclaw message send --delivery." })),
+        notificationDeliveryJson: Type.Optional(Type.String({ description: "Optional JSON string parsed into the Gateway message tool's delivery argument." })),
         notificationDryRun: Type.Optional(Type.Boolean()),
         notifyExternalGate: Type.Optional(Type.Boolean()),
         notifyMain: Type.Optional(Type.Boolean()),

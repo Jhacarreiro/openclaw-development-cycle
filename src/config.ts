@@ -31,7 +31,6 @@ export interface DevelopmentCycleConfig {
     account: string;
     deliveryJson: string;
   };
-  openclawBin: string;
   externalGate: {
     secretPath: string;
     url: string;
@@ -132,7 +131,6 @@ export function loadDevelopmentCycleConfig(env: NodeJS.ProcessEnv = process.env)
       account: text(env, "DEVELOPMENT_CYCLE_NOTIFICATION_ACCOUNT"),
       deliveryJson: text(env, "DEVELOPMENT_CYCLE_NOTIFICATION_DELIVERY_JSON"),
     },
-    openclawBin: text(env, "DEVELOPMENT_CYCLE_OPENCLAW_BIN", "openclaw"),
     externalGate: {
       secretPath: text(env, "DEVELOPMENT_CYCLE_EXTERNAL_GATE_SECRET_PATH"),
       url: text(env, "DEVELOPMENT_CYCLE_EXTERNAL_GATE_URL").replace(/\/$/, ""),

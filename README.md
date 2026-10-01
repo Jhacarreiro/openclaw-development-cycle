@@ -138,12 +138,14 @@ stop
 | `status` | Read persisted state without mutation. |
 | `reconcile` | Refresh runtime state and apply enabled follow-up behavior. |
 | `stop_implementation` | Stop the supervised process group. |
+| `answer_intervention` | Answer a pending implementation intervention and relaunch the same approved plan with the response. |
 | `resume_finalization` | Revalidate a preserved Octopus output after a narrowly classified review-infrastructure-only failure; never relaunches implementation. |
 | `record_delivery` | Record externally supplied delivery evidence. |
 | `run_final_validation` | Run configured validation commands. |
 | `request_final_validation` | Build the final validation pack. |
 | `record_final_validation` | Record `go`, `revise`, or `stop`. |
 | `start_corrections` | Optional/manual targeted correction pass for legacy or explicitly supervised correction workflows. A final `revise` no longer launches corrections automatically. |
+| `finalize_delivery` | Classify a terminal outcome as `success`, `partial` or `invalid`; publish success/partial work through the repository delivery adapter, or close locally when delivery is disabled. |
 | `close` | Close a validated or stopped cycle. |
 
 Invalid phase transitions are rejected by the state machine.

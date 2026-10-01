@@ -19,7 +19,7 @@ export async function readProcessIdentity(pid: number): Promise<ProcessIdentity 
 export function sameProcess(left: ProcessIdentity | null | undefined, right: ProcessIdentity | null | undefined): boolean {
   return Boolean(left && right && left.pid === right.pid && left.pgid === right.pgid && left.startTime === right.startTime && left.bootId === right.bootId);
 }
-export async function stopVerifiedProcessGroup(expected: ProcessIdentity | null | undefined, readIdentity = readProcessIdentity, signal = process.kill.bind(process), graceMs = 5000) {
+export async function stopVerifiedProcessGroup(expected: ProcessIdentity | null | undefined, readIdentity = readProcessIdentity, signal: (pid: number, signal: NodeJS.Signals) => boolean = process.kill.bind(process), graceMs = 5000) {
   if (!expected) return { ok: false, reason: "runner_identity_missing" };
   const current = await readIdentity(expected.pid);
   if (!current) return { ok: true, skipped: true, reason: "runner_already_exited" };

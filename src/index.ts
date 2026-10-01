@@ -1,5 +1,4 @@
-// @ts-nocheck
-import { Type } from "typebox";
+import { Type, type Static } from "typebox";
 import { defineToolPlugin } from "openclaw/plugin-sdk/tool-plugin";
 import { lstat, mkdir, open, readFile, readdir, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
 import { constants as fsConstants, existsSync } from "node:fs";
@@ -11,7 +10,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { randomUUID } from "node:crypto";
 import { ACTIONS, checkActionTransition } from "./core/state-machine.js";
 import { parseFinalDecision } from "./core/decisions.js";
-import { defaultValidationConfig, mergeValidationConfig, parseGitPorcelain, validationRuleMatches } from "./core/validation-config.js";
+import { defaultValidationConfig, mergeValidationConfig, parseGitPorcelain, validationRuleMatches, type ValidationConfig } from "./core/validation-config.js";
 import { cleanId, idPathCandidates, newRunId as createRunId, projectPathCandidates } from "./core/ids.js";
 import { pathWithin as nfcPathWithin, containedRelativePath } from "./core/paths.js";
 import { nextStallQuietAccounting } from "./core/stall-accounting.js";
@@ -34,10 +33,22 @@ const resolvedCycleDir = Symbol("developmentCycleResolvedCycleDir");
 const interventionResume = Symbol("developmentCycleInterventionResume");
 const lifecycleLockTimeoutMs = 30000;
 
+type CycleParameters = Partial<Static<typeof cycleParameters>> & {
+  [lifecycleLockHeld]?: boolean;
+  [resolvedCycleDir]?: string;
+  [interventionResume]?: { id: string; response: string; responsePath: string; answeredAt: string; sourceAttemptId: string | null };
+  automaticRecovery?: boolean;
+};
+
+interface CycleResult {
+  ok: boolean;
+  [detail: string]: unknown;
+}
+
 const developmentCycleConfig = loadDevelopmentCycleConfig();
 const secretPath = developmentCycleConfig.externalGate.secretPath;
 const defaultUrl = developmentCycleConfig.externalGate.url;
-const lit = (...xs: string[]) => Type.Union(xs.map((x) => Type.Literal(x)));
+const lit = <const T extends string[]>(...xs: T) => Type.Enum<T>(xs);
 
 async function loadConfig() {
   const cfg: Record<string, string> = {};
@@ -50,16 +61,6 @@ async function loadConfig() {
     cfg[line.slice(0, idx)] = line.slice(idx + 1);
   }
   return { url: (cfg.EXTERNAL_GATE_URL || defaultUrl).replace(/\/$/, ""), token: cfg.EXTERNAL_GATE_TOKEN || "" };
-}
-
-function buildQuery(params: Record<string, any>) {
-  const qs = new URLSearchParams();
-  for (const [key, value] of Object.entries(params || {})) {
-    if (value === undefined || value === null || value === "") continue;
-    qs.set(key, String(value));
-  }
-  const s = qs.toString();
-  return s ? `?${s}` : "";
 }
 
 async function request(path: string, options: any = {}) {
@@ -112,7 +113,7 @@ const runnerSupervisorPath = developmentCycleConfig.runner.supervisorPath;
 const runnerSupervisorSocket = developmentCycleConfig.runner.supervisorSocket;
 const runnerHeartbeatIntervalSeconds = developmentCycleConfig.runner.heartbeatIntervalSeconds;
 const runnerDefaultTimeoutSeconds = developmentCycleConfig.runner.defaultTimeoutSeconds;
-const filesystemStore = createFilesystemStore(cycleRoot);
+const filesystemStore = createFilesystemStore(cycleRoot, undefined, developmentCycleConfig.eventLogs);
 
 async function ensureRunnerSupervisor() {
   const ping = async () => {
@@ -199,7 +200,7 @@ async function cycleStatus(dir: string, patch: any) {
 const appendJsonl = filesystemStore.appendJsonl;
 function newRunId(project: string) { return createRunId(project); }
 function dcShort(x: any, n = 1200) { const s = String(x || ""); return s.length <= n ? s : s.slice(0, n - 3) + "..."; }
-function dcAlerts(runtime: any) { return [...new Set((runtime?.richObservation?.alerts || []).map((a: any) => String(a?.code || "")).filter(Boolean))].sort(); }
+function dcAlerts(runtime: any): string[] { return [...new Set<string>((runtime?.richObservation?.alerts || []).map((a: any) => String(a?.code || "")).filter(Boolean))].sort(); }
 function dcLines(runtime: any) { return (runtime?.richObservation?.latestTimeline || []).map((x: any) => String(x?.line || "")).filter(Boolean).join("\n"); }
 function dcMatch(text: string, pairs: any[]) { for (const [name, re] of pairs) { const m = re.exec(text); if (m) return { name, pattern: String(re), match: dcShort(m[0], 220) }; } return null; }
 async function dcClassify(dir: string, status: any, runtime: any) {
@@ -652,27 +653,6 @@ async function updateImplementationObserverSession(dir: string, id: string, para
   });
 }
 
-function implementationNoDelivery(stdout: string, stderr: string) {
-  const text = `${stdout || ""}
-${stderr || ""}`;
-  const patterns = [
-    /Synthesis cannot proceed/i,
-    /no substantive inputs/i,
-    /Decomposition failed with all providers/i,
-    /FAILED \(exit code/i,
-    /failed to initialize rollout recorder/i,
-    /Permission denied/i,
-    /EACCES/i,
-    /LandlockRestrict/i,
-    /error running landlock/i,
-    /linux-sandbox/i,
-    /401 Unauthorized/i,
-    /exceeded retry limit/i,
-    /last status:\s*401/i,
-  ];
-  const matched = patterns.find((re) => re.test(text));
-  return matched ? matched.source : "";
-}
 function looksLikePlanRequest(text: string) {
   const t = String(text || "").toLowerCase();
   const markers = [
@@ -876,11 +856,11 @@ async function writePlanningPack(dir: string, params: any) {
 }
 
 /** Prefer caller-supplied wiki path only when it stays under projectsWikiRoot. */
-function resolveTrustedProjectWikiPath(project: string, ...candidates: Array<string | null | undefined>): string {
+function resolveTrustedProjectWikiPath(project: string, ...candidates: unknown[]): string {
   const wikiRootAbs = resolve(projectsWikiRoot);
   for (const c of candidates) {
-    if (!c) continue;
-    const abs = resolve(String(c));
+    if (typeof c !== "string" || !c) continue;
+    const abs = resolve(c);
     if (pathWithin(projectsWikiRoot, abs) && abs !== wikiRootAbs) return abs;
   }
   for (const id of idPathCandidates(project || "default")) {
@@ -905,17 +885,6 @@ function pathWithin(root: string, candidate: string) {
   // must not count as a project wiki destination.
   if (a === b || a.normalize("NFC") === b.normalize("NFC")) return false;
   return nfcPathWithin(a, b);
-}
-
-/** True if candidate resolves inside any allowed root (or equals a root). */
-function pathWithinAny(roots: Array<string | null | undefined>, candidate: string) {
-  const c = resolve(String(candidate || ""));
-  for (const root of roots) {
-    if (!root) continue;
-    const r = resolve(String(root));
-    if (c === r || pathWithin(r, c)) return true;
-  }
-  return false;
 }
 
 export function isExactBroadProjectRoot(value: string): boolean {
@@ -2012,7 +1981,7 @@ async function runtimeGitSnapshot(projectRoot: string) {
   };
 }
 
-async function runtimeArtifacts(dir: string, status: any, stdoutTail: string, stderrTail: string) {
+async function runtimeArtifacts(dir: string, status: any) {
   const paths = new Set<string>();
   for (const p of [status?.implementationStdout, status?.implementationStderr, status?.correctionsStdout, status?.correctionsStderr, status?.directImplementationStatus, status?.directCorrectionsStatus, status?.outputPath]) if (p) paths.add(String(p));
   const runFiles = (await readdir(dir).catch(() => [])).filter((x) => /status|implementation|artifact|evidence|summary|validation|observer|runtime|timeline|alerts/i.test(x)).map((x) => join(dir, x));
@@ -2052,7 +2021,7 @@ async function writeRichRuntimeObservation(dir: string, status: any, sessions: a
   const timeline = runtimeTimelineFromText("stdout", stdoutTail).concat(runtimeTimelineFromText("stderr", stderrTail)).slice(-300);
   const process = await runtimeProcessSnapshot(status, sessions);
   const git = await runtimeGitSnapshot(effectiveImplementationRoot(status));
-  const artifacts = await runtimeArtifacts(dir, status, stdoutTail, stderrTail);
+  const artifacts = await runtimeArtifacts(dir, status);
   const alerts = runtimeAlerts(status, process, git, timeline, artifacts);
   const observation = { generatedAt: new Date().toISOString(), phase: status?.phase || null, owner: status?.owner || null, nextAction: status?.nextAction || null, process, git, artifacts, timelineTail: timeline.slice(-80), alerts };
   const observationPath = join(dir, "runtime_observation.json");
@@ -2099,7 +2068,6 @@ async function loadProjectValidationConfig(project: string, status: any, params:
   const projectWikiPath = pinnedProjectWiki?.realPath || "";
   const ownsProjectRoot = !borrowedProjectRoot;
   const pinnedProjectRoot = borrowedProjectRoot || await pinTrustedProjectRoot(String(params.projectRoot || status?.projectRoot || ""));
-  const projectRoot = pinnedProjectRoot?.realPath || "";
   if (pinnedProjectRoot) {
     const readyFile = String(process.env.DEVELOPMENT_CYCLE_TEST_PINNED_PROJECT_ROOT_READ_READY_FILE || "").trim();
     if (readyFile) await writeFile(readyFile, "ready\n");
@@ -2256,7 +2224,7 @@ async function runExternalFinalValidation(dir: string, status: any, params: any 
   const loaded = pinnedSourceProjectRoot
     ? await loadProjectValidationConfig(project, status, { ...params, projectRoot: requestedSourceProjectRoot }, pinnedSourceProjectRoot)
     : { config: defaultValidationConfig(), path: "default", rejectedValidationConfigPath: null, error: "project_root_not_trusted_git_checkout" };
-  const config = loaded.config;
+  const config: ValidationConfig & { resolvedCommands?: string[] } = loaded.config;
   await mkdir(dir, { recursive: true });
   const stdoutPath = join(dir, "validation_stdout.log");
   const stderrPath = join(dir, "validation_stderr.log");
@@ -2780,14 +2748,14 @@ function liveRunPhase(phase: any): string {
   return LIVE_RUN_PHASES.includes(p) ? p : "";
 }
 
-async function projectCycle(params: any) {
+async function projectCycle(params: CycleParameters | null | undefined): Promise<CycleResult> {
   // Defense-in-depth: host SDKs validate arguments before execute, but direct
   // or future invocations with null/undefined must behave like {} (the plugin
   // already defaults every field at runtime), not throw an unhandled trace.
   params ??= {};
   const supported = [...ACTIONS];
   const action = params.action || "status";
-  if (!supported.includes(action)) return { ok: false, error: "unknown_action", action, supported };
+  if (!(supported as readonly string[]).includes(action)) return { ok: false, error: "unknown_action", action, supported };
 
   const rawProject = params.project || "default";
   let project = cleanId(rawProject);
@@ -2888,7 +2856,7 @@ async function projectCycle(params: any) {
 
   const transition = checkActionTransition(action, status?.phase);
   if (!transition.ok) {
-    return { ok: false, project, runId, dir, ...transition, nextAction: "Inspect status and invoke only the action allowed for the current phase." };
+    return { project, runId, dir, ...transition, nextAction: "Inspect status and invoke only the action allowed for the current phase." };
   }
 
   if (action === "resume_finalization") {
@@ -3226,7 +3194,7 @@ Create or validate the implementation plan only. Do not implement. The plan must
     }
     if (!String(validationText).trim()) return { ok: false, error: "validationText_or_validationPath_required", project, runId, dir };
     const parsedDecision = parseFinalDecision(validationText);
-    if (!parsedDecision.ok) return { ok: false, project, runId, dir, ...parsedDecision };
+    if (!parsedDecision.ok) return { project, runId, dir, ...parsedDecision };
     if (parsedDecision.decision === "go") {
       const validationError = await requiredValidationError(status);
       if (validationError) return { ok: false, error: validationError, project, runId, dir };
@@ -3306,9 +3274,68 @@ Create or validate the implementation plan only. Do not implement. The plan must
     const next = await cycleStatus(dir, { phase: "closed", owner: "main", nextAction: "none" });
     return { ok: true, project, runId, dir, phase: next.phase };
   }
+  return { ok: false, error: "action_not_implemented", action };
 }
 
 
+
+const cycleParameters = Type.Object({
+  action: lit(...ACTIONS),
+  project: Type.String(),
+  runId: Type.Optional(Type.String()),
+  projectRoot: Type.Optional(Type.String({ description: "Real code checkout directory for Implementation. Must exist; do not infer it from the project wiki id." })),
+  projectWikiPath: Type.Optional(Type.String({ description: "Project documentation folder. Defaults under DEVELOPMENT_CYCLE_PROJECT_DOCS_ROOT and is separate from the source checkout." })),
+  direction: Type.Optional(Type.String()),
+  objective: Type.Optional(Type.String()),
+  planText: Type.Optional(Type.String()),
+  planPath: Type.Optional(Type.String()),
+  feedbackText: Type.Optional(Type.String()),
+  feedbackPath: Type.Optional(Type.String()),
+  deliveryText: Type.Optional(Type.String()),
+  deliveryPath: Type.Optional(Type.String()),
+  validationText: Type.Optional(Type.String()),
+  validationPath: Type.Optional(Type.String()),
+  outputPath: Type.Optional(Type.String()),
+  implementationAdapter: Type.Optional(lit("command", "octopus")),
+  readScopeMode: Type.Optional(lit("strict", "contextual")),
+  implementationCommand: Type.Optional(Type.String()),
+  force: Type.Optional(Type.Boolean()),
+  timeoutSeconds: Type.Optional(Type.Number()),
+  timeout_ms: Type.Optional(Type.Number()),
+  stopReason: Type.Optional(Type.String()),
+  interventionId: Type.Optional(Type.String({ description: "Pending implementation intervention id, when answering a human gate." })),
+  interventionResponse: Type.Optional(Type.String({ description: "Human decision for a pending implementation intervention. answer_intervention resumes the same run automatically." })),
+  reason: Type.Optional(Type.String()),
+  validationConfigPath: Type.Optional(Type.String()),
+  autoStopStalled: Type.Optional(Type.Boolean()),
+  autoRunFinalValidation: Type.Optional(Type.Boolean()),
+  autoRunCouncilReview: Type.Optional(Type.Boolean()),
+  autoCouncilCorrections: Type.Optional(Type.Boolean()),
+  autoCouncilCorrectionsMax: Type.Optional(Type.Number()),
+  councilDepth: Type.Optional(Type.String()),
+  councilMembers: Type.Optional(Type.Number()),
+  councilMaxCost: Type.Optional(Type.String()),
+  councilAutoProviders: Type.Optional(Type.String()),
+  councilProviders: Type.Optional(Type.String()),
+  councilCodexModel: Type.Optional(Type.String()),
+  councilTimeoutMs: Type.Optional(Type.Number()),
+  notify: Type.Optional(Type.Boolean({ description: "Send a lifecycle notification through an OpenClaw-supported channel." })),
+  notificationChannel: Type.Optional(Type.String({ description: "OpenClaw channel name, for example slack, telegram, whatsapp, signal, discord or matrix." })),
+  notificationTarget: Type.Optional(Type.String({ description: "Channel-specific recipient or destination." })),
+  notificationAccount: Type.Optional(Type.String({ description: "Optional OpenClaw channel account id." })),
+  notificationDeliveryJson: Type.Optional(Type.String({ description: "Optional JSON string parsed into the Gateway message tool's delivery argument." })),
+  notificationDryRun: Type.Optional(Type.Boolean()),
+  notifyExternalGate: Type.Optional(Type.Boolean()),
+  notifyMain: Type.Optional(Type.Boolean()),
+  emitMainUpdates: Type.Optional(Type.Boolean()),
+  dryRunMainUpdate: Type.Optional(Type.Boolean()),
+  mainUpdateTimeoutMs: Type.Optional(Type.Number()),
+  mainUpdateExecTimeoutMs: Type.Optional(Type.Number()),
+  stallQuietSeconds: Type.Optional(Type.Number()),
+  deliveryClassification: Type.Optional(lit("success", "partial", "invalid")),
+  repositoryBaseBranch: Type.Optional(Type.String()),
+  repositoryDeliveryTimeoutMs: Type.Optional(Type.Number()),
+});
 
 export default defineToolPlugin({
   id: "development-cycle",
@@ -3319,63 +3346,7 @@ export default defineToolPlugin({
       name: "development_cycle",
       label: "Development Cycle",
       description: "Supervised development-cycle control plane. It records plans, launches a configured implementation adapter, persists evidence, coordinates validation and corrections, and closes the cycle. Project documentation and the source checkout are separate paths. Observers, channel notifications, and external gates are optional.",
-      parameters: Type.Object({
-        action: lit(...ACTIONS),
-        project: Type.String(),
-        runId: Type.Optional(Type.String()),
-        projectRoot: Type.Optional(Type.String({ description: "Real code checkout directory for Implementation. Must exist; do not infer it from the project wiki id." })),
-        projectWikiPath: Type.Optional(Type.String({ description: "Project documentation folder. Defaults under DEVELOPMENT_CYCLE_PROJECT_DOCS_ROOT and is separate from the source checkout." })),
-        direction: Type.Optional(Type.String()),
-        objective: Type.Optional(Type.String()),
-        planText: Type.Optional(Type.String()),
-        planPath: Type.Optional(Type.String()),
-        feedbackText: Type.Optional(Type.String()),
-        feedbackPath: Type.Optional(Type.String()),
-        deliveryText: Type.Optional(Type.String()),
-        deliveryPath: Type.Optional(Type.String()),
-        validationText: Type.Optional(Type.String()),
-        validationPath: Type.Optional(Type.String()),
-        outputPath: Type.Optional(Type.String()),
-        implementationAdapter: Type.Optional(lit("command", "octopus")),
-        readScopeMode: Type.Optional(lit("strict", "contextual")),
-        implementationCommand: Type.Optional(Type.String()),
-        force: Type.Optional(Type.Boolean()),
-        timeoutSeconds: Type.Optional(Type.Number()),
-        timeout_ms: Type.Optional(Type.Number()),
-        stopReason: Type.Optional(Type.String()),
-        interventionId: Type.Optional(Type.String({ description: "Pending implementation intervention id, when answering a human gate." })),
-        interventionResponse: Type.Optional(Type.String({ description: "Human decision for a pending implementation intervention. answer_intervention resumes the same run automatically." })),
-        reason: Type.Optional(Type.String()),
-        validationConfigPath: Type.Optional(Type.String()),
-        autoStopStalled: Type.Optional(Type.Boolean()),
-        autoRunFinalValidation: Type.Optional(Type.Boolean()),
-        autoRunCouncilReview: Type.Optional(Type.Boolean()),
-        autoCouncilCorrections: Type.Optional(Type.Boolean()),
-        autoCouncilCorrectionsMax: Type.Optional(Type.Number()),
-        councilDepth: Type.Optional(Type.String()),
-        councilMembers: Type.Optional(Type.Number()),
-        councilMaxCost: Type.Optional(Type.String()),
-        councilAutoProviders: Type.Optional(Type.String()),
-        councilProviders: Type.Optional(Type.String()),
-        councilCodexModel: Type.Optional(Type.String()),
-        councilTimeoutMs: Type.Optional(Type.Number()),
-        notify: Type.Optional(Type.Boolean({ description: "Send a lifecycle notification through an OpenClaw-supported channel." })),
-        notificationChannel: Type.Optional(Type.String({ description: "OpenClaw channel name, for example slack, telegram, whatsapp, signal, discord or matrix." })),
-        notificationTarget: Type.Optional(Type.String({ description: "Channel-specific recipient or destination." })),
-        notificationAccount: Type.Optional(Type.String({ description: "Optional OpenClaw channel account id." })),
-        notificationDeliveryJson: Type.Optional(Type.String({ description: "Optional JSON string parsed into the Gateway message tool's delivery argument." })),
-        notificationDryRun: Type.Optional(Type.Boolean()),
-        notifyExternalGate: Type.Optional(Type.Boolean()),
-        notifyMain: Type.Optional(Type.Boolean()),
-        emitMainUpdates: Type.Optional(Type.Boolean()),
-        dryRunMainUpdate: Type.Optional(Type.Boolean()),
-        mainUpdateTimeoutMs: Type.Optional(Type.Number()),
-        mainUpdateExecTimeoutMs: Type.Optional(Type.Number()),
-        stallQuietSeconds: Type.Optional(Type.Number()),
-        deliveryClassification: Type.Optional(lit("success", "partial", "invalid")),
-        repositoryBaseBranch: Type.Optional(Type.String()),
-        repositoryDeliveryTimeoutMs: Type.Optional(Type.Number()),
-      }),
+      parameters: cycleParameters,
       execute: async (params) => {
         cycleMessageDeliveryQueue.beginExecution();
         try {

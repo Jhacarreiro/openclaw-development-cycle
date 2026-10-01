@@ -12,6 +12,17 @@ Configuration is read from environment variables when the plugin loads, except f
 
 `projectRoot` is always the source checkout. `projectWikiPath` is the tool parameter for the project documentation directory; it must not be used as the source checkout.
 
+## Event history
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `DEVELOPMENT_CYCLE_EVENT_LOG_MAX_BYTES` | `8388608` (8 MiB) | Rotate audit JSONL files before the next event exceeds this size. A single larger event is kept intact. |
+| `DEVELOPMENT_CYCLE_EVENT_LOG_ARCHIVES_TO_KEEP` | `0` | Number of completed compressed archives to retain per event file. `0` preserves every archive. A positive value explicitly enables deletion of older archives. Invalid values stop plugin loading. |
+
+Rotation serializes writers sharing a state directory and compresses old events into `event-archives/<event-file>/<timestamp>-<id>.jsonl.gz` next to the current log. Run status, validation evidence and notification jobs remain intact. Interrupted compression leaves a readable `.jsonl` archive, which automatic retention never deletes. The plugin does not remove run directories or attempt artifacts.
+
+Archive retention is applied at the next rotation. Choose a finite count only after defining a backup policy for audit history. Defaults preserve all events, so total storage still grows with the number of runs; monitor free space, back up closed runs, and remove old run directories only while the plugin and supervisor are stopped and no notification job refers to them. Restore a backup to its original state-root path before resuming or inspecting artifact paths.
+
 ## Implementation adapter
 
 The command adapter is the portable default.

@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 
 export interface DevelopmentCycleConfig {
   stateRoot: string;
+  eventLogs: { maxBytes: number; archivesToKeep: number };
   projectDocsRoot: string;
   projectDocsGitRoot: string;
   implementation: {
@@ -64,6 +65,13 @@ function positiveInteger(env: NodeJS.ProcessEnv, name: string, fallback: number)
   return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
 }
 
+function nonnegativeInteger(env: NodeJS.ProcessEnv, name: string, fallback: number): number {
+  if (!String(env[name] ?? "").trim()) return fallback;
+  const parsed = Number(env[name]);
+  if (!Number.isSafeInteger(parsed) || parsed < 0) throw new Error(`invalid_configuration: ${name}`);
+  return parsed;
+}
+
 function stringArray(env: NodeJS.ProcessEnv, name: string): string[] {
   const value = String(env[name] ?? "").trim();
   if (!value) return [];
@@ -99,6 +107,10 @@ export function loadDevelopmentCycleConfig(env: NodeJS.ProcessEnv = process.env)
 
   return {
     stateRoot,
+    eventLogs: {
+      maxBytes: positiveInteger(env, "DEVELOPMENT_CYCLE_EVENT_LOG_MAX_BYTES", 8 * 1024 * 1024),
+      archivesToKeep: nonnegativeInteger(env, "DEVELOPMENT_CYCLE_EVENT_LOG_ARCHIVES_TO_KEEP", 0),
+    },
     projectDocsRoot: text(
       env,
       "DEVELOPMENT_CYCLE_PROJECT_DOCS_ROOT",

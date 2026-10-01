@@ -30,6 +30,9 @@ The format is based on Keep a Changelog and the project follows Semantic Version
 
 ### Changed
 
+- The coordinator is checked by TypeScript without `@ts-nocheck`; tool arguments derive from the public schema and builds reject unused locals and parameters.
+- The pinned development SDK uses the maintained OpenClaw `2026.8.33` release, retaining Node 22 and 24 support and removing the previously reported development dependency vulnerabilities.
+- Audit JSONL writers serialize rotations and compress history at 8 MiB per file. Archives are preserved by default; finite archive retention is opt-in and does not remove run state or notification jobs.
 - Notification, process supervision, validation evidence, log reads and validation policy now have separate typed modules.
 - Octopus Codex seats now reuse the existing OpenClaw OAuth profile through an owned ephemeral `codex app-server` bridge that reads the auth-profile store directly instead of requiring a second persistent Codex CLI login.
 - Octopus review-infrastructure-only failures with a validated materialized output are now classified separately as `review_infrastructure_failed`; the new fail-closed `resume_finalization` action revalidates the exact output and resumes at `implementation_delivered` without rerunning implementation.

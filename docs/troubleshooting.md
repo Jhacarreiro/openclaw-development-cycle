@@ -113,7 +113,7 @@ Use `stop_implementation` rather than killing only the root PID. The plugin stop
 
 New sessions record the Linux boot ID, PID, process group and process start time. Cancellation refuses a missing or changed identity rather than signalling a reused PID. Sessions created before this identity was recorded require operator verification before manual cancellation.
 
-Runner stdout and stderr each retain a current file and one `.previous` file, capped at 16 MiB per file. Very old output is rotated away. Run directories and audit JSONL files still need an operator retention policy.
+Runner stdout and stderr each retain a current file and one `.previous` file, capped at 16 MiB per file. Very old runner output is rotated away. Audit JSONL files rotate at 8 MiB into compressed files under `event-archives/<event-file>/`; all archives are retained by default. Use the [event history configuration](configuration.md#event-history) to opt into a finite archive count. Run directories and attempt artifacts still require an operator backup and retention policy.
 
 ## Public audit fails
 

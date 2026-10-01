@@ -1,7 +1,8 @@
-import { appendFile, mkdir, open, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, open, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { lstatSync, realpathSync } from "node:fs";
 import { dirname, join, relative, sep } from "node:path";
 import { idPathCandidates, projectPathCandidates } from "../core/ids.js";
+import { createEventLogWriter, defaultEventLogPolicy, type EventLogPolicy } from "./event-log.js";
 
 // mkdir-based lock: atomic on POSIX. An owner token (pid:nonce) is written
 // into the lock dir so release/write can refuse to touch a replacement lock.
@@ -177,7 +178,7 @@ function canonicalFallbackPath(runsRoot: string, projectId: string, runId: strin
   return candidate;
 }
 
-export function createFilesystemStore(stateRoot: string, now: () => Date = () => new Date()): FilesystemStore {
+export function createFilesystemStore(stateRoot: string, now: () => Date = () => new Date(), eventLogPolicy: EventLogPolicy = defaultEventLogPolicy): FilesystemStore {
   const runsRoot = join(stateRoot, "runs");
   const runDir = (project: unknown, runId: unknown) => {
     const projects = projectPathCandidates(project);
@@ -257,10 +258,7 @@ export function createFilesystemStore(stateRoot: string, now: () => Date = () =>
     }
   };
 
-  const appendJsonl = async (path: string, data: unknown): Promise<void> => {
-    await mkdir(dirname(path), { recursive: true });
-    await appendFile(path, `${JSON.stringify(data)}\n`);
-  };
+  const appendJsonl = createEventLogWriter(eventLogPolicy, acquireLock);
 
   return { runDir, loadJson, saveJson, updateStatus, appendJsonl };
 }

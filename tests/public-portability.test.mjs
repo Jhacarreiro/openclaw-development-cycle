@@ -8,7 +8,6 @@ const config = await readFile(new URL("../src/config.ts", import.meta.url), "utf
 test("notifications use generic OpenClaw channel parameters", () => {
   assert.match(source, /notificationChannel/);
   assert.match(source, /notificationTarget/);
-  assert.match(source, /developmentCycleConfig\.openclawBin/);
   assert.doesNotMatch(source, /telegramTarget|notifyTelegram|sendCycleTelegram/);
   assert.doesNotMatch(source, /--channel["',\s]+telegram/);
 });

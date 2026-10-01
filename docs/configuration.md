@@ -1,6 +1,6 @@
 # Configuration
 
-Configuration is read from environment variables when the plugin loads. Empty values are treated as unset.
+Configuration is read from environment variables when the plugin loads, except for the Gateway connection settings noted below, which are read when notifications are delivered. Empty values are treated as unset.
 
 ## Core paths
 
@@ -9,10 +9,19 @@ Configuration is read from environment variables when the plugin loads. Empty va
 | `DEVELOPMENT_CYCLE_STATE_ROOT` | `$HOME/.openclaw/development-cycle` | Durable run state and artifacts. |
 | `DEVELOPMENT_CYCLE_PROJECT_DOCS_ROOT` | `<state-root>/projects` | Per-project documentation root. |
 | `DEVELOPMENT_CYCLE_PROJECT_DOCS_GIT_ROOT` | empty | Optional Git checkout containing project documentation. Enables scoped plan commits. |
-| `DEVELOPMENT_CYCLE_RETENTION_DAYS` | `30` | Retention policy value. |
-| `DEVELOPMENT_CYCLE_OPENCLAW_BIN` | `openclaw` | OpenClaw CLI used for events and messages. |
 
 `projectRoot` is always the source checkout. `projectWikiPath` is the tool parameter for the project documentation directory; it must not be used as the source checkout.
+
+## Event history
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `DEVELOPMENT_CYCLE_EVENT_LOG_MAX_BYTES` | `8388608` (8 MiB) | Rotate audit JSONL files before the next event exceeds this size. A single larger event is kept intact. |
+| `DEVELOPMENT_CYCLE_EVENT_LOG_ARCHIVES_TO_KEEP` | `0` | Number of completed compressed archives to retain per event file. `0` preserves every archive. A positive value explicitly enables deletion of older archives. Invalid values stop plugin loading. |
+
+Rotation serializes writers sharing a state directory and compresses old events into `event-archives/<event-file>/<timestamp>-<id>.jsonl.gz` next to the current log. Run status, validation evidence and notification jobs remain intact. Interrupted compression leaves a readable `.jsonl` archive, which automatic retention never deletes. The plugin does not remove run directories or attempt artifacts.
+
+Archive retention is applied at the next rotation. Choose a finite count only after defining a backup policy for audit history. Defaults preserve all events, so total storage still grows with the number of runs; monitor free space, back up closed runs, and remove old run directories only while the plugin and supervisor are stopped and no notification job refers to them. Restore a backup to its original state-root path before resuming or inspecting artifact paths.
 
 ## Implementation adapter
 
@@ -86,15 +95,27 @@ export DEVELOPMENT_CYCLE_REPOSITORY_DELIVERY_BASE_BRANCH=main
 
 ## OpenClaw notifications
 
-Notifications are disabled unless explicitly enabled. Both a channel and target are required.
+Notifications are disabled unless explicitly enabled. Both a channel and target are required. Delivery invokes the `message` tool with action `send` through the running OpenClaw Gateway's `/tools/invoke` endpoint.
 
 | Variable | Default | Description |
 | --- | --- | --- |
 | `DEVELOPMENT_CYCLE_NOTIFICATIONS_ENABLED` | `false` | Enable lifecycle messages. |
-| `DEVELOPMENT_CYCLE_NOTIFICATION_CHANNEL` | empty | Any channel supported by `openclaw message send`. |
+| `DEVELOPMENT_CYCLE_NOTIFICATION_CHANNEL` | empty | Channel configured in the Gateway and supported by its `message` tool. |
 | `DEVELOPMENT_CYCLE_NOTIFICATION_TARGET` | empty | Channel-specific destination. |
 | `DEVELOPMENT_CYCLE_NOTIFICATION_ACCOUNT` | empty | Optional OpenClaw channel account id. |
-| `DEVELOPMENT_CYCLE_NOTIFICATION_DELIVERY_JSON` | empty | Optional JSON passed to `openclaw message send --delivery`. |
+| `DEVELOPMENT_CYCLE_NOTIFICATION_DELIVERY_JSON` | empty | Optional JSON parsed into the message tool's structured `delivery` argument. Invalid JSON is rejected before queueing. |
+
+Gateway connection settings are read when each queued notification is delivered:
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `DEVELOPMENT_CYCLE_GATEWAY_URL` | `OPENCLAW_GATEWAY_URL` or `http://127.0.0.1:18789` | Base URL of the Gateway used for notifications. Takes precedence over `OPENCLAW_GATEWAY_URL`. |
+| `OPENCLAW_GATEWAY_URL` | `http://127.0.0.1:18789` | Fallback Gateway base URL when `DEVELOPMENT_CYCLE_GATEWAY_URL` is unset. |
+| `OPENCLAW_GATEWAY_TOKEN` | empty | Bearer token sent to the Gateway when set. Must match the Gateway's authentication configuration. |
+
+Messages are persisted under `<state-root>/notification-outbox/`, queued while Development Cycle actions are active, and drained after the active-action count reaches zero. Startup and a 30-second scan recover pending jobs. Delivery retries up to five times with exponential backoff (capped at five minutes); exhausted jobs are retained with `failed: true` and `lastResult`. Gateway delivery failures are recorded without failing the lifecycle action; phase notification results are appended to `telegram_update_events.jsonl`. Recovery provides at least once delivery, so a crash between sending and acknowledgement may cause a duplicate. Gateway tokens are read at delivery time and are not stored in jobs.
+
+The runner supervisor uses the same Gateway URL precedence for its best-effort exit callback. It receives the current connection settings when each runner is launched and sends the callback after cleaning that runner's process group.
 
 Per-call values take precedence:
 

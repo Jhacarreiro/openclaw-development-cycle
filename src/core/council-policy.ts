@@ -1,12 +1,23 @@
-export function councilNeedsCorrectionsText(text: string): boolean {
-  const normalized = String(text || "").toLowerCase();
+export type CouncilDecision = "go" | "revise" | "stop" | "unknown";
+
+export function parseCouncilDecision(text: string, structuredDecision?: unknown): CouncilDecision {
+  const normalized = String(text || "").toLowerCase().replace(/\*\*|__/g, "").replace(/^\s*#{1,6}\s*/gm, "");
   const cleaned = normalized.replace(/\bno (?:blocking|blockers?)\b/g, "pass-signal");
-  if (/\b(pass-signal|ready to ship|ship as-is|go\b)/i.test(cleaned)
-      && !/conditional go|must fix|blocker|before ship|before deploy|high\s+[—-]|critical\s+[—-]/i.test(cleaned)) {
-    return false;
-  }
-  return /conditional go|must fix|blocker|before ship|before deploy|do not ship|revise|high\s+[—-]|critical\s+[—-]/i.test(cleaned)
-    || cleaned.includes("corrections required");
+  // Negative evidence takes precedence over positive phrases, including a
+  // structured GO. Completion of the review process is not an acceptance.
+  if (/\bno[-\s]+go\b|(?:^|\n)\s*(?:(?:decision|verdict|recommendation|result):?\s*)?(?:fail|failed|stop)\b|do not ship|\b(?:tests?|build|validation|review)\s+(?:has\s+)?failed\b/.test(cleaned)) return "stop";
+  if (/conditional go|must fix|blocker|before ship|before deploy|revise|high\s+[—-]|critical\s+[—-]|corrections required/.test(cleaned)) return "revise";
+  const explicit = String(structuredDecision || "").trim().toLowerCase();
+  if (["go", "pass", "approved"].includes(explicit)) return "go";
+  if (["revise", "conditional go"].includes(explicit)) return "revise";
+  if (["stop", "fail", "no-go", "rejected"].includes(explicit)) return "stop";
+  if (explicit) return "unknown";
+  if (/\b(?:pass-signal|ready to ship|ship as-is)\b|(?:^|\n)\s*(?:(?:decision|verdict|recommendation):?\s*)?go\b/.test(cleaned)) return "go";
+  return "unknown";
+}
+
+export function councilNeedsCorrectionsText(text: string): boolean {
+  return parseCouncilDecision(text) !== "go";
 }
 
 export function resolveAutoCouncilCorrectionsMax(value: unknown): number {

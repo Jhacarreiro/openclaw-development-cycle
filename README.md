@@ -29,19 +29,20 @@ The state machine is designed to support two operating styles:
 - **Human-supervised** — an operator or supervising agent explicitly records the final `go`, `revise`, or `stop` decision.
 - **Policy-driven automatic** — automation may derive and record the same state-machine decision when an external policy allows a fully automatic cycle.
 
-The current `v0.1.x` public tool API still represents the final decision explicitly through `record_final_validation`; automation should use that same action rather than bypassing the state machine.
+The public tool API represents the final decision explicitly through `record_final_validation`; automation should use that same action rather than bypassing the state machine.
 
 ## Status
 
-Experimental `v0.1.0`. The state machine, storage, adapters, shell quoting, and process-supervision boundaries are tested. Use a disposable or backed-up checkout for initial evaluation.
+Experimental. The state machine, storage, adapters, shell quoting, and process-supervision boundaries are tested. Use a disposable or backed-up checkout for initial evaluation.
 
 ## Requirements
 
 - Linux with `/proc/self/fd` support for guarded project-root filesystem operations
 - `projectRoot` must be an existing Git checkout for implementation and mechanical validation actions
-- Node.js 22 or newer
+- Node.js 22.22.3+ on the 22.x line or 24.15.0+ on the 24.x line (the CI-tested versions supported by the pinned OpenClaw dependency)
 - Python 3
 - `jq`
+- GNU coreutils `timeout` for validation, council and delivery command process groups
 - OpenClaw `2026.5.17` or newer
 - an executable implementation adapter
 
@@ -106,8 +107,6 @@ development_cycle action=record_plan project=my-project runId=<run-id> planPath=
 
 development_cycle action=start_implementation project=my-project runId=<run-id> projectRoot=/path/to/repo
 
-`start_implementation` is the host's explicit authorization to execute the already-approved plan for that run. Generic plan wording such as `draft for human approval`, `after human approval`, or `do not start until approved` is therefore satisfied by the action itself and must not trigger a second approval gate. If a new risky/protected/out-of-scope decision arises after launch, the implementation must use the structured intervention protocol (`intervention.json` -> `implementation_waiting_human` -> `answer_intervention`) rather than leaving the request only as prose in review output.
-
 development_cycle action=reconcile project=my-project runId=<run-id>
 
 development_cycle action=request_final_validation project=my-project runId=<run-id>
@@ -116,6 +115,8 @@ development_cycle action=record_final_validation project=my-project runId=<run-i
 
 development_cycle action=close project=my-project runId=<run-id>
 ```
+
+`start_implementation` is the host's explicit authorization to execute the already-approved plan for that run. Generic plan wording such as `draft for human approval`, `after human approval`, or `do not start until approved` is therefore satisfied by the action itself and must not trigger a second approval gate. If a new risky/protected/out-of-scope decision arises after launch, the implementation must use the structured intervention protocol (`intervention.json` -> `implementation_waiting_human` -> `answer_intervention`) rather than leaving the request only as prose in review output.
 
 Final validation records exactly one state-machine decision token, whether supplied by a human supervisor or by approved automation:
 
@@ -188,7 +189,7 @@ See [Adapters](docs/adapters.md) and [Configuration](docs/configuration.md).
 
 ## Notifications
 
-Notifications use OpenClaw's generic messaging CLI. Nothing is enabled or addressed by default.
+Notifications use the `message` tool through the already-running OpenClaw Gateway's `/tools/invoke` endpoint. Nothing is enabled or addressed by default.
 
 ```bash
 export DEVELOPMENT_CYCLE_NOTIFICATIONS_ENABLED=true
@@ -196,17 +197,17 @@ export DEVELOPMENT_CYCLE_NOTIFICATION_CHANNEL=slack
 export DEVELOPMENT_CYCLE_NOTIFICATION_TARGET='channel:C0123456789'
 ```
 
-Any channel supported by `openclaw message send` can be used.
+Any channel configured in the Gateway and supported by its `message` tool can be used. Optional `DEVELOPMENT_CYCLE_NOTIFICATION_DELIVERY_JSON` is parsed into the tool's structured `delivery` argument.
 
 When notifications are enabled, the plugin sends best-effort, deduplicated messages for material lifecycle phase transitions only. Heartbeats and same-phase status refreshes remain silent. Current material notifications include implementation launch/running/delivery/failure, correction rounds, mechanical validation outcomes, council review outcomes, final validation decisions, stop, repository delivery, merge and close. Human-intervention/council-interrupt messages keep their dedicated notification paths and are not duplicated by the phase notifier.
 
 Lifecycle notification dedupe is persisted per run in `telegram_update_state.json`; audit events are appended to `telegram_update_events.jsonl`. Notification delivery failures are recorded in those event files but do not mutate the Development Cycle phase or fail the lifecycle action.
 
-Notification delivery uses the already-running local OpenClaw Gateway `/tools/invoke` message tool, authenticated by `OPENCLAW_GATEWAY_TOKEN`; it does not spawn a nested `openclaw message send` CLI process. `DEVELOPMENT_CYCLE_GATEWAY_URL` may override the default local Gateway URL when needed.
+Notification delivery uses `OPENCLAW_GATEWAY_TOKEN` for bearer authentication when set. The Gateway URL is selected from `DEVELOPMENT_CYCLE_GATEWAY_URL`, then `OPENCLAW_GATEWAY_URL`, then `http://127.0.0.1:18789`. See [Configuration](docs/configuration.md#openclaw-notifications) for notification settings.
 
-Gateway message delivery is deferred until the current `development_cycle` tool execution has returned. Notifications are queued in-process while one or more Development Cycle actions are active, then drained when the active-action count reaches zero. This prevents reentrant `/tools/invoke` calls from deadlocking or timing out the action that generated the notification. Phase delivery results are appended asynchronously to `telegram_update_events.jsonl`.
+Gateway message delivery is deferred until the current `development_cycle` tool execution has returned. Notifications are saved under `<state-root>/notification-outbox/` before they are queued, then drained when the active-action count reaches zero. Pending jobs are recovered when the plugin starts and checked every 30 seconds. Failed delivery retries up to five times with backoff; exhausted jobs remain on disk for inspection. Delivery is at least once: a crash after the Gateway sends a message but before acknowledgement is saved can cause a duplicate. Phase delivery results are appended asynchronously to `telegram_update_events.jsonl`.
 
-Implementation runners also perform one best-effort `reconcile` callback through the local Gateway after exit. This lets the control plane observe terminal runner state without polling. For one narrowly classified Octopus planner-reconsideration contract failure, `reconcile` may automatically relaunch the same approved plan exactly once, but only when the attempt worktree is pristine, its HEAD still matches the source checkout, and there is no pending human intervention. Unknown failures, dirty/committed worktrees, interventions, or a second occurrence fail closed and require normal operator handling. Recovery events are appended to `automatic_recovery_events.jsonl`.
+The supervisor performs one best-effort `reconcile` callback through the configured Gateway after runner exit and process-group cleanup. This lets the control plane observe terminal runner state without polling. For one narrowly classified Octopus planner-reconsideration contract failure, `reconcile` may automatically relaunch the same approved plan exactly once, but only when the attempt worktree is pristine, its HEAD still matches the source checkout, and there is no pending human intervention. Unknown failures, dirty/committed worktrees, interventions, or a second occurrence fail closed and require normal operator handling. Recovery events are appended to `automatic_recovery_events.jsonl`.
 
 ## Safety model
 

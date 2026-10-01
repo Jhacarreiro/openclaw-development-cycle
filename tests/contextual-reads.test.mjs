@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { loadDevelopmentCycleConfig } from "../dist/config.js";
 import { buildImplementationLaunchSpec } from "../dist/adapters/implementation.js";
+import { withCanonicalRoutingHome } from "./helpers/octopus-routing.mjs";
 
 const config = () => ({
   ...loadDevelopmentCycleConfig({ HOME: "/tmp/example-home" }).implementation,
@@ -25,7 +26,7 @@ test("read config defaults to contextual, allows strict and rejects typos", () =
   }), /invalid_octopus_read_scope_mode/);
 });
 
-test("launcher supplies scoped metadata, not prompt paths", () => {
+test("launcher supplies scoped metadata, not prompt paths", () => withCanonicalRoutingHome(() => {
   const spec = buildImplementationLaunchSpec(config(), input());
   assert.equal(spec.env.OCTOPUS_TANGLE_READ_SCOPE_MODE, "contextual");
   assert.deepEqual(spec.env.OCTOPUS_TANGLE_CONTEXTUAL_READ_ROOTS.split("\n"), [
@@ -36,21 +37,21 @@ test("launcher supplies scoped metadata, not prompt paths", () => {
   assert.equal(spec.env.OCTOPUS_TANGLE_WRITE_SCOPE_MODE, "adaptive");
   assert.ok(!spec.env.OCTOPUS_TANGLE_CONTEXTUAL_READ_ROOTS.includes("/unapproved"));
   assert.ok(!spec.env.OCTOPUS_TANGLE_CONTEXTUAL_READ_ROOTS.split("\n").includes("/tmp/attached"));
-});
+}));
 
-test("per-run strict override clears external roots without changing writes", () => {
+test("per-run strict override clears external roots without changing writes", () => withCanonicalRoutingHome(() => {
   const spec = buildImplementationLaunchSpec(config(), { ...input(), readScopeMode: "strict" });
   assert.equal(spec.env.OCTOPUS_TANGLE_READ_SCOPE_MODE, "strict");
   assert.equal(spec.env.OCTOPUS_TANGLE_CONTEXTUAL_READ_ROOTS, "");
   assert.equal(spec.env.OCTOPUS_TANGLE_WRITE_SCOPE_MODE, "adaptive");
-});
+}));
 
-test("per-run contextual override works for correction launches", () => {
+test("per-run contextual override works for correction launches", () => withCanonicalRoutingHome(() => {
   const spec = buildImplementationLaunchSpec({ ...config(), octopusReadScopeMode: "strict" },
     { ...input(), readScopeMode: "contextual", mode: "corrections" });
   assert.equal(spec.env.OCTOPUS_TANGLE_READ_SCOPE_MODE, "contextual");
   assert.ok(spec.env.OCTOPUS_TANGLE_CONTEXTUAL_READ_ROOTS.includes("/tmp/example/docs"));
-});
+}));
 
 test("launcher rejects invalid mode and injected or relative context", () => {
   assert.throws(() => buildImplementationLaunchSpec(config(),

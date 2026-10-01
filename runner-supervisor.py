@@ -8,6 +8,8 @@ import signal
 import socket
 import sys
 import time
+import threading
+import urllib.request
 from pathlib import Path
 
 PR_SET_CHILD_SUBREAPER = 36
@@ -58,7 +60,6 @@ def terminate_group(pgid: int, runners: dict[int, int]) -> None:
         pass
     deadline = time.monotonic() + 2.0
     while time.monotonic() < deadline:
-        reap_all(runners)
         if not group_members(pgid):
             return
         time.sleep(0.1)
@@ -68,7 +69,6 @@ def terminate_group(pgid: int, runners: dict[int, int]) -> None:
         pass
     deadline = time.monotonic() + 2.0
     while time.monotonic() < deadline:
-        reap_all(runners)
         if not group_members(pgid):
             return
         time.sleep(0.1)
@@ -123,6 +123,7 @@ def serve(socket_path: str) -> None:
     server.listen(16)
     server.settimeout(0.2)
     runners: dict[int, int] = {}
+    callbacks: dict[int, dict] = {}
     launch_in_flight = False
     shutdown_requested = False
 
@@ -164,6 +165,7 @@ def serve(socket_path: str) -> None:
             conn = None
         if conn is not None:
             with conn:
+                conn.settimeout(1.0)
                 try:
                     raw = b''
                     while not raw.endswith(b'\n'):
@@ -184,6 +186,8 @@ def serve(socket_path: str) -> None:
                         try:
                             pid = launch_runner(runner_path, cwd)
                             runners[pid] = pid
+                            if isinstance(request.get('reconcile'), dict):
+                                callbacks[pid] = request['reconcile']
                             response = {'ok': True, 'pid': pid, 'pgid': pid, 'supervisorPid': os.getpid()}
                         finally:
                             launch_in_flight = False
@@ -204,7 +208,24 @@ def serve(socket_path: str) -> None:
             pgid = runners.get(pid, pid)
             terminate_group(pgid, runners)
             runners.pop(pid, None)
-            reap_all(runners)
+            callback = callbacks.pop(pid, None)
+            if callback:
+                # Run outside the terminated runner group and outside the socket loop.
+                threading.Thread(target=reconcile_after_exit, args=(callback,), daemon=True).start()
+
+
+def reconcile_after_exit(callback: dict) -> None:
+    try:
+        payload = json.dumps({'tool': 'development_cycle', 'action': 'reconcile',
+                              'args': {'project': callback['project'], 'runId': callback['runId']}}).encode()
+        request = urllib.request.Request(callback['url'].rstrip('/') + '/tools/invoke', data=payload,
+                                         headers={'Authorization': 'Bearer ' + callback['token'],
+                                                  'Content-Type': 'application/json'})
+        with urllib.request.urlopen(request, timeout=20) as response:
+            response.read(4096)
+    except Exception:
+        # Best effort; durable runner markers remain available to ordinary reconcile.
+        print('runner reconcile callback failed', file=sys.stderr, flush=True)
 
 
 def client(socket_path: str, payload: dict) -> int:
@@ -238,7 +259,15 @@ def main() -> int:
         return 0
     if args.command == 'ping':
         return client(args.socket, {'action': 'ping'})
-    return client(args.socket, {'action': 'launch', 'runnerPath': args.runner_path, 'cwd': args.cwd})
+    payload = {'action': 'launch', 'runnerPath': args.runner_path, 'cwd': args.cwd}
+    token = os.environ.get('OPENCLAW_GATEWAY_TOKEN', '')
+    project = os.environ.get('DEVELOPMENT_CYCLE_RECONCILE_PROJECT', '')
+    run_id = os.environ.get('DEVELOPMENT_CYCLE_RECONCILE_RUN_ID', '')
+    if token and project and run_id:
+        payload['reconcile'] = {'token': token, 'project': project, 'runId': run_id,
+                                'url': os.environ.get('DEVELOPMENT_CYCLE_GATEWAY_URL') or
+                                       os.environ.get('OPENCLAW_GATEWAY_URL') or 'http://127.0.0.1:18789'}
+    return client(args.socket, payload)
 
 
 if __name__ == '__main__':

@@ -1,26 +1,29 @@
-// @ts-nocheck
-import { Type } from "typebox";
+import { Type, type Static } from "typebox";
 import { defineToolPlugin } from "openclaw/plugin-sdk/tool-plugin";
 import { lstat, mkdir, open, readFile, readdir, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
 import { constants as fsConstants, existsSync } from "node:fs";
 import { join, relative, resolve, sep, basename, dirname } from "node:path";
 import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
+import { fileURLToPath } from "node:url";
 import { setTimeout as sleep } from "node:timers/promises";
 import { randomUUID } from "node:crypto";
 import { ACTIONS, checkActionTransition } from "./core/state-machine.js";
 import { parseFinalDecision } from "./core/decisions.js";
+import { defaultValidationConfig, mergeValidationConfig, parseGitPorcelain, validationRuleMatches, type ValidationConfig } from "./core/validation-config.js";
 import { cleanId, idPathCandidates, newRunId as createRunId, projectPathCandidates } from "./core/ids.js";
 import { pathWithin as nfcPathWithin, containedRelativePath } from "./core/paths.js";
 import { nextStallQuietAccounting } from "./core/stall-accounting.js";
-import { councilNeedsCorrectionsText, resolveAutoCouncilCorrectionsMax } from "./core/council-policy.js";
+import { parseCouncilDecision, resolveAutoCouncilCorrectionsMax } from "./core/council-policy.js";
 import { inferDeliveryClassification } from "./core/delivery-classification.js";
 import { findProviderProcessesOutsideObservedTree } from "./core/process-observation.js";
 import { transientRuntimeObservationRecoveryPatch } from "./core/runtime-failure.js";
 import { phaseNotificationForTransition } from "./core/phase-notifications.js";
-import { buildGatewayMessageInvokePayload } from "./core/message-notifications.js";
 import { classifyAutomaticImplementationRecovery } from "./core/automatic-recovery.js";
-import { createDeferredDeliveryQueue } from "./core/deferred-delivery.js";
+import { createNotificationService } from "./runtime/notifications.js";
+import { readTextTail } from "./storage/text.js";
+import { captureCheckoutIdentity, validationEvidenceMatches } from "./runtime/validation-evidence.js";
+import { execSupervisedCommand, readProcessIdentity, sameProcess, stopVerifiedProcessGroup } from "./runtime/processes.js";
 import { loadDevelopmentCycleConfig } from "./config.js";
 import { acquireLock, createFilesystemStore } from "./storage/filesystem.js";
 import { buildImplementationLaunchSpec, jsonShellQuote, renderShellCommand, renderShellEnvironment, shellQuote } from "./adapters/implementation.js";
@@ -30,10 +33,22 @@ const resolvedCycleDir = Symbol("developmentCycleResolvedCycleDir");
 const interventionResume = Symbol("developmentCycleInterventionResume");
 const lifecycleLockTimeoutMs = 30000;
 
+type CycleParameters = Partial<Static<typeof cycleParameters>> & {
+  [lifecycleLockHeld]?: boolean;
+  [resolvedCycleDir]?: string;
+  [interventionResume]?: { id: string; response: string; responsePath: string; answeredAt: string; sourceAttemptId: string | null };
+  automaticRecovery?: boolean;
+};
+
+interface CycleResult {
+  ok: boolean;
+  [detail: string]: unknown;
+}
+
 const developmentCycleConfig = loadDevelopmentCycleConfig();
 const secretPath = developmentCycleConfig.externalGate.secretPath;
 const defaultUrl = developmentCycleConfig.externalGate.url;
-const lit = (...xs: string[]) => Type.Union(xs.map((x) => Type.Literal(x)));
+const lit = <const T extends string[]>(...xs: T) => Type.Enum<T>(xs);
 
 async function loadConfig() {
   const cfg: Record<string, string> = {};
@@ -46,16 +61,6 @@ async function loadConfig() {
     cfg[line.slice(0, idx)] = line.slice(idx + 1);
   }
   return { url: (cfg.EXTERNAL_GATE_URL || defaultUrl).replace(/\/$/, ""), token: cfg.EXTERNAL_GATE_TOKEN || "" };
-}
-
-function buildQuery(params: Record<string, any>) {
-  const qs = new URLSearchParams();
-  for (const [key, value] of Object.entries(params || {})) {
-    if (value === undefined || value === null || value === "") continue;
-    qs.set(key, String(value));
-  }
-  const s = qs.toString();
-  return s ? `?${s}` : "";
 }
 
 async function request(path: string, options: any = {}) {
@@ -108,7 +113,7 @@ const runnerSupervisorPath = developmentCycleConfig.runner.supervisorPath;
 const runnerSupervisorSocket = developmentCycleConfig.runner.supervisorSocket;
 const runnerHeartbeatIntervalSeconds = developmentCycleConfig.runner.heartbeatIntervalSeconds;
 const runnerDefaultTimeoutSeconds = developmentCycleConfig.runner.defaultTimeoutSeconds;
-const filesystemStore = createFilesystemStore(cycleRoot);
+const filesystemStore = createFilesystemStore(cycleRoot, undefined, developmentCycleConfig.eventLogs);
 
 async function ensureRunnerSupervisor() {
   const ping = async () => {
@@ -156,6 +161,7 @@ async function ensureRunnerSupervisor() {
 const cycleDir = filesystemStore.runDir;
 const loadJson = filesystemStore.loadJson;
 const saveJson = filesystemStore.saveJson;
+const cycleMessageDeliveryQueue = createNotificationService(filesystemStore, cycleRoot, developmentCycleConfig.notifications);
 async function cycleStatus(dir: string, patch: any) {
   const previous = await filesystemStore.loadJson<any>(join(dir, "status.json"));
   const next = await filesystemStore.updateStatus(dir, patch);
@@ -168,22 +174,10 @@ async function cycleStatus(dir: string, patch: any) {
   const state = await filesystemStore.loadJson<any>(statePath);
   if (state?.lastSignature === signature) return next;
 
-  const deliveryCallback = async (delivery: any) => {
-    await filesystemStore.appendJsonl(eventsPath, {
-      eventType: "development_cycle.telegram_delivery",
-      createdAt: new Date().toISOString(),
-      project: next?.project || previous?.project || "",
-      runId: next?.runId || previous?.runId || "",
-      phase: notice.phase,
-      title: notice.title,
-      notification: delivery,
-      signature,
-    });
-  };
-  const result = await sendCycleMessage({ __notificationResultCallback: deliveryCallback }, notice.title, notice.text).catch((error: any) => ({
-    ok: false,
-    error: String(error?.message || error),
-  }));
+  const result = await sendCycleMessage({ __notificationAudit: { eventsPath, event: {
+    eventType: "development_cycle.telegram_delivery", project: next?.project || previous?.project || "",
+    runId: next?.runId || previous?.runId || "", phase: notice.phase, title: notice.title, signature,
+  } } }, notice.title, notice.text).catch((error: any) => ({ ok: false, error: String(error?.message || error) }));
   const event = {
     eventType: "development_cycle.telegram_update",
     createdAt: new Date().toISOString(),
@@ -206,7 +200,7 @@ async function cycleStatus(dir: string, patch: any) {
 const appendJsonl = filesystemStore.appendJsonl;
 function newRunId(project: string) { return createRunId(project); }
 function dcShort(x: any, n = 1200) { const s = String(x || ""); return s.length <= n ? s : s.slice(0, n - 3) + "..."; }
-function dcAlerts(runtime: any) { return [...new Set((runtime?.richObservation?.alerts || []).map((a: any) => String(a?.code || "")).filter(Boolean))].sort(); }
+function dcAlerts(runtime: any): string[] { return [...new Set<string>((runtime?.richObservation?.alerts || []).map((a: any) => String(a?.code || "")).filter(Boolean))].sort(); }
 function dcLines(runtime: any) { return (runtime?.richObservation?.latestTimeline || []).map((x: any) => String(x?.line || "")).filter(Boolean).join("\n"); }
 function dcMatch(text: string, pairs: any[]) { for (const [name, re] of pairs) { const m = re.exec(text); if (m) return { name, pattern: String(re), match: dcShort(m[0], 220) }; } return null; }
 async function dcClassify(dir: string, status: any, runtime: any) {
@@ -354,6 +348,7 @@ async function createImplementationRunnerSession(dir: string, params: any) {
 
   const environment = renderShellEnvironment({ ...launchSpec.env, HOME: runtimeHome });
   const commandLine = renderShellCommand(launchSpec);
+  const boundedLogPath = resolve(dirname(fileURLToPath(import.meta.url)), "..", "bin", "bounded-log.py");
   const runnerScript = `#!/bin/sh
 set -u
 ${environment}
@@ -393,16 +388,6 @@ finalize() {
     rm -f "$status_tmp"
   fi
   cleanup_process_group
-  if [ -n "\${OPENCLAW_GATEWAY_TOKEN:-}" ]; then
-    (
-      sleep 1
-      reconcile_body=$(jq -nc --arg tool development_cycle --arg action reconcile --arg project ${jsonShellQuote(request.project)} --arg runId ${jsonShellQuote(request.runId)} '{tool:$tool,action:$action,args:{project:$project,runId:$runId}}')
-      curl -sS --connect-timeout 2 --max-time 20 http://127.0.0.1:18789/tools/invoke \
-        -H "Authorization: Bearer $OPENCLAW_GATEWAY_TOKEN" \
-        -H "Content-Type: application/json" \
-        -d "$reconcile_body" >/dev/null 2>&1 || true
-    ) >/dev/null 2>&1 &
-  fi
 }
 trap finalize EXIT
 trap 'exit 143' TERM
@@ -416,7 +401,7 @@ if [ "$actual_project_root_identity" != ${shellQuote(projectRootIdentity)} ]; th
   printf '%s\n' "projectRoot identity changed before execution" >&2
   exit 72
 fi
-${commandLine} > ${shellQuote(stdoutPath)} 2> ${shellQuote(stderrPath)}
+python3 ${shellQuote(boundedLogPath)} --stdout ${shellQuote(stdoutPath)} --stderr ${shellQuote(stderrPath)} -- /bin/sh -c ${shellQuote(commandLine)}
 `;
   await writeFile(runnerPath, runnerScript, { mode: 0o755 } as any);
 
@@ -474,7 +459,7 @@ ${commandLine} > ${shellQuote(stdoutPath)} 2> ${shellQuote(stderrPath)}
     supervisor = await ensureRunnerSupervisor();
     const launched = await execFileAsync("python3", [runnerSupervisorPath, "--socket", runnerSupervisorSocket, "launch", runnerPath, sessionDir], {
       cwd: sessionDir,
-      env: { ...process.env, HOME: runtimeHome },
+      env: { ...process.env, HOME: runtimeHome, DEVELOPMENT_CYCLE_RECONCILE_PROJECT: request.project, DEVELOPMENT_CYCLE_RECONCILE_RUN_ID: request.runId },
       timeout: 5000,
       maxBuffer: 64 * 1024,
     });
@@ -488,6 +473,7 @@ ${commandLine} > ${shellQuote(stdoutPath)} 2> ${shellQuote(stderrPath)}
       status: "running",
       launchState: "running",
       runnerPid,
+      runnerIdentity: await readProcessIdentity(runnerPid),
       processGroupId: Number(launchInfo?.pgid || runnerPid),
       runnerSupervisorPid: Number(launchInfo?.supervisorPid || supervisor?.pid || 0) || null,
       runnerSupervisorSocket,
@@ -667,27 +653,6 @@ async function updateImplementationObserverSession(dir: string, id: string, para
   });
 }
 
-function implementationNoDelivery(stdout: string, stderr: string) {
-  const text = `${stdout || ""}
-${stderr || ""}`;
-  const patterns = [
-    /Synthesis cannot proceed/i,
-    /no substantive inputs/i,
-    /Decomposition failed with all providers/i,
-    /FAILED \(exit code/i,
-    /failed to initialize rollout recorder/i,
-    /Permission denied/i,
-    /EACCES/i,
-    /LandlockRestrict/i,
-    /error running landlock/i,
-    /linux-sandbox/i,
-    /401 Unauthorized/i,
-    /exceeded retry limit/i,
-    /last status:\s*401/i,
-  ];
-  const matched = patterns.find((re) => re.test(text));
-  return matched ? matched.source : "";
-}
 function looksLikePlanRequest(text: string) {
   const t = String(text || "").toLowerCase();
   const markers = [
@@ -891,11 +856,11 @@ async function writePlanningPack(dir: string, params: any) {
 }
 
 /** Prefer caller-supplied wiki path only when it stays under projectsWikiRoot. */
-function resolveTrustedProjectWikiPath(project: string, ...candidates: Array<string | null | undefined>): string {
+function resolveTrustedProjectWikiPath(project: string, ...candidates: unknown[]): string {
   const wikiRootAbs = resolve(projectsWikiRoot);
   for (const c of candidates) {
-    if (!c) continue;
-    const abs = resolve(String(c));
+    if (typeof c !== "string" || !c) continue;
+    const abs = resolve(c);
     if (pathWithin(projectsWikiRoot, abs) && abs !== wikiRootAbs) return abs;
   }
   for (const id of idPathCandidates(project || "default")) {
@@ -920,17 +885,6 @@ function pathWithin(root: string, candidate: string) {
   // must not count as a project wiki destination.
   if (a === b || a.normalize("NFC") === b.normalize("NFC")) return false;
   return nfcPathWithin(a, b);
-}
-
-/** True if candidate resolves inside any allowed root (or equals a root). */
-function pathWithinAny(roots: Array<string | null | undefined>, candidate: string) {
-  const c = resolve(String(candidate || ""));
-  for (const root of roots) {
-    if (!root) continue;
-    const r = resolve(String(root));
-    if (c === r || pathWithin(r, c)) return true;
-  }
-  return false;
 }
 
 export function isExactBroadProjectRoot(value: string): boolean {
@@ -1381,6 +1335,8 @@ async function resumeReviewInfrastructureFinalization(dir: string, status: any) 
     reviewInfrastructureRecoveredAt: recoveredAt,
     reviewInfrastructureRecovery: recoveryPath,
     resumedFromPhase: "review_infrastructure_failed",
+    requiredMechanicalValidation: true,
+    validationEvidence: null,
     nextAction: "Run run_final_validation against the preserved Octopus output before final review or repository delivery.",
   });
   return { ok: true, phase: next.phase, recoveryPath, outputHandoff, status: next };
@@ -1399,6 +1355,19 @@ function repositoryFindings(status: any, max = 12) {
   return out;
 }
 
+async function requiredValidationError(status: any): Promise<string | null> {
+  if (!status?.requiredMechanicalValidation && !status?.validationEvidence) return null;
+  if (status?.externalValidationDecision !== "go" || !status?.validationEvidence) return "mechanical_validation_required";
+  const pinned = await pinTrustedProjectRoot(effectiveImplementationRoot(status));
+  if (!pinned) return "validation_checkout_untrusted";
+  try {
+    const identity = await captureCheckoutIdentity(pinned.procPath);
+    const attemptId = String(status?.correctionsAttemptId || status?.implementationAttemptId || "");
+    return validationEvidenceMatches(status.validationEvidence, attemptId, pinned.realPath, identity) ? null : "validation_evidence_stale";
+  } catch { return "validation_identity_unreadable"; }
+  finally { await pinned.handle.close(); }
+}
+
 async function runRepositoryDeliveryAdapter(dir: string, status: any, params: any) {
   const project = cleanId(params.project || status?.project || "default");
   const runId = cleanId(params.runId || status?.runId || "run");
@@ -1406,23 +1375,33 @@ async function runRepositoryDeliveryAdapter(dir: string, status: any, params: an
   const projectRoot = missingRequiredOutput ? "" : effectiveImplementationRoot(status, params);
   const sourceProjectRoot = String(params.projectRoot || status?.projectRoot || "");
   const sourcePhase = String(status?.phase || "");
+  const requestPath = join(dir, "repository_delivery_request.json");
+  const previousRequest = await loadJson(requestPath);
+  const operation = params.repositoryDeliveryOperation || "publish";
+  const classificationPhase = sourcePhase === "repository_delivery_failed" || sourcePhase === "delivery_published"
+    ? String(status?.repositoryDeliverySourcePhase || previousRequest.acceptedSourcePhase || previousRequest.sourcePhase || "") : sourcePhase;
   const classification = missingRequiredOutput
     ? "invalid"
-    : inferDeliveryClassification(sourcePhase, params.deliveryClassification || status?.repositoryDelivery?.classification);
-  const requestPath = join(dir, "repository_delivery_request.json");
+    : operation === "status" ? String(status?.repositoryDelivery?.classification || "invalid")
+    : inferDeliveryClassification(classificationPhase, params.deliveryClassification || status?.repositoryDelivery?.classification);
+  if (classification === "success" && operation !== "status") {
+    const validationError = await requiredValidationError(status);
+    if (validationError) return { ok: false, classification, error: validationError };
+  }
   const resultPath = join(dir, "repository_delivery.json");
   const request = {
     schemaVersion: 1,
-    operation: params.repositoryDeliveryOperation || "publish",
+    operation,
     project,
     runId,
     projectRoot,
     sourceProjectRoot,
     outputPath: status?.outputPath || null,
     sourcePhase,
+    acceptedSourcePhase: classificationPhase,
     classification,
     baseBranch: String(params.repositoryBaseBranch || repositoryDeliveryConfig.baseBranch || "main"),
-    autoMerge: classification === "success" && repositoryDeliveryConfig.autoMergeSuccessful,
+    autoMerge: operation !== "status" && classification === "success" && repositoryDeliveryConfig.autoMergeSuccessful,
     findings: repositoryFindings(status),
     existingDelivery: status?.repositoryDelivery || null,
     createdAt: new Date().toISOString(),
@@ -1450,7 +1429,7 @@ async function runRepositoryDeliveryAdapter(dir: string, status: any, params: an
   if (!repositoryDeliveryConfig.command) return { ok: false, classification, error: "repository_delivery_command_missing", requestPath, resultPath };
   let execResult: any;
   try {
-    execResult = await execFileAsync(repositoryDeliveryConfig.command, [...repositoryDeliveryConfig.args, requestPath], {
+    execResult = await execSupervisedCommand(repositoryDeliveryConfig.command, [...repositoryDeliveryConfig.args, requestPath], {
       cwd: projectRoot,
       timeout: Number(params.repositoryDeliveryTimeoutMs || 120000),
       maxBuffer: 2 * 1024 * 1024,
@@ -1482,6 +1461,9 @@ async function runRepositoryDeliveryAdapter(dir: string, status: any, params: an
 }
 
 async function finalizeRepositoryDeliveryState(dir: string, status: any, params: any) {
+  if (["final_validated", "council_validated"].includes(String(status?.phase || ""))) {
+    await cycleStatus(dir, { repositoryDeliverySourcePhase: status.phase });
+  }
   const delivery = await runRepositoryDeliveryAdapter(dir, status, params);
   if (delivery.localOnly) {
     const phase = delivery.classification === "success" ? "closed_success" : "closed_partial";
@@ -1750,7 +1732,10 @@ async function refreshLaunchedImplementationStatus(dir: string, status: any) {
   const runnerPid = Number(session.runnerPid || session.pid || 0);
   if (exitCode === null && String(session.status || '').toLowerCase() === 'running' && runnerPid > 0) {
     let runnerAlive = true;
-    try { process.kill(runnerPid, 0); } catch { runnerAlive = false; }
+    try {
+      const identity = await readProcessIdentity(runnerPid);
+      runnerAlive = session.runnerIdentity ? sameProcess(session.runnerIdentity, identity) : Boolean(identity);
+    } catch { runnerAlive = false; }
     const heartbeatPath = String(session.heartbeatPath || '');
     const heartbeatStat = heartbeatPath ? await stat(heartbeatPath).catch(() => null) : null;
     const heartbeatAgeMs = heartbeatStat ? Date.now() - heartbeatStat.mtimeMs : null;
@@ -1931,9 +1916,7 @@ async function fileInfo(path: string) {
 }
 
 async function textTail(path: string, max = 40000) {
-  const text = await readTextIfExists(path);
-  if (!text) return "";
-  return text.length <= max ? text : text.slice(text.length - max);
+  return readTextTail(path, max);
 }
 
 function runtimeTimelineFromText(label: string, text: string) {
@@ -1998,7 +1981,7 @@ async function runtimeGitSnapshot(projectRoot: string) {
   };
 }
 
-async function runtimeArtifacts(dir: string, status: any, stdoutTail: string, stderrTail: string) {
+async function runtimeArtifacts(dir: string, status: any) {
   const paths = new Set<string>();
   for (const p of [status?.implementationStdout, status?.implementationStderr, status?.correctionsStdout, status?.correctionsStderr, status?.directImplementationStatus, status?.directCorrectionsStatus, status?.outputPath]) if (p) paths.add(String(p));
   const runFiles = (await readdir(dir).catch(() => [])).filter((x) => /status|implementation|artifact|evidence|summary|validation|observer|runtime|timeline|alerts/i.test(x)).map((x) => join(dir, x));
@@ -2038,7 +2021,7 @@ async function writeRichRuntimeObservation(dir: string, status: any, sessions: a
   const timeline = runtimeTimelineFromText("stdout", stdoutTail).concat(runtimeTimelineFromText("stderr", stderrTail)).slice(-300);
   const process = await runtimeProcessSnapshot(status, sessions);
   const git = await runtimeGitSnapshot(effectiveImplementationRoot(status));
-  const artifacts = await runtimeArtifacts(dir, status, stdoutTail, stderrTail);
+  const artifacts = await runtimeArtifacts(dir, status);
   const alerts = runtimeAlerts(status, process, git, timeline, artifacts);
   const observation = { generatedAt: new Date().toISOString(), phase: status?.phase || null, owner: status?.owner || null, nextAction: status?.nextAction || null, process, git, artifacts, timelineTail: timeline.slice(-80), alerts };
   const observationPath = join(dir, "runtime_observation.json");
@@ -2079,45 +2062,12 @@ async function writeFinalValidationPack(dir: string, project: string, runId: str
   return { deliverySummary, artifactManifest, observerSessions, testEvidence, riskChecklist };
 }
 
-function defaultValidationConfig() {
-  return {
-    commands: "auto" as any,
-    commandTimeoutMs: 120000,
-    preserveDiff: true,
-    strictDirty: false,
-    allowedDirty: [] as string[],
-    ignoredDirty: [".claude-implementation/", "node_modules/", "dist/", "build/", "coverage/"] as string[],
-    forbiddenPaths: [".env", ".env.local", "config.json.test-backup"] as string[],
-    protectedDirty: [".env", ".env.local"] as string[],
-    portsMustBeFree: [] as number[],
-    requiredOpenApiPaths: [] as string[],
-    stall: { enabled: true, autoStop: true, quietSeconds: 900 },
-  };
-}
-
-function mergeValidationConfig(base: any, extra: any) {
-  if (!extra || typeof extra !== "object") return base;
-  return {
-    ...base,
-    ...extra,
-    commands: Array.isArray(extra.commands) || extra.commands === "auto" ? extra.commands : base.commands,
-    allowedDirty: Array.isArray(extra.allowedDirty) ? extra.allowedDirty : base.allowedDirty,
-    ignoredDirty: Array.isArray(extra.ignoredDirty) ? extra.ignoredDirty : base.ignoredDirty,
-    forbiddenPaths: Array.isArray(extra.forbiddenPaths) ? extra.forbiddenPaths : base.forbiddenPaths,
-    protectedDirty: Array.isArray(extra.protectedDirty) ? extra.protectedDirty : base.protectedDirty,
-    portsMustBeFree: Array.isArray(extra.portsMustBeFree) ? extra.portsMustBeFree : base.portsMustBeFree,
-    requiredOpenApiPaths: Array.isArray(extra.requiredOpenApiPaths) ? extra.requiredOpenApiPaths : base.requiredOpenApiPaths,
-    stall: { ...(base.stall || {}), ...(extra.stall || {}) },
-  };
-}
-
 async function loadProjectValidationConfig(project: string, status: any, params: any = {}, borrowedProjectRoot: any = null) {
   const lexicalProjectWikiPath = resolveTrustedProjectWikiPath(params.project || status?.project || project, params.projectWikiPath, status?.projectWikiPath);
   const pinnedProjectWiki = await pinContainedWikiDir(project, lexicalProjectWikiPath);
   const projectWikiPath = pinnedProjectWiki?.realPath || "";
   const ownsProjectRoot = !borrowedProjectRoot;
   const pinnedProjectRoot = borrowedProjectRoot || await pinTrustedProjectRoot(String(params.projectRoot || status?.projectRoot || ""));
-  const projectRoot = pinnedProjectRoot?.realPath || "";
   if (pinnedProjectRoot) {
     const readyFile = String(process.env.DEVELOPMENT_CYCLE_TEST_PINNED_PROJECT_ROOT_READ_READY_FILE || "").trim();
     if (readyFile) await writeFile(readyFile, "ready\n");
@@ -2144,8 +2094,8 @@ async function loadProjectValidationConfig(project: string, status: any, params:
     try {
       config = mergeValidationConfig(config, JSON.parse(loaded.text));
       path = loaded.path;
-    } catch {
-      return { config, path, projectWikiPath, rejectedValidationConfigPath: requested, error: "validation_config_invalid_json" };
+    } catch (error: any) {
+      return { config, path, projectWikiPath, rejectedValidationConfigPath: requested, error: error?.message === "validation_config_invalid_shape" ? error.message : "validation_config_invalid_json" };
     }
     return { config, path, projectWikiPath };
   }
@@ -2157,7 +2107,11 @@ async function loadProjectValidationConfig(project: string, status: any, params:
       try {
         config = mergeValidationConfig(config, JSON.parse(loaded.text));
         path = loaded.path;
-      } catch {}
+      } catch (error: any) {
+        return { config, path, projectWikiPath, rejectedValidationConfigPath: defaultCandidate, error: error?.message === "validation_config_invalid_shape" ? error.message : "validation_config_invalid_json" };
+      }
+    } else if (await lstat(defaultCandidate).catch(() => null)) {
+      return { config, path, projectWikiPath, rejectedValidationConfigPath: defaultCandidate, error: loaded.error };
     }
   }
   return { config, path, projectWikiPath };
@@ -2167,35 +2121,14 @@ async function loadProjectValidationConfig(project: string, status: any, params:
   }
 }
 
-function validationRuleMatches(path: string, rules: any[]) {
-  const p = String(path || "").replace(/^\.\//, "");
-  for (const raw of rules || []) {
-    const rule = String(raw || "").replace(/^\.\//, "");
-    if (!rule) continue;
-    if (rule.endsWith("/")) { if (p === rule.slice(0, -1) || p.startsWith(rule)) return true; }
-    else if (p === rule) return true;
-  }
-  return false;
-}
-
-function parseGitPorcelain(text: string) {
-  return String(text || "").split(/\r?\n/).map((line) => {
-    if (!line.trim()) return null;
-    const status = line.slice(0, 2);
-    let path = line.slice(3).trim();
-    if (path.includes(" -> ")) path = path.split(" -> ").pop() || path;
-    return { status, path };
-  }).filter(Boolean) as any[];
-}
-
 async function execValidationCommand(command: string, cwd: string, timeoutMs: number) {
   const startedAt = new Date().toISOString();
   const started = Date.now();
   try {
-    const res = await execFileAsync("sh", ["-lc", command], { cwd, timeout: timeoutMs, maxBuffer: 4 * 1024 * 1024 });
+    const res = await execSupervisedCommand("sh", ["-lc", command], { cwd, timeout: timeoutMs, maxBuffer: 4 * 1024 * 1024 });
     return { ok: true, command, exitCode: 0, startedAt, durationMs: Date.now() - started, stdout: res.stdout || "", stderr: res.stderr || "" };
   } catch (err: any) {
-    return { ok: false, command, exitCode: Number.isFinite(Number(err?.code)) ? Number(err.code) : null, signal: err?.signal || null, timedOut: /timed out|timeout/i.test(String(err?.message || "")) || err?.killed === true, startedAt, durationMs: Date.now() - started, stdout: err?.stdout || "", stderr: err?.stderr || "", error: String(err?.message || err) };
+    return { ok: false, command, exitCode: Number.isFinite(Number(err?.code)) ? Number(err.code) : null, signal: err?.signal || null, timedOut: [124, 137].includes(Number(err?.code)) || /timed out|timeout/i.test(String(err?.message || "")) || err?.killed === true, startedAt, durationMs: Date.now() - started, stdout: err?.stdout || "", stderr: err?.stderr || "", error: String(err?.message || err) };
   }
 }
 
@@ -2251,7 +2184,8 @@ async function requiredOpenApiPathCheck(projectRoot: string, paths: any[]) {
 
 async function dirtyWorktreeCheck(projectRoot: string, config: any) {
   const failures: any[] = [];
-  const res = await execValidationCommand("git status --porcelain", projectRoot, 30000);
+  const res = await execValidationCommand("git status --porcelain -z", projectRoot, 30000);
+  if (!res.ok) return { entries: [], ignored: [], considered: [], unexpected: [], failures: [{ check: "dirtyWorktree", severity: "stop", reason: res.error }] };
   const entries = parseGitPorcelain(res.stdout || "");
   const ignored = entries.filter((e) => validationRuleMatches(e.path, config.ignoredDirty || []));
   const considered = entries.filter((e) => !validationRuleMatches(e.path, config.ignoredDirty || []));
@@ -2290,13 +2224,14 @@ async function runExternalFinalValidation(dir: string, status: any, params: any 
   const loaded = pinnedSourceProjectRoot
     ? await loadProjectValidationConfig(project, status, { ...params, projectRoot: requestedSourceProjectRoot }, pinnedSourceProjectRoot)
     : { config: defaultValidationConfig(), path: "default", rejectedValidationConfigPath: null, error: "project_root_not_trusted_git_checkout" };
-  const config = loaded.config;
+  const config: ValidationConfig & { resolvedCommands?: string[] } = loaded.config;
   await mkdir(dir, { recursive: true });
   const stdoutPath = join(dir, "validation_stdout.log");
   const stderrPath = join(dir, "validation_stderr.log");
   const resultPath = join(dir, "validation_result.json");
   const summaryPath = join(dir, "validation_summary.md");
   const failures: any[] = [];
+  if (loaded.error) failures.push({ check: "validationConfig", severity: "stop", reason: loaded.error });
   const commandResults: any[] = [];
   let preservedDiff: any = null;
 
@@ -2309,9 +2244,9 @@ async function runExternalFinalValidation(dir: string, status: any, params: any 
     const delayMs = Number(process.env.DEVELOPMENT_CYCLE_TEST_VALIDATION_ROOT_DELAY_MS || 0);
     if (Number.isFinite(delayMs) && delayMs > 0) await sleep(delayMs);
   }
-  if (rootStat?.isDirectory() && config.preserveDiff !== false) preservedDiff = await preserveValidationDiff(dir, validationRoot, `validation-${reason}`);
+  if (rootStat?.isDirectory() && !loaded.error && config.preserveDiff !== false) preservedDiff = await preserveValidationDiff(dir, validationRoot, `validation-${reason}`);
 
-  if (rootStat?.isDirectory()) {
+  if (rootStat?.isDirectory() && !loaded.error) {
     const validationCommands = await inferValidationCommands(validationRoot, config);
     config.resolvedCommands = validationCommands;
     for (const command of validationCommands) {
@@ -2326,17 +2261,30 @@ async function runExternalFinalValidation(dir: string, status: any, params: any 
     failures.push(...await requiredOpenApiPathCheck(validationRoot, config.requiredOpenApiPaths || []));
   }
 
+  let validationEvidence: any = null;
+  if (failures.length === 0) {
+    try {
+      validationEvidence = {
+        attemptId: String(status?.correctionsAttemptId || status?.implementationAttemptId || ""),
+        implementationRoot,
+        generatedAt: new Date().toISOString(),
+        identity: await captureCheckoutIdentity(validationRoot),
+      };
+    } catch (error: any) {
+      failures.push({ check: "validationIdentity", severity: "stop", reason: String(error?.message || error) });
+    }
+  }
   const stop = failures.some((f) => f.severity === "stop");
   const ok = failures.length === 0;
   const decision = ok ? "go" : stop ? "stop" : "revise";
-  const result = { ok, decision, reason, project, runId, generatedAt: new Date().toISOString(), projectRoot, outputPath: status?.outputPath || null, implementationRoot, validationConfigPath: loaded.path, rejectedValidationConfigPath: loaded.rejectedValidationConfigPath || null, error: loaded.error || null, config, preservedDiff, commandResults, failures };
+  const result = { ok, decision, reason, project, runId, generatedAt: new Date().toISOString(), projectRoot, outputPath: status?.outputPath || null, implementationRoot, validationEvidence, validationConfigPath: loaded.path, rejectedValidationConfigPath: loaded.rejectedValidationConfigPath || null, error: loaded.error || null, config, preservedDiff, commandResults, failures };
   await saveJson(resultPath, result);
   await writeFile(stdoutPath, commandResults.map((r) => `# ${r.command}\n\n${r.stdout || ""}`).join("\n\n---\n\n"));
   await writeFile(stderrPath, commandResults.map((r) => `# ${r.command}\n\n${r.stderr || r.error || ""}`).join("\n\n---\n\n"));
   await writeFile(summaryPath, `# Mechanical final validation\n\nProject: ${project}\nRun: ${runId}\nReason: ${reason}\nDecision: ${decision}\nOK: ${ok}\nGenerated: ${result.generatedAt}\nConfig: ${loaded.path}\nRejected config: ${loaded.rejectedValidationConfigPath || "none"}${loaded.error ? `\nConfig error: ${loaded.error}` : ""}\n\n## Commands\n\n${commandResults.map((r) => `- ${r.ok ? "PASS" : "FAIL"}: ${r.command}${r.timedOut ? " (timed out)" : ""}`).join("\n") || "none"}\n\n## Failures\n\n${failures.length ? failures.map((f) => `- [${f.severity || "revise"}] ${f.check}: ${f.reason || f.path || f.command}`).join("\n") : "none"}\n\n## Preserved diff\n\n${preservedDiff ? `- worktree: ${preservedDiff.worktreePatch} (${preservedDiff.worktreeBytes} bytes)\n- index: ${preservedDiff.indexPatch} (${preservedDiff.indexBytes} bytes)` : "not preserved"}\n`);
   const phase = ok ? "external_validation_passed" : decision === "stop" ? "external_validation_stopped" : "external_validation_needs_revision";
   const nextAction = ok ? "Mechanical validation passed; human/AI final review may record go or close when appropriate." : decision === "stop" ? "Stop and report the validation blocker to the operator." : "Send delta-only corrections to Implementation or apply a minimal manual fix, then rerun run_final_validation.";
-  const next = await cycleStatus(dir, { phase, owner: "main", ok, externalValidationDecision: decision, externalValidation: resultPath, validationSummary: summaryPath, validationStdout: stdoutPath, validationStderr: stderrPath, validationConfigPath: loaded.path, rejectedValidationConfigPath: loaded.rejectedValidationConfigPath || null, validationConfigError: loaded.error || null, nextAction });
+  const next = await cycleStatus(dir, { phase, owner: "main", ok, validationEvidence, councilReviewSummary: "", councilReviewSynthesis: "", councilReviewNeedsCorrections: null, councilDecision: null, councilReviewFindings: [], externalValidationDecision: decision, externalValidation: resultPath, validationSummary: summaryPath, validationStdout: stdoutPath, validationStderr: stderrPath, validationConfigPath: loaded.path, rejectedValidationConfigPath: loaded.rejectedValidationConfigPath || null, validationConfigError: loaded.error || null, nextAction });
   return { ok, decision, project, runId, dir, phase: next.phase, validationResult: resultPath, validationSummary: summaryPath, validationStdout: stdoutPath, validationStderr: stderrPath, failures, commandResults: commandResults.map((r) => ({ command: r.command, ok: r.ok, exitCode: r.exitCode, timedOut: r.timedOut || false, durationMs: r.durationMs })), preservedDiff, rejectedValidationConfigPath: loaded.rejectedValidationConfigPath || null, validationConfigError: loaded.error || null, status: next };
   } finally {
     await pinnedImplementationRoot?.handle.close().catch(() => null);
@@ -2463,7 +2411,7 @@ async function runCouncilCodeReview(dir: string, status: any, params: any = {}) 
   if (!projectRoot) return { ok: false, skipped: true, reason: "implementation_root_missing" };
   if (status?.councilReviewSummary && await stat(String(status.councilReviewSummary)).catch(() => null)) return { ok: true, skipped: true, reason: "council_review_already_done", summaryPath: status.councilReviewSummary, status };
   const input = await buildCouncilCodeReviewTask(dir, project, runId, { ...status, projectRoot });
-  const outputRoot = join(dir, "council-code-review");
+  const outputRoot = join(dir, "council-code-review", randomUUID());
   await mkdir(outputRoot, { recursive: true });
   const stdoutPath = join(dir, "council-code-review.stdout");
   const stderrPath = join(dir, "council-code-review.stderr");
@@ -2475,7 +2423,7 @@ async function runCouncilCodeReview(dir: string, status: any, params: any = {}) 
   const startedAt = new Date().toISOString();
   let execResult: any;
   try {
-    execResult = await execFileAsync(scriptPath, args, { cwd: projectRoot, env: { ...process.env, OCTOPUS_PROJECT_DIR: projectRoot, OCTOPUS_COUNCIL_AUTO_PROVIDERS: councilProviders, OCTOPUS_CODEX_MODEL: councilCodexModel }, timeout: Number(params.councilTimeoutMs || 900000), maxBuffer: 8 * 1024 * 1024 });
+    execResult = await execSupervisedCommand(scriptPath, args, { cwd: projectRoot, env: { ...process.env, OCTOPUS_PROJECT_DIR: projectRoot, OCTOPUS_COUNCIL_AUTO_PROVIDERS: councilProviders, OCTOPUS_CODEX_MODEL: councilCodexModel }, timeout: Number(params.councilTimeoutMs || 900000), maxBuffer: 8 * 1024 * 1024 });
   } catch (err: any) {
     execResult = { failed: true, code: err?.code ?? null, signal: err?.signal ?? null, stdout: err?.stdout || "", stderr: err?.stderr || "", error: String(err?.message || err) };
   }
@@ -2487,11 +2435,16 @@ async function runCouncilCodeReview(dir: string, status: any, params: any = {}) 
   const councilDir = summaryPath ? summaryPath.replace(/\/summary\.json$/, "") : outputRoot;
   const synthesisPath = summaryPath ? join(councilDir, "synthesis.md") : "";
   const synthesis = synthesisPath ? await readTextIfExists(synthesisPath) : "";
-  const needsCorrections = councilNeedsCorrectionsText(synthesis || JSON.stringify(summary || {}));
+  const councilDecision = parseCouncilDecision(synthesis, summary?.decision || summary?.verdict);
+  const needsCorrections = councilDecision === "revise" || councilDecision === "stop";
   const findings = extractCouncilFindings(synthesis || JSON.stringify(summary || {}));
-  const ok = Boolean(summaryPath && summary?.status === "completed" && !execResult.failed);
-  const next = await cycleStatus(dir, { phase: ok ? (needsCorrections ? "council_review_needs_corrections" : "council_validated") : "council_review_failed", owner: "main", ok: ok && !needsCorrections, councilReviewStartedAt: startedAt, councilReviewCompletedAt: new Date().toISOString(), councilReviewSummary: summaryPath, councilReviewSynthesis: synthesisPath, councilReviewStdout: stdoutPath, councilReviewStderr: stderrPath, councilReviewInput: input.taskPath, councilReviewNeedsCorrections: needsCorrections, councilReviewFindings: findings, nextAction: needsCorrections ? "Auto-launch Implementation corrections from council feedback." : "Council review passed; write/read one-pager and close or deploy." });
-  return { ok, project, runId, summaryPath, synthesisPath, stdoutPath, stderrPath, inputPath: input.taskPath, needsCorrections, findings, synthesis: excerpt(synthesis, 12000), status: next, execFailed: Boolean(execResult.failed) };
+  const ok = Boolean(summaryPath && summary?.status === "completed" && !execResult.failed && councilDecision !== "unknown");
+  const nextAction = !ok ? "Resolve the failed or inconclusive council review before acceptance."
+    : councilDecision === "stop" ? "Council rejected delivery; inspect findings before requesting corrections."
+    : needsCorrections ? "Launch Implementation corrections from council feedback."
+    : "Council review passed; write/read one-pager and close or deploy.";
+  const next = await cycleStatus(dir, { phase: ok ? (needsCorrections ? "council_review_needs_corrections" : "council_validated") : "council_review_failed", owner: "main", ok: ok && !needsCorrections, councilDecision, councilReviewStartedAt: startedAt, councilReviewCompletedAt: new Date().toISOString(), councilReviewSummary: summaryPath, councilReviewSynthesis: synthesisPath, councilReviewStdout: stdoutPath, councilReviewStderr: stderrPath, councilReviewInput: input.taskPath, councilReviewNeedsCorrections: needsCorrections, councilReviewFindings: findings, nextAction });
+  return { ok, decision: councilDecision, project, runId, summaryPath, synthesisPath, stdoutPath, stderrPath, inputPath: input.taskPath, needsCorrections, findings, synthesis: excerpt(synthesis, 12000), status: next, execFailed: Boolean(execResult.failed) };
 }
 
 async function writeCouncilOnePager(dir: string, status: any, council: any, params: any = {}) {
@@ -2504,7 +2457,9 @@ async function writeCouncilOnePager(dir: string, status: any, council: any, para
   const synthesis = council?.synthesis || (status?.councilReviewSynthesis ? await readTextIfExists(String(status.councilReviewSynthesis)) : "");
   const findings = council?.findings || status?.councilReviewFindings || extractCouncilFindings(synthesis);
   const decision = council?.needsCorrections ? "Corrections required before ship" : council?.ok ? "Council validated" : "Council review failed or inconclusive";
-  const nextSteps = council?.needsCorrections ? "Implementation corrections were/will be launched automatically from the council feedback. Re-run mechanical validation and council review after corrections." : "Ready for human deploy/commit decision after checking the worktree and excluding local runtime artifacts.";
+  const nextSteps = !council?.ok || council?.decision === "stop" ? "Inspect the failed or rejected review before any acceptance or retry."
+    : council?.needsCorrections ? "Run corrections from council feedback, then repeat mechanical validation and council review."
+    : "Ready for human deploy/commit decision after checking the worktree and excluding local runtime artifacts.";
   const content = `# ${project} — code review one-pager\n\nRun: ${runId}\nGenerated: ${new Date().toISOString()}\nDecision: **${decision}**\n\n## What the work was\n\nImplement the approved development-cycle plan for ${project}. The council reviewed the resulting code diff, not the planning document.\n\n## What changed\n\n\`\`\`text\n${excerpt(gitStat, 3000)}\n\`\`\`\n\nChanged files:\n\n\`\`\`text\n${excerpt(gitNames, 2000)}\n\`\`\`\n\n## Mechanical validation\n\n${excerpt(validation, 2500)}\n\n## Council verdict\n\n${excerpt(synthesis, 4500)}\n\n## Key findings\n\n${findings.length ? findings.map((f: string) => `- ${f}`).join("\n") : "- No key findings extracted."}\n\n## Next steps\n\n${nextSteps}\n\n## Artifacts\n\n- Council summary: ${council?.summaryPath || status?.councilReviewSummary || "not available"}\n- Council synthesis: ${council?.synthesisPath || status?.councilReviewSynthesis || "not available"}\n- Mechanical validation: ${status?.externalValidation || "not available"}\n- Run directory: ${dir}\n`;
   const projectWikiPath = await resolveContainedWikiDir(project, String(params.projectWikiPath || status?.projectWikiPath || ""));
   if (!projectWikiPath) {
@@ -2537,129 +2492,8 @@ async function writeCouncilOnePager(dir: string, status: any, council: any, para
   return { path: out, content, status: next };
 }
 
-async function deliverCycleMessageNow(params: any, title: string, text: string) {
-  const enabled = params.notify === undefined
-    ? developmentCycleConfig.notifications.enabled
-    : Boolean(params.notify);
-  if (!enabled) return { ok: true, skipped: true, reason: "notifications_disabled" };
-
-  const channel = String(params.notificationChannel || developmentCycleConfig.notifications.channel || "").trim();
-  const target = String(params.notificationTarget || developmentCycleConfig.notifications.target || "").trim();
-  const account = String(params.notificationAccount || developmentCycleConfig.notifications.account || "").trim();
-  const deliveryJson = String(params.notificationDeliveryJson || developmentCycleConfig.notifications.deliveryJson || "").trim();
-  if (!channel || !target) {
-    return { ok: true, skipped: true, reason: "notification_destination_missing", channel, target };
-  }
-
-  const gatewayUrl = String(
-    params.notificationGatewayUrl
-      || process.env.DEVELOPMENT_CYCLE_GATEWAY_URL
-      || process.env.OPENCLAW_GATEWAY_URL
-      || "http://127.0.0.1:18789",
-  ).trim().replace(/\/$/, "");
-  const gatewayToken = String(params.notificationGatewayToken || process.env.OPENCLAW_GATEWAY_TOKEN || "").trim();
-  const payload = buildGatewayMessageInvokePayload({
-    channel,
-    target,
-    message: `${title}\n\n${excerpt(text, 2500)}`,
-    account: account || undefined,
-    deliveryJson: deliveryJson || undefined,
-    dryRun: params.notificationDryRun === true,
-  });
-
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 15000);
-  try {
-    const headers: Record<string, string> = { "Content-Type": "application/json" };
-    if (gatewayToken) headers.Authorization = `Bearer ${gatewayToken}`;
-    const response = await fetch(`${gatewayUrl}/tools/invoke`, {
-      method: "POST",
-      headers,
-      body: JSON.stringify(payload),
-      signal: controller.signal,
-    });
-    const raw = await response.text();
-    let parsed: any = null;
-    try { parsed = raw ? JSON.parse(raw) : null; } catch { /* keep raw for diagnostics */ }
-    if (!response.ok) {
-      return {
-        ok: false,
-        channel,
-        target,
-        account: account || null,
-        error: `gateway_message_http_${response.status}`,
-        response: excerpt(raw, 2000),
-      };
-    }
-    const toolResult = parsed?.result;
-    if (toolResult && toolResult.ok === false) {
-      return {
-        ok: false,
-        channel,
-        target,
-        account: account || null,
-        error: String(toolResult.error || "gateway_message_tool_failed"),
-        response: parsed,
-      };
-    }
-    return { ok: true, channel, target, account: account || null, response: parsed ?? excerpt(raw, 2000) };
-  } catch (err: any) {
-    return { ok: false, channel, target, account: account || null, error: String(err?.message || err) };
-  } finally {
-    clearTimeout(timeout);
-  }
-}
-
-
-
-type DeferredCycleMessage = {
-  params: any;
-  title: string;
-  text: string;
-};
-
-const cycleMessageDeliveryQueue = createDeferredDeliveryQueue<DeferredCycleMessage, any>(
-  async (job) => await deliverCycleMessageNow(job.params, job.title, job.text),
-);
-
 async function sendCycleMessage(params: any, title: string, text: string) {
-  const enabled = params.notify === undefined
-    ? developmentCycleConfig.notifications.enabled
-    : Boolean(params.notify);
-  if (!enabled) return { ok: true, skipped: true, reason: "notifications_disabled" };
-
-  const channel = String(params.notificationChannel || developmentCycleConfig.notifications.channel || "").trim();
-  const target = String(params.notificationTarget || developmentCycleConfig.notifications.target || "").trim();
-  if (!channel || !target) {
-    return { ok: true, skipped: true, reason: "notification_destination_missing", channel, target };
-  }
-
-  // Validate structured delivery JSON before acknowledging the queued notification.
-  buildGatewayMessageInvokePayload({
-    channel,
-    target,
-    message: `${title}\n\n${excerpt(text, 2500)}`,
-    account: String(params.notificationAccount || developmentCycleConfig.notifications.account || "").trim() || undefined,
-    deliveryJson: String(params.notificationDeliveryJson || developmentCycleConfig.notifications.deliveryJson || "").trim() || undefined,
-    dryRun: params.notificationDryRun === true,
-  });
-
-  const onResult = typeof params.__notificationResultCallback === "function"
-    ? params.__notificationResultCallback
-    : undefined;
-  const queuedAt = new Date().toISOString();
-  const queued = cycleMessageDeliveryQueue.enqueue({
-    payload: { params: { ...params, __notificationResultCallback: undefined }, title, text },
-    onResult,
-  });
-  return {
-    ok: true,
-    queued: true,
-    queuedAt,
-    channel,
-    target,
-    pending: queued.pending,
-  };
+  return cycleMessageDeliveryQueue.send(params, title, text);
 }
 
 async function clearActiveImplementationAttempt(dir: string) {
@@ -2673,6 +2507,10 @@ async function clearActiveImplementationAttempt(dir: string) {
     implementationStderr: null,
     observerObservationId: null,
     implementationLaunch: null,
+    requiredMechanicalValidation: false,
+    validationEvidence: null,
+    externalValidationDecision: null,
+    repositoryDeliverySourcePhase: null,
     implementationAttemptResetAt: new Date().toISOString(),
   });
 }
@@ -2743,13 +2581,14 @@ async function maybeRunCouncilEndgate(dir: string, status: any, params: any = {}
   if (status?.councilReviewSummary) return null;
   const council = await runCouncilCodeReview(dir, status, params);
   const onePager = await writeCouncilOnePager(dir, council.status || status, council, params);
-  const title = `${cleanId(params.project || status?.project || "project")} council review: ${council.needsCorrections ? "corrections needed" : "validated"}`;
-  const text = `One-pager: ${onePager.path}\nCouncil summary: ${council.summaryPath || "not available"}\nDecision: ${council.needsCorrections ? "corrections needed; launching automatically" : "validated"}\nFindings:\n${(council.findings || []).slice(0, 6).map((f: string) => `- ${f}`).join("\n") || "- none extracted"}`;
+  const verdict = !council.ok ? "failed or inconclusive" : council.decision === "stop" ? "rejected" : council.needsCorrections ? "corrections needed" : "validated";
+  const title = `${cleanId(params.project || status?.project || "project")} council review: ${verdict}`;
+  const text = `One-pager: ${onePager.path}\nCouncil summary: ${council.summaryPath || "not available"}\nDecision: ${verdict}\nFindings:\n${(council.findings || []).slice(0, 6).map((f: string) => `- ${f}`).join("\n") || "- none extracted"}`;
   const notice = await sendCycleNotice(params, String(params.runId || status?.runId || "run"), title, text).catch((e: any) => ({ ok: false, error: String(e?.message || e) }));
   const notification = await sendCycleMessage(params, title, text);
   let corrections: any = null;
   let effectiveStatus = onePager.status || council.status || status;
-  if (council.needsCorrections && params.autoCouncilCorrections !== false) {
+  if (council.ok && council.decision === "revise" && params.autoCouncilCorrections !== false) {
     corrections = await launchCouncilCorrections(dir, effectiveStatus, council, params);
     effectiveStatus = corrections.status || effectiveStatus;
   }
@@ -2791,11 +2630,14 @@ async function stopDirectImplementationRunnerSession(statusPath: string, reason:
   if (!processGroupId && !runnerPid) return { ok: false, skipped: true, reason: "runner_pid_missing", statusPath, session };
 
   const signals: any[] = [];
-  if (processGroupId) signals.push(signalPid(-processGroupId, "SIGTERM"));
-  if (runnerPid && runnerPid !== processGroupId) signals.push(signalPid(runnerPid, "SIGTERM"));
-  await sleep(5000);
-  if (processGroupId) signals.push(signalPid(-processGroupId, "SIGKILL"));
-  if (runnerPid && runnerPid !== processGroupId) signals.push(signalPid(runnerPid, "SIGKILL"));
+  if (["completed", "failed", "stopped"].includes(String(session.status)) && session.launchState === "exited") return { ok: true, skipped: true, reason: "runner_already_exited", statusPath };
+  const verified = await stopVerifiedProcessGroup(session.runnerIdentity, readProcessIdentity, (target, signal) => {
+    const result = signalPid(target, signal);
+    signals.push(result);
+    if (!result.ok && result.error !== "ESRCH") throw new Error(result.error);
+    return true;
+  });
+  if (!verified.ok) return { ...verified, statusPath };
 
   const stoppedAt = new Date().toISOString();
   if (session.exitCodePath) await writeFile(String(session.exitCodePath), "143\n").catch(() => null);
@@ -2824,6 +2666,7 @@ async function stopLaunchedImplementation(dir: string, status: any, reason: stri
   if (!targets.length) return { ok: false, stopped: [], reason: "no_direct_implementation_status_paths" };
   const stopped = [];
   for (const target of targets) stopped.push(await stopDirectImplementationRunnerSession(target, reason));
+  if (stopped.some((result) => !result.ok)) return { ok: false, stopped, status };
   const stoppedAt = new Date().toISOString();
   const observerFinalization = await finalizeObserverSessions(dir, status, "stopped");
   const next = await cycleStatus(dir, {
@@ -2905,14 +2748,14 @@ function liveRunPhase(phase: any): string {
   return LIVE_RUN_PHASES.includes(p) ? p : "";
 }
 
-async function projectCycle(params: any) {
+async function projectCycle(params: CycleParameters | null | undefined): Promise<CycleResult> {
   // Defense-in-depth: host SDKs validate arguments before execute, but direct
   // or future invocations with null/undefined must behave like {} (the plugin
   // already defaults every field at runtime), not throw an unhandled trace.
   params ??= {};
   const supported = [...ACTIONS];
   const action = params.action || "status";
-  if (!supported.includes(action)) return { ok: false, error: "unknown_action", action, supported };
+  if (!(supported as readonly string[]).includes(action)) return { ok: false, error: "unknown_action", action, supported };
 
   const rawProject = params.project || "default";
   let project = cleanId(rawProject);
@@ -3013,7 +2856,7 @@ async function projectCycle(params: any) {
 
   const transition = checkActionTransition(action, status?.phase);
   if (!transition.ok) {
-    return { ok: false, project, runId, dir, ...transition, nextAction: "Inspect status and invoke only the action allowed for the current phase." };
+    return { project, runId, dir, ...transition, nextAction: "Inspect status and invoke only the action allowed for the current phase." };
   }
 
   if (action === "resume_finalization") {
@@ -3308,6 +3151,8 @@ Create or validate the implementation plan only. Do not implement. The plan must
   }
 
   if (action === "request_final_validation") {
+    const validationError = await requiredValidationError(status);
+    if (validationError) return { ok: false, error: validationError, project, runId, dir };
     const validationPack = await writeFinalValidationPack(dir, project, runId, status);
     const names = ["implementation_plan.md", "delivery_summary.md", "test_evidence.md", "risk_checklist.md", "observer_sessions.json", "artifact_manifest.json", "implementation_delivery_error.txt"];
     const parts: string[] = [];
@@ -3349,7 +3194,11 @@ Create or validate the implementation plan only. Do not implement. The plan must
     }
     if (!String(validationText).trim()) return { ok: false, error: "validationText_or_validationPath_required", project, runId, dir };
     const parsedDecision = parseFinalDecision(validationText);
-    if (!parsedDecision.ok) return { ok: false, project, runId, dir, ...parsedDecision };
+    if (!parsedDecision.ok) return { project, runId, dir, ...parsedDecision };
+    if (parsedDecision.decision === "go") {
+      const validationError = await requiredValidationError(status);
+      if (validationError) return { ok: false, error: validationError, project, runId, dir };
+    }
     const file = join(dir, "final_validation_response.md");
     await writeFile(file, String(validationText));
     const phase = parsedDecision.decision === "go" ? "final_validated" : parsedDecision.decision === "stop" ? "stopped" : "final_revised";
@@ -3425,9 +3274,68 @@ Create or validate the implementation plan only. Do not implement. The plan must
     const next = await cycleStatus(dir, { phase: "closed", owner: "main", nextAction: "none" });
     return { ok: true, project, runId, dir, phase: next.phase };
   }
+  return { ok: false, error: "action_not_implemented", action };
 }
 
 
+
+const cycleParameters = Type.Object({
+  action: lit(...ACTIONS),
+  project: Type.String(),
+  runId: Type.Optional(Type.String()),
+  projectRoot: Type.Optional(Type.String({ description: "Real code checkout directory for Implementation. Must exist; do not infer it from the project wiki id." })),
+  projectWikiPath: Type.Optional(Type.String({ description: "Project documentation folder. Defaults under DEVELOPMENT_CYCLE_PROJECT_DOCS_ROOT and is separate from the source checkout." })),
+  direction: Type.Optional(Type.String()),
+  objective: Type.Optional(Type.String()),
+  planText: Type.Optional(Type.String()),
+  planPath: Type.Optional(Type.String()),
+  feedbackText: Type.Optional(Type.String()),
+  feedbackPath: Type.Optional(Type.String()),
+  deliveryText: Type.Optional(Type.String()),
+  deliveryPath: Type.Optional(Type.String()),
+  validationText: Type.Optional(Type.String()),
+  validationPath: Type.Optional(Type.String()),
+  outputPath: Type.Optional(Type.String()),
+  implementationAdapter: Type.Optional(lit("command", "octopus")),
+  readScopeMode: Type.Optional(lit("strict", "contextual")),
+  implementationCommand: Type.Optional(Type.String()),
+  force: Type.Optional(Type.Boolean()),
+  timeoutSeconds: Type.Optional(Type.Number()),
+  timeout_ms: Type.Optional(Type.Number()),
+  stopReason: Type.Optional(Type.String()),
+  interventionId: Type.Optional(Type.String({ description: "Pending implementation intervention id, when answering a human gate." })),
+  interventionResponse: Type.Optional(Type.String({ description: "Human decision for a pending implementation intervention. answer_intervention resumes the same run automatically." })),
+  reason: Type.Optional(Type.String()),
+  validationConfigPath: Type.Optional(Type.String()),
+  autoStopStalled: Type.Optional(Type.Boolean()),
+  autoRunFinalValidation: Type.Optional(Type.Boolean()),
+  autoRunCouncilReview: Type.Optional(Type.Boolean()),
+  autoCouncilCorrections: Type.Optional(Type.Boolean()),
+  autoCouncilCorrectionsMax: Type.Optional(Type.Number()),
+  councilDepth: Type.Optional(Type.String()),
+  councilMembers: Type.Optional(Type.Number()),
+  councilMaxCost: Type.Optional(Type.String()),
+  councilAutoProviders: Type.Optional(Type.String()),
+  councilProviders: Type.Optional(Type.String()),
+  councilCodexModel: Type.Optional(Type.String()),
+  councilTimeoutMs: Type.Optional(Type.Number()),
+  notify: Type.Optional(Type.Boolean({ description: "Send a lifecycle notification through an OpenClaw-supported channel." })),
+  notificationChannel: Type.Optional(Type.String({ description: "OpenClaw channel name, for example slack, telegram, whatsapp, signal, discord or matrix." })),
+  notificationTarget: Type.Optional(Type.String({ description: "Channel-specific recipient or destination." })),
+  notificationAccount: Type.Optional(Type.String({ description: "Optional OpenClaw channel account id." })),
+  notificationDeliveryJson: Type.Optional(Type.String({ description: "Optional JSON string parsed into the Gateway message tool's delivery argument." })),
+  notificationDryRun: Type.Optional(Type.Boolean()),
+  notifyExternalGate: Type.Optional(Type.Boolean()),
+  notifyMain: Type.Optional(Type.Boolean()),
+  emitMainUpdates: Type.Optional(Type.Boolean()),
+  dryRunMainUpdate: Type.Optional(Type.Boolean()),
+  mainUpdateTimeoutMs: Type.Optional(Type.Number()),
+  mainUpdateExecTimeoutMs: Type.Optional(Type.Number()),
+  stallQuietSeconds: Type.Optional(Type.Number()),
+  deliveryClassification: Type.Optional(lit("success", "partial", "invalid")),
+  repositoryBaseBranch: Type.Optional(Type.String()),
+  repositoryDeliveryTimeoutMs: Type.Optional(Type.Number()),
+});
 
 export default defineToolPlugin({
   id: "development-cycle",
@@ -3438,67 +3346,14 @@ export default defineToolPlugin({
       name: "development_cycle",
       label: "Development Cycle",
       description: "Supervised development-cycle control plane. It records plans, launches a configured implementation adapter, persists evidence, coordinates validation and corrections, and closes the cycle. Project documentation and the source checkout are separate paths. Observers, channel notifications, and external gates are optional.",
-      parameters: Type.Object({
-        action: lit(...ACTIONS),
-        project: Type.String(),
-        runId: Type.Optional(Type.String()),
-        projectRoot: Type.Optional(Type.String({ description: "Real code checkout directory for Implementation. Must exist; do not infer it from the project wiki id." })),
-        projectWikiPath: Type.Optional(Type.String({ description: "Project documentation folder. Defaults under DEVELOPMENT_CYCLE_PROJECT_DOCS_ROOT and is separate from the source checkout." })),
-        direction: Type.Optional(Type.String()),
-        objective: Type.Optional(Type.String()),
-        planText: Type.Optional(Type.String()),
-        planPath: Type.Optional(Type.String()),
-        feedbackText: Type.Optional(Type.String()),
-        feedbackPath: Type.Optional(Type.String()),
-        deliveryText: Type.Optional(Type.String()),
-        deliveryPath: Type.Optional(Type.String()),
-        validationText: Type.Optional(Type.String()),
-        validationPath: Type.Optional(Type.String()),
-        outputPath: Type.Optional(Type.String()),
-        implementationAdapter: Type.Optional(lit("command", "octopus")),
-        readScopeMode: Type.Optional(lit("strict", "contextual")),
-        implementationCommand: Type.Optional(Type.String()),
-        force: Type.Optional(Type.Boolean()),
-        timeoutSeconds: Type.Optional(Type.Number()),
-        timeout_ms: Type.Optional(Type.Number()),
-        stopReason: Type.Optional(Type.String()),
-        interventionId: Type.Optional(Type.String({ description: "Pending implementation intervention id, when answering a human gate." })),
-        interventionResponse: Type.Optional(Type.String({ description: "Human decision for a pending implementation intervention. answer_intervention resumes the same run automatically." })),
-        reason: Type.Optional(Type.String()),
-        validationConfigPath: Type.Optional(Type.String()),
-        autoStopStalled: Type.Optional(Type.Boolean()),
-        autoRunFinalValidation: Type.Optional(Type.Boolean()),
-        autoRunCouncilReview: Type.Optional(Type.Boolean()),
-        autoCouncilCorrections: Type.Optional(Type.Boolean()),
-        autoCouncilCorrectionsMax: Type.Optional(Type.Number()),
-        councilDepth: Type.Optional(Type.String()),
-        councilMembers: Type.Optional(Type.Number()),
-        councilMaxCost: Type.Optional(Type.String()),
-        councilAutoProviders: Type.Optional(Type.String()),
-        councilProviders: Type.Optional(Type.String()),
-        councilCodexModel: Type.Optional(Type.String()),
-        councilTimeoutMs: Type.Optional(Type.Number()),
-        notify: Type.Optional(Type.Boolean({ description: "Send a lifecycle notification through an OpenClaw-supported channel." })),
-        notificationChannel: Type.Optional(Type.String({ description: "OpenClaw channel name, for example slack, telegram, whatsapp, signal, discord or matrix." })),
-        notificationTarget: Type.Optional(Type.String({ description: "Channel-specific recipient or destination." })),
-        notificationAccount: Type.Optional(Type.String({ description: "Optional OpenClaw channel account id." })),
-        notificationDeliveryJson: Type.Optional(Type.String({ description: "Optional JSON string passed to openclaw message send --delivery." })),
-        notificationDryRun: Type.Optional(Type.Boolean()),
-        notifyExternalGate: Type.Optional(Type.Boolean()),
-        notifyMain: Type.Optional(Type.Boolean()),
-        emitMainUpdates: Type.Optional(Type.Boolean()),
-        dryRunMainUpdate: Type.Optional(Type.Boolean()),
-        mainUpdateTimeoutMs: Type.Optional(Type.Number()),
-        mainUpdateExecTimeoutMs: Type.Optional(Type.Number()),
-        stallQuietSeconds: Type.Optional(Type.Number()),
-        deliveryClassification: Type.Optional(lit("success", "partial", "invalid")),
-        repositoryBaseBranch: Type.Optional(Type.String()),
-        repositoryDeliveryTimeoutMs: Type.Optional(Type.Number()),
-      }),
+      parameters: cycleParameters,
       execute: async (params) => {
         cycleMessageDeliveryQueue.beginExecution();
         try {
           return await projectCycle(params);
+        } catch (error: any) {
+          if (String(error?.message || "").startsWith("state_unreadable:")) return { ok: false, error: "state_unreadable", detail: error.message, nextAction: "Preserve the damaged state and inspect status.previous.json before explicitly restoring it." };
+          throw error;
         } finally {
           cycleMessageDeliveryQueue.endExecution();
         }

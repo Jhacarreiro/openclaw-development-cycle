@@ -135,7 +135,7 @@ export function createRunnerSession(deps: RunnerSessionDeps) {
 
     const environment = renderShellEnvironment({ ...launchSpec.env, HOME: runtimeHome });
     const commandLine = renderShellCommand(launchSpec);
-    const boundedLogPath = resolve(dirname(fileURLToPath(import.meta.url)), "..", "bin", "bounded-log.py");
+    const boundedLogPath = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", "bin", "bounded-log.py");
     const runnerScript = `#!/bin/sh
 set -u
 ${environment}

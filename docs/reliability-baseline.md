@@ -10,7 +10,7 @@ The control plane is useful only if a linear cycle reliably reaches a recorded d
 - Offline and deterministic: no network services, paid APIs or real-world outcomes needed to judge the result.
 - Behavioral acceptance checks written and committed **before** any run, and never edited by the run.
 - Small enough to finish in one implementation attempt, with a few real design choices.
-- Executed through the normal `development_cycle` flow (`record_plan`, `start_implementation`, `reconcile`, `run_final_validation`, `record_final_validation`, `close`), never by launching the adapter directly.
+- Executed through the normal `development_cycle` flow (`record_plan`, `start_implementation`, `reconcile`, `run_final_validation`, `request_final_validation`, `record_final_validation`, then `finalize_delivery` when repository delivery is disabled, and `close`), never by launching the adapter directly.
 
 ## Per-run record
 

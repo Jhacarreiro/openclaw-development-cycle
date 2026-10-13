@@ -1,0 +1,7 @@
+{
+  "phase": "review_infrastructure_failed",
+  "implementationAdapter": "octopus",
+  "failureClass": "review_infrastructure_failed",
+  "updatedAt": "2026-01-02T11:00:00.000Z",
+  "automaticPlannerRecoveryCount": 0
+}

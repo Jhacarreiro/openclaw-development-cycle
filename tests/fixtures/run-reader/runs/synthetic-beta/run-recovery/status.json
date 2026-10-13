@@ -1,0 +1,7 @@
+{
+  "phase": "implementation_failed",
+  "implementationAdapter": "octopus",
+  "failureClass": "planner_reconsideration_contract_failure",
+  "updatedAt": "2026-01-01T11:00:00.000Z",
+  "automaticPlannerRecoveryCount": 1
+}

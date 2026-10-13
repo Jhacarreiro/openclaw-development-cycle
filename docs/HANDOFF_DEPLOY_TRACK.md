@@ -230,23 +230,6 @@ Do not implement:
 - Docker/Cloudflare/GitHub logic in core;
 - authorization heuristics.
 
-## First real adapter fixture: Shopping Assistant
-
-Use only as an adapter example, never hard-code it.
-
-`prepare` can model the proven supervised procedure:
-
-- validate clean repo + exact commit;
-- identify protected deployment paths;
-- describe timestamped backup;
-- materialize/build candidate artifacts outside production;
-- record current image IDs as rollback metadata;
-- define smoke checks.
-
-`execute` can perform authorized backup/materialization/image promotion/service recreation.
-
-`verify` can check health, release==commit, ownership/perms, app smoke and public edge.
-
 ## Tests required
 
 At minimum prove:

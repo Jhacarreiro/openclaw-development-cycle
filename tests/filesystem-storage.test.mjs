@@ -18,6 +18,23 @@ function unusedPid() {
   throw new Error("could not find an unused pid");
 }
 
+test("corrupt state is preserved and never replaced with an empty run", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "development-cycle-corrupt-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const store = createFilesystemStore(root);
+  const dir = store.runDir("demo", "run");
+  const previous = await store.updateStatus(dir, { phase: "planned", history: ["created"] });
+  await store.updateStatus(dir, { phase: "running" });
+  assert.deepEqual(await store.loadJson(join(dir, "status.previous.json")), previous);
+  for (const corrupt of ["{broken", "[]", "null", "42"]) {
+    await writeFile(join(dir, "status.json"), corrupt);
+    await assert.rejects(store.updateStatus(dir, { phase: "accepted" }), /state_unreadable/);
+    assert.equal(await readFile(join(dir, "status.json"), "utf8"), corrupt);
+    assert.deepEqual(await store.loadJson(join(dir, "status.previous.json")), previous);
+  }
+  assert.deepEqual(await store.loadJson(join(root, "missing.json")), {});
+});
+
 function runStatusWorker({ storeHref, root, dir, key, n, readyPath, gatePath }) {
   const source = `
     import { access, writeFile } from "node:fs/promises";
@@ -263,6 +280,22 @@ test("concurrent release calls cannot remove a replacement lock", async (t) => {
   await Promise.all([releaseA, releaseB]);
   assert.equal(await replacement.isHeld(), true);
   assert.match(await readFile(join(lockDir, "owner"), "utf8"), new RegExp(`^${process.pid}:`));
+});
+
+test("lock release retries transient filesystem contention without leaving a live owner behind", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "development-cycle-release-retry-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const lockDir = join(root, ".status.lock");
+  let tries = 0;
+  const held = await acquireLock(lockDir, 300, async (from, to) => {
+    if (++tries === 1) throw Object.assign(new Error("busy"), { code: "EPERM" });
+    return rename(from, to);
+  });
+  await held.release();
+  assert.equal(tries, 2);
+  const next = await acquireLock(lockDir, 300);
+  assert.equal(await next.isHeld(), true);
+  await next.release();
 });
 
 test("delayed release does not remove a replacement lock", async (t) => {

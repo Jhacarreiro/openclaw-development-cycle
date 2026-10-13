@@ -1,0 +1,32 @@
+import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
+import { mkdtemp, writeFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import test from "node:test";
+import { captureCheckoutIdentity, validationEvidenceMatches } from "../dist/runtime/validation-evidence.js";
+
+test("validation evidence detects tracked, staged, untracked and HEAD changes", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "development-cycle-identity-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const git = (...args) => execFileSync("git", args, { cwd: root, stdio: "pipe" });
+  git("init"); git("config", "user.email", "test@example.com"); git("config", "user.name", "Test");
+  await writeFile(join(root, "code.js"), "initial\n");
+  git("add", "."); git("commit", "-m", "initial");
+  const identity = await captureCheckoutIdentity(root);
+  const evidence = { attemptId: "attempt-1", implementationRoot: root, generatedAt: new Date().toISOString(), identity };
+  assert.equal(validationEvidenceMatches(evidence, "attempt-1", root, await captureCheckoutIdentity(root)), true);
+  assert.equal(validationEvidenceMatches(evidence, "attempt-2", root, identity), false);
+  assert.equal(validationEvidenceMatches(evidence, "attempt-1", root + "-other", identity), false);
+  await writeFile(join(root, "code.js"), "modified\n");
+  assert.notDeepEqual(await captureCheckoutIdentity(root), identity);
+  git("add", ".");
+  assert.notDeepEqual(await captureCheckoutIdentity(root), identity);
+  git("reset", "--hard", "HEAD");
+  await writeFile(join(root, "new.js"), "first\n");
+  const untracked = await captureCheckoutIdentity(root);
+  await writeFile(join(root, "new.js"), "second\n");
+  assert.notDeepEqual(await captureCheckoutIdentity(root), untracked);
+  git("add", "."); git("commit", "-m", "next");
+  assert.notEqual((await captureCheckoutIdentity(root)).head, identity.head);
+});

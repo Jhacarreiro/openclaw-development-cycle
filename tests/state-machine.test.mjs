@@ -1,6 +1,17 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { checkActionTransition } from "../dist/state-machine.js";
+
+test("blocked mechanical validation can be rerun or finalized as partial", () => {
+  for (const phase of ["external_validation_stopped", "external_validation_needs_revision"]) {
+    assert.equal(checkActionTransition("run_final_validation", phase).ok, true);
+    assert.equal(checkActionTransition("finalize_delivery", phase).ok, true);
+    assert.equal(checkActionTransition("record_final_validation", phase).ok, false);
+  }
+  for (const phase of ["external_validation_passed", "waiting_final_validation", "final_validated", "council_validated"]) {
+    assert.equal(checkActionTransition("run_final_validation", phase).ok, true);
+  }
+});
+import { checkActionTransition } from "../dist/core/state-machine.js";
 
 test("status and reconcile are always allowed", () => {
   assert.equal(checkActionTransition("status", "implementation_launched").ok, true);

@@ -87,9 +87,21 @@ A notification requires:
 - notifications enabled globally or `notify=true`;
 - a supported `notificationChannel`;
 - a valid `notificationTarget`;
-- a working OpenClaw CLI and configured channel account.
+- a reachable OpenClaw Gateway, valid Gateway authentication and a configured channel account.
 
 Use `notificationDryRun=true` to validate arguments without sending.
+
+Pending and exhausted notifications are stored under `<state-root>/notification-outbox/`. Inspect `attempts`, `failed` and `lastResult` when delivery fails. Fix the Gateway or channel configuration first. Pending jobs resume after plugin restart; jobs marked `failed: true` require an explicit retry by the operator. Preserve the job's channel, target and payload when resetting `attempts`, `failed` and `nextAttemptAt` for retry. A job may already have reached its recipient if the process crashed before saving acknowledgement.
+
+## Validation stopped or evidence became stale
+
+`external_validation_stopped` can be recovered with `run_final_validation` after fixing the reported blocker. An invalid or rejected validation config stops the gate without executing fallback commands. `finalize_delivery` can instead close that attempt with a partial outcome.
+
+`resume_finalization` requires mechanical validation before requesting final review. `mechanical_validation_required` means that validation has not passed. `validation_evidence_stale` means the attempt, checkout, HEAD, index, tracked diff or untracked content differs from the saved evidence. Run `run_final_validation` again, then repeat final review before acceptance.
+
+## State is unreadable
+
+`state_unreadable` preserves the damaged file and blocks the action. Stop other writers, copy the damaged state for diagnosis, and inspect `status.previous.json`, the last valid state before the latest update. Restore it explicitly only after checking runner state and delivery side effects, then call `reconcile`. The snapshot may precede an external side effect and is not a transaction rollback.
 
 ## Observer data is absent
 
@@ -98,6 +110,10 @@ The observer is disabled by default and is not required by the command adapter. 
 ## A supervised process does not stop
 
 Use `stop_implementation` rather than killing only the root PID. The plugin stops the process group with a TERM/KILL policy.
+
+New sessions record the Linux boot ID, PID, process group and process start time. Cancellation refuses a missing or changed identity rather than signalling a reused PID. Sessions created before this identity was recorded require operator verification before manual cancellation.
+
+Runner stdout and stderr each retain a current file and one `.previous` file, capped at 16 MiB per file. Very old runner output is rotated away. Audit JSONL files rotate at 8 MiB into compressed files under `event-archives/<event-file>/`; all archives are retained by default. Use the [event history configuration](configuration.md#event-history) to opt into a finite archive count. Run directories and attempt artifacts still require an operator backup and retention policy.
 
 ## Public audit fails
 

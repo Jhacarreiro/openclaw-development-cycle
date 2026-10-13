@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
+import { withCanonicalRoutingHome } from "./helpers/octopus-routing.mjs";
 import {
   buildImplementationLaunchSpec,
   renderShellCommand,
@@ -25,34 +26,6 @@ const baseInput = {
   timeoutSeconds: 900,
   command: "implement",
 };
-
-const canonicalRouting = {
-  architect: { provider: "commandcode", model: "xiaomi/mimo-v2.6-pro" },
-  strategist: { provider: "commandcode", model: "qwen/qwen3.8-max-0902" },
-  "security-reviewer": { provider: "commandcode", model: "xai/grok-4.7" },
-  "code-reviewer": { provider: "claude", model: "claude-sonnet-5-5" },
-  implementer: { provider: "commandcode", model: "xiaomi/mimo-v2.6-pro" },
-  "implementer-heavy": { provider: "codex", model: "gpt-6.1-sol" },
-  synthesizer: { provider: "claude", model: "claude-sonnet-5-5" },
-  researcher: { provider: "codex", model: "gpt-6.1-sol" },
-};
-
-function withCanonicalRoutingHome(callback) {
-  const previousHome = process.env.HOME;
-  const home = mkdtempSync(join(tmpdir(), "development-cycle-octopus-"));
-  const configDir = join(home, ".claude-octopus", "config");
-  mkdirSync(configDir, { recursive: true });
-  writeFileSync(join(configDir, "providers.json"), JSON.stringify({ routing: { roles: canonicalRouting } }));
-  try {
-    process.env.HOME = home;
-    return callback();
-  } finally {
-    if (previousHome === undefined) delete process.env.HOME;
-    else process.env.HOME = previousHome;
-    rmSync(home, { recursive: true, force: true });
-  }
-}
-
 
 test("command adapter receives the stable request JSON path", () => {
   const spec = buildImplementationLaunchSpec(

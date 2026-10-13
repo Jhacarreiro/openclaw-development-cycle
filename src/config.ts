@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 
 export interface DevelopmentCycleConfig {
   stateRoot: string;
+  eventLogs: { maxBytes: number; archivesToKeep: number };
   projectDocsRoot: string;
   projectDocsGitRoot: string;
   implementation: {
@@ -23,7 +24,6 @@ export interface DevelopmentCycleConfig {
     autoMergeSuccessful: boolean;
     baseBranch: string;
   };
-  retentionDays: number;
   notifications: {
     enabled: boolean;
     channel: string;
@@ -31,7 +31,6 @@ export interface DevelopmentCycleConfig {
     account: string;
     deliveryJson: string;
   };
-  openclawBin: string;
   externalGate: {
     secretPath: string;
     url: string;
@@ -64,6 +63,13 @@ function text(env: NodeJS.ProcessEnv, name: string, fallback = ""): string {
 function positiveInteger(env: NodeJS.ProcessEnv, name: string, fallback: number): number {
   const parsed = Number(env[name]);
   return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function nonnegativeInteger(env: NodeJS.ProcessEnv, name: string, fallback: number): number {
+  if (!String(env[name] ?? "").trim()) return fallback;
+  const parsed = Number(env[name]);
+  if (!Number.isSafeInteger(parsed) || parsed < 0) throw new Error(`invalid_configuration: ${name}`);
+  return parsed;
 }
 
 function stringArray(env: NodeJS.ProcessEnv, name: string): string[] {
@@ -101,6 +107,10 @@ export function loadDevelopmentCycleConfig(env: NodeJS.ProcessEnv = process.env)
 
   return {
     stateRoot,
+    eventLogs: {
+      maxBytes: positiveInteger(env, "DEVELOPMENT_CYCLE_EVENT_LOG_MAX_BYTES", 8 * 1024 * 1024),
+      archivesToKeep: nonnegativeInteger(env, "DEVELOPMENT_CYCLE_EVENT_LOG_ARCHIVES_TO_KEEP", 0),
+    },
     projectDocsRoot: text(
       env,
       "DEVELOPMENT_CYCLE_PROJECT_DOCS_ROOT",
@@ -124,7 +134,6 @@ export function loadDevelopmentCycleConfig(env: NodeJS.ProcessEnv = process.env)
       autoMergeSuccessful: boolean(env, "DEVELOPMENT_CYCLE_REPOSITORY_DELIVERY_AUTO_MERGE_SUCCESSFUL", true),
       baseBranch: text(env, "DEVELOPMENT_CYCLE_REPOSITORY_DELIVERY_BASE_BRANCH", "main"),
     },
-    retentionDays: positiveInteger(env, "DEVELOPMENT_CYCLE_RETENTION_DAYS", 30),
     notifications: {
       enabled: boolean(env, "DEVELOPMENT_CYCLE_NOTIFICATIONS_ENABLED", false),
       channel: text(env, "DEVELOPMENT_CYCLE_NOTIFICATION_CHANNEL"),
@@ -132,7 +141,6 @@ export function loadDevelopmentCycleConfig(env: NodeJS.ProcessEnv = process.env)
       account: text(env, "DEVELOPMENT_CYCLE_NOTIFICATION_ACCOUNT"),
       deliveryJson: text(env, "DEVELOPMENT_CYCLE_NOTIFICATION_DELIVERY_JSON"),
     },
-    openclawBin: text(env, "DEVELOPMENT_CYCLE_OPENCLAW_BIN", "openclaw"),
     externalGate: {
       secretPath: text(env, "DEVELOPMENT_CYCLE_EXTERNAL_GATE_SECRET_PATH"),
       url: text(env, "DEVELOPMENT_CYCLE_EXTERNAL_GATE_URL").replace(/\/$/, ""),

@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import test from "node:test";
+import { writeCanonicalRoutingConfig } from "./helpers/octopus-routing.mjs";
 
 const execFileAsync = promisify(execFile);
 function detailsOf(result) { return result?.details ?? result; }
@@ -38,6 +39,7 @@ test("Octopus reconcile promotes the exact Tangle worktree manifest to outputPat
   const root = join(tmpdir(), `development-cycle-octopus-output-${process.pid}-${Date.now()}`);
   t.after(() => rm(root, { recursive: true, force: true }));
   const home = join(root, "home");
+  writeCanonicalRoutingConfig(home);
   const checkout = join(root, "checkout");
   const project = "octopus-output-handoff";
   const runId = "run-octopus-output-handoff";
@@ -135,6 +137,7 @@ test("Octopus reconcile refuses a manifest whose branch does not match the attem
   const root = join(tmpdir(), `development-cycle-octopus-output-bad-branch-${process.pid}-${Date.now()}`);
   t.after(() => rm(root, { recursive: true, force: true }));
   const home = join(root, "home");
+  writeCanonicalRoutingConfig(home);
   const checkout = join(root, "checkout");
   const project = "octopus-output-bad-branch";
   const runId = "run-octopus-output-bad-branch";

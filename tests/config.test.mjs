@@ -19,7 +19,6 @@ test("configuration uses portable, command-first defaults", () => {
   assert.equal(config.notifications.channel, "");
   assert.equal(config.notifications.target, "");
   assert.equal(config.observer.enabled, false);
-  assert.equal(config.openclawBin, "openclaw");
 });
 
 test("configuration accepts command and Octopus adapter overrides", () => {
@@ -42,7 +41,6 @@ test("configuration accepts command and Octopus adapter overrides", () => {
     DEVELOPMENT_CYCLE_NOTIFICATION_CHANNEL: "slack",
     DEVELOPMENT_CYCLE_NOTIFICATION_TARGET: "channel:C0123456789",
     DEVELOPMENT_CYCLE_NOTIFICATION_ACCOUNT: "work",
-    DEVELOPMENT_CYCLE_OPENCLAW_BIN: "/usr/local/bin/openclaw",
   });
   assert.equal(config.stateRoot, "/tmp/dc-state");
   assert.equal(config.projectDocsRoot, "/tmp/project-docs");
@@ -61,7 +59,6 @@ test("configuration accepts command and Octopus adapter overrides", () => {
   assert.equal(config.notifications.channel, "slack");
   assert.equal(config.notifications.target, "channel:C0123456789");
   assert.equal(config.notifications.account, "work");
-  assert.equal(config.openclawBin, "/usr/local/bin/openclaw");
 });
 
 

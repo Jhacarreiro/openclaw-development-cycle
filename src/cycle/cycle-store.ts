@@ -23,7 +23,9 @@ export function createCycleStore(deps: CycleStoreDeps) {
     const statePath = join(dir, "phase_notification_state.json");
     const eventsPath = join(dir, "phase_notification_events.jsonl");
     const signature = JSON.stringify({ phase: notice.phase, project: next?.project || "", runId: next?.runId || "" });
-    const state = await filesystemStore.loadJson<any>(statePath);
+    // Runs started before the rename keep their dedupe state in the legacy file.
+    let state = await filesystemStore.loadJson<any>(statePath);
+    if (!state?.lastSignature) state = await filesystemStore.loadJson<any>(join(dir, "telegram_update_state.json"));
     if (state?.lastSignature === signature) return next;
 
     const result = await sendCycleMessage({ __notificationAudit: { eventsPath, event: {

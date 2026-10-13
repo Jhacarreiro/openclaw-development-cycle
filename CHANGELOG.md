@@ -31,7 +31,7 @@ The format is based on Keep a Changelog and the project follows Semantic Version
 
 ### Changed
 
-- Phase-notification dedupe state and audit events are now written to `phase_notification_state.json` and `phase_notification_events.jsonl` (event types `development_cycle.phase_notification` and `development_cycle.phase_notification_delivery`), replacing channel-specific legacy names. Existing runs start a fresh dedupe file, so one repeated notification is possible for a run that is active during the upgrade.
+- Phase-notification dedupe state and audit events are now written to `phase_notification_state.json` and `phase_notification_events.jsonl` (event types `development_cycle.phase_notification` and `development_cycle.phase_notification_delivery`), replacing channel-specific legacy names. Runs started before the rename still read their last signature from the legacy state file, so an upgrade does not repeat a phase notification.
 - The coordinator is split into factory modules under `src/cycle/`; `src/index.ts` keeps tool registration, the parameter schema and the action dispatcher.
 - README: the research proposal moved below the operational sections and the Octopus contextual-read notes moved into the Octopus adapter section.
 - The coordinator is checked by TypeScript without `@ts-nocheck`; tool arguments derive from the public schema and builds reject unused locals and parameters.

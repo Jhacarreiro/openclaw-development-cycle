@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
+import { readCoordinatorSource } from "./helpers/coordinator-source.mjs";
 
-const source = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
+const source = await readCoordinatorSource();
 const configSource = await readFile(new URL("../src/config.ts", import.meta.url), "utf8");
 
 test("development-cycle uses a persistent subreaper supervisor", () => {

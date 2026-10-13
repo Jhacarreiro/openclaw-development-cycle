@@ -6,9 +6,10 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import test from "node:test";
 import { jsonShellQuote, shellQuote } from "../dist/adapters/implementation.js";
+import { readCoordinatorSource } from "./helpers/coordinator-source.mjs";
 
 const execFileAsync = promisify(execFile);
-const source = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
+const source = await readCoordinatorSource();
 
 test("runner heartbeat interpolates a JSON-encoded observer session id", () => {
   assert.match(source, /observerSessionId":%s/);

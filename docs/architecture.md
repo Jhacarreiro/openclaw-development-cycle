@@ -52,7 +52,22 @@ Typed environment configuration with command-first portable defaults. Optional i
 
 ### `src/index.ts`
 
-OpenClaw tool registration and workflow coordination. It creates adapter requests, starts supervised runs, reconciles status, builds validation packs, and emits optional notifications.
+OpenClaw tool registration, the `development_cycle` parameter schema and the action dispatcher. It reads configuration once per import and assembles the coordinator modules from `src/cycle/`.
+
+### `src/cycle/`
+
+Workflow coordination, one concern per module. Each module exports a factory that receives the configuration values and the functions of the modules assembled before it, so every plugin instance keeps its own configuration:
+
+- `cycle-store` — run directories, status updates and phase notifications;
+- `pinned-fs` — trusted project-root pinning and contained documentation reads and writes;
+- `plan`, `planning-pack` — plan analysis, normalization and planning context packs;
+- `runner-supervisor`, `runner-session` — the supervised runner and generated runner scripts;
+- `observer`, `runtime-observation` — optional observer sessions and runtime snapshots;
+- `implementation-status`, `stop` — reconciliation of launched attempts, stall handling and stop;
+- `octopus-output`, `repository-delivery` — attempt output handoff and repository delivery;
+- `final-validation`, `council` — mechanical validation, council review and corrections;
+- `external-gate`, `main-updates` — optional external gate and main-agent updates;
+- `files`, `exec` — shared stateless file and process helpers.
 
 ### `src/runtime/`
 

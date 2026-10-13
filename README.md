@@ -7,6 +7,14 @@ An experimental OpenClaw control plane for durable software-development cycles. 
 
 The control plane is implementation-runner agnostic. A generic command adapter is the default. Octopus is available as an optional adapter.
 
+## Research direction: Decision Multiverse (proposal)
+
+We build **solutions**, not software output for its own sake. AI agents may perform implementation while people direct goals, alternatives, trade-offs, quality and accountability. We want to investigate whether consequential choices in an agentic development run can be captured and visualized as a navigable map, then eventually replayed in isolated branches to compare **observed** outcomes.
+
+**Research hypothesis, not a shipped feature.** The number and nature of alternatives must emerge from each decision and its implications; there is no predefined three-way branch template. An unexecuted alternative is a hypothesis, never a validated outcome. The first proposed milestone is *read-only post-run decision provenance*, without changing the execution engine.
+
+See [research roadmap](docs/ROADMAP.md), [working thesis](docs/THESIS_DRAFT.md) and [research questions and conversation synthesis](docs/CONVERSATION_NOTES.md). We are testing whether decision discovery is faithful and useful, whether counterfactual replay is valid and reproducible, and whether branch exploration improves real solution quality relative to its time and compute cost.
+
 ## Workflow
 
 The plugin registers one OpenClaw tool, `development_cycle`:

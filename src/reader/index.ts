@@ -1,5 +1,6 @@
 import { gunzipSync } from "node:zlib";
 import { parseFinalDecision, type FinalDecision } from "../core/decisions.js";
+import { checkActionTransition } from "../core/state-machine.js";
 import { isRecord, MAX_SOURCE_BYTES, ReadonlyState, type ReadResult, type UnavailableReason } from "./files.js";
 
 export type { UnavailableReason } from "./files.js";
@@ -11,6 +12,7 @@ export interface RunRecord {
   status: "readable" | "unreadable";
   phase: string | null;
   terminal: boolean | null;
+  lifecycle: Lifecycle | null;
   finalDecision: FinalDecision | null;
   implementationAdapter: string | null;
   failureClass: string | null;
@@ -40,6 +42,7 @@ export interface RunRecord {
   cost: null;
   unavailable: Partial<Record<RunField, UnavailableReason>>;
 }
+export type Lifecycle = "closed" | "awaiting_close" | "awaiting_operator" | "active";
 type RunField = Exclude<keyof RunRecord, "project" | "runId" | "path" | "status" | "unavailable">;
 export interface RunProject {
   project: string;
@@ -52,20 +55,26 @@ export interface RunIndex {
   unavailable?: { projects: UnavailableReason };
 }
 
-// Baseline outcome convention: a failure can be terminal for measurement and still resumable.
-const terminalPhases = new Set([
+const knownPhases = new Set([
   "closed", "merged", "closed_success", "closed_partial", "closed_invalid", "stopped",
   "implementation_failed", "review_infrastructure_failed", "corrections_failed", "repository_delivery_failed",
   "final_validated", "final_revised", "council_validated", "council_review_failed", "external_validation_failed", "external_validation_stopped",
-]);
-const knownPhases = new Set([...terminalPhases,
   "waiting_external_plan", "plan_ready_for_implementation", "implementation_launched", "implementation_running",
   "implementation_delivered", "implementation_waiting_human", "corrections_launched", "corrections_running",
   "corrections_completed", "external_validation_passed", "external_validation_needs_revision",
   "waiting_final_validation", "needs_corrections", "council_review_needs_corrections", "council_review_waiting_human", "delivery_published",
 ]);
+
+// Derived from the state machine so the reader cannot drift from the transitions it reports on.
+function lifecycleOf(phase: string): Lifecycle {
+  if (phase === "closed") return "closed";
+  if (checkActionTransition("close", phase).ok) return "awaiting_close";
+  if (checkActionTransition("finalize_delivery", phase).ok || checkActionTransition("resume_finalization", phase).ok) return "awaiting_operator";
+  return "active";
+}
+
 const fields: RunField[] = [
-  "phase", "terminal", "finalDecision", "implementationAdapter", "failureClass", "interventionCount", "correctionRounds",
+  "phase", "terminal", "lifecycle", "finalDecision", "implementationAdapter", "failureClass", "interventionCount", "correctionRounds",
   "councilCorrectionRounds", "automaticRecoveryCount", "automaticRecoveryEvents", "deliveryOutcome",
   "deliveryOk", "deliverySkipped", "deliveryLocalOnly", "deliveryMerged", "prUrl", "prState",
   "createdAt", "updatedAt", "startedAt", "endedAt", "durationMs", "attemptCreatedAt", "attemptEndedAt", "attemptDurationMs",
@@ -139,7 +148,8 @@ async function recoveryEvents(state: ReadonlyState, path: string, total: number 
     } catch { return { value: null, reason: "unreadable" }; }
   }
   if (total !== null && total > observed) return { value: null, reason: "pruned" };
-  if (!available) return { value: null, reason: "not_recorded" };
+  // A recorded zero total with no event log is a known zero, not missing history.
+  if (!available) return total === 0 ? { value: 0 } : { value: null, reason: "not_recorded" };
   return { value: observed };
 }
 
@@ -153,8 +163,11 @@ async function readRun(state: ReadonlyState, project: string, runId: string): Pr
   }
   const status = loaded.value;
   recorded(run, "phase", status.phase, scalar);
-  if (run.phase && knownPhases.has(run.phase)) setField(run, "terminal", terminalPhases.has(run.phase));
-  else setField(run, "terminal", null, run.phase ? "unreadable" : run.unavailable.phase);
+  if (run.phase && knownPhases.has(run.phase)) {
+    const lifecycle = lifecycleOf(run.phase);
+    setField(run, "lifecycle", lifecycle);
+    setField(run, "terminal", lifecycle === "closed" || lifecycle === "awaiting_close");
+  } else for (const field of ["lifecycle", "terminal"] as const) setField(run, field, null, run.phase ? "unreadable" : run.unavailable.phase);
   recorded(run, "implementationAdapter", status.implementationAdapter, scalar);
   recorded(run, "failureClass", status.failureClass, scalar);
   recorded(run, "councilCorrectionRounds", status.councilCorrectionCount, count);
@@ -201,8 +214,10 @@ async function readRun(state: ReadonlyState, project: string, runId: string): Pr
     const checked = plan ? await state.inspect(plan, "file") : null;
     setField(run, "planPath", checked?.value ? plan : null, "unreadable");
   }
-  if (status.directImplementationStatus != null) {
-    const path = typeof status.directImplementationStatus === "string" ? state.pointer(status.directImplementationStatus) : null;
+  // start_implementation clears the corrections pointer, so a recorded one is the latest attempt.
+  const attemptPointer = status.directCorrectionsStatus ?? status.directImplementationStatus;
+  if (attemptPointer != null) {
+    const path = typeof attemptPointer === "string" ? state.pointer(attemptPointer) : null;
     const attempt = path ? await state.json(path) : null;
     if (attempt?.value) {
       recorded(run, "attemptCreatedAt", attempt.value.createdAt, timestamp);
@@ -257,9 +272,9 @@ export function formatRunIndexMarkdown(index: RunIndex): string {
   for (const project of index.projects) for (const run of project.runs) {
     const cell = (field: RunField) => run[field] === null ? `unavailable (${run.unavailable[field]})` : escape(run[field]);
     const values = [escape(run.project), `${escape(run.runId)}; ${cell("implementationAdapter")}; ${cell("planPath")}`,
-      `${cell("phase")}; terminal: ${cell("terminal")}`, cell("finalDecision"), cell("acceptanceChecks"), cell("solutionValue"), cell("failureClass"),
+      `${cell("phase")}; ${cell("lifecycle")}`, cell("finalDecision"), cell("acceptanceChecks"), cell("solutionValue"), cell("failureClass"),
       `interventions: ${cell("interventionCount")}; corrections: ${cell("correctionRounds")}; council: ${cell("councilCorrectionRounds")}`,
-      cell("automaticRecoveryCount"), `duration ms: ${cell("durationMs")}; cost: ${cell("cost")}`];
+      cell("automaticRecoveryEvents"), `duration ms: ${cell("durationMs")}; cost: ${cell("cost")}`];
     lines.push(`| ${values.join(" | ")} |`);
   }
   if (index.unavailable) lines.push("", `Listing unavailable (${index.unavailable.projects}).`);

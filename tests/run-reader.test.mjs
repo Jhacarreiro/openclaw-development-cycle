@@ -125,11 +125,12 @@ test("recorded outcomes, decisions, classes and counts remain distinct", async (
   const stop = findRun(index, "run-stop");
   const recovery = findRun(index, "run-recovery");
   const review = findRun(index, "run-review-failure");
-  assert.deepEqual([go.phase, go.terminal, go.finalDecision, go.implementationAdapter], ["closed", true, "go", "command"]);
-  assert.deepEqual([revise.phase, revise.terminal, revise.finalDecision, revise.councilCorrectionRounds], ["closed_partial", true, "revise", 2]);
-  assert.deepEqual([stop.phase, stop.terminal, stop.finalDecision, stop.endedAt], ["stopped", true, "stop", "2026-01-03T09:59:00.000Z"]);
-  assert.deepEqual([recovery.phase, recovery.terminal, recovery.finalDecision, recovery.failureClass, recovery.automaticRecoveryCount, recovery.automaticRecoveryEvents], ["implementation_failed", true, null, "planner_reconsideration_contract_failure", 1, 1]);
-  assert.deepEqual([review.phase, review.terminal, review.finalDecision, review.failureClass, review.automaticRecoveryCount], ["review_infrastructure_failed", true, null, "review_infrastructure_failed", 0]);
+  assert.deepEqual([go.phase, go.terminal, go.lifecycle, go.finalDecision, go.implementationAdapter], ["closed", true, "closed", "go", "command"]);
+  assert.deepEqual([revise.phase, revise.terminal, revise.lifecycle, revise.finalDecision, revise.councilCorrectionRounds], ["closed_partial", true, "awaiting_close", "revise", 2]);
+  // A recorded stop or failure still needs finalize_delivery or a resume, so it is not terminal.
+  assert.deepEqual([stop.phase, stop.terminal, stop.lifecycle, stop.finalDecision, stop.endedAt], ["stopped", false, "awaiting_operator", "stop", "2026-01-03T09:59:00.000Z"]);
+  assert.deepEqual([recovery.phase, recovery.terminal, recovery.lifecycle, recovery.finalDecision, recovery.failureClass, recovery.automaticRecoveryCount, recovery.automaticRecoveryEvents], ["implementation_failed", false, "awaiting_operator", null, "planner_reconsideration_contract_failure", 1, 1]);
+  assert.deepEqual([review.phase, review.terminal, review.lifecycle, review.finalDecision, review.failureClass, review.automaticRecoveryCount], ["review_infrastructure_failed", false, "awaiting_operator", null, "review_infrastructure_failed", 0]);
   assert.deepEqual([go.deliveryOutcome, go.prUrl], ["success", "https://github.com/example/synthetic-project/pull/1"]);
   assert.equal(revise.deliveryOutcome, "partial");
   for (const run of [go, revise, stop, recovery, review]) {
@@ -145,6 +146,7 @@ test("recorded outcomes, decisions, classes and counts remain distinct", async (
     assert.equal(run.solutionValue, null);
     assert.equal(run.cost, null);
   }
+  assert.equal(go.automaticRecoveryEvents, 0);
   assert.equal(go.failureClass, null);
   assert.equal(go.unavailable.failureClass, "not_recorded");
 });
@@ -156,6 +158,7 @@ test("malformed status is a visible unreadable run and does not hide other runs"
   assert.equal(malformed.status, "unreadable");
   assert.equal(malformed.phase, null);
   assert.equal(malformed.terminal, null);
+  assert.equal(malformed.lifecycle, null);
   assert.equal(malformed.unavailable.phase, "unreadable");
   assert.equal(findRun(index, "run-go").finalDecision, "go");
 });
@@ -380,6 +383,26 @@ test("current attempt dates and duration stay separate from unavailable run life
   const stoppedAttempt = findRun(await readRunIndex(root), "run-go");
   assert.equal(stoppedAttempt.attemptEndedAt, "2026-01-01T08:05:00.000Z");
   assert.equal(stoppedAttempt.attemptDurationMs, 300000);
+});
+
+test("a recorded corrections attempt supersedes the earlier implementation attempt", async (t) => {
+  const { root } = await temporaryFixture(t);
+  const runPath = join(root, "runs", "synthetic-alpha", "run-go");
+  const implementationPath = join(runPath, "implementation_session", "attempts", "synthetic-attempt-1", "status.json");
+  const correctionsPath = join(runPath, "corrections_session", "attempts", "synthetic-attempt-2", "status.json");
+  for (const [path, createdAt, exitedAt] of [
+    [implementationPath, "2026-01-01T08:00:00.000Z", "2026-01-01T08:10:00.000Z"],
+    [correctionsPath, "2026-01-01T09:00:00.000Z", "2026-01-01T09:20:00.000Z"],
+  ]) {
+    await mkdir(dirname(path), { recursive: true });
+    await writeFile(path, JSON.stringify({ createdAt, exitedAt }));
+  }
+  await patchRunStatus(root, "synthetic-alpha", "run-go", { directImplementationStatus: implementationPath, directCorrectionsStatus: correctionsPath });
+  const run = findRun(await readRunIndex(root), "run-go");
+  assert.deepEqual([run.attemptCreatedAt, run.attemptEndedAt, run.attemptDurationMs], ["2026-01-01T09:00:00.000Z", "2026-01-01T09:20:00.000Z", 1200000]);
+  // A new implementation launch clears the corrections pointer.
+  await patchRunStatus(root, "synthetic-alpha", "run-go", { directCorrectionsStatus: null });
+  assert.equal(findRun(await readRunIndex(root), "run-go").attemptCreatedAt, "2026-01-01T08:00:00.000Z");
 });
 
 test("unsafe current attempt pointer is unreadable without reading the target", async (t) => {

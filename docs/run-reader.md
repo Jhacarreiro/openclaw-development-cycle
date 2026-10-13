@@ -45,7 +45,8 @@ Each run has the following fields. Unavailable scalar values are `null`, with a 
 | `path` | Run directory path relative to the state root, using `/` separators. |
 | `status` | Reader result: `readable` or `unreadable`. |
 | `phase` | Recorded `status.json.phase`. |
-| `terminal` | Phase membership in the terminal outcome set below. |
+| `terminal` | `true` only when the run is `closed` or awaits only `close` (`lifecycle` is `closed` or `awaiting_close`). |
+| `lifecycle` | `closed`, `awaiting_close` (delivery materialized), `awaiting_operator` (a decision, stop or failure is recorded and `finalize_delivery` or `resume_finalization` is the next action), or `active`. Derived from the state machine's allowed transitions. |
 | `finalDecision` | `go`, `revise`, or `stop`, parsed from `final_validation_response.md` with the existing `parseFinalDecision` helper. |
 | `implementationAdapter` | Recorded `status.json.implementationAdapter`. |
 | `failureClass` | `status.json.failureClass` verbatim; never derived from phase or logs. Absence does not establish success. |
@@ -53,7 +54,7 @@ Each run has the following fields. Unavailable scalar values are `null`, with a 
 | `correctionRounds` | Unavailable: the current format does not record a complete count of manual and automatic correction rounds. |
 | `councilCorrectionRounds` | Recorded `status.json.councilCorrectionCount`; automatic council corrections only. |
 | `automaticRecoveryCount` | Cumulative `status.json.automaticPlannerRecoveryCount` only; unavailable if absent. |
-| `automaticRecoveryEvents` | Retained automatic recovery JSONL event count; unavailable when recorded total proves history is missing. |
+| `automaticRecoveryEvents` | Retained automatic recovery JSONL event count; `0` when the recorded total is `0` and no log exists; unavailable when the recorded total proves history is missing. |
 | `deliveryOutcome` | Delivery `classification`: `success`, `partial`, or `invalid`. Source is `repository_delivery.json`, falling back to `status.repositoryDelivery` only if the file is absent. |
 | `prUrl` | Delivery `pullRequest.url`. |
 | `deliveryOk`, `deliverySkipped`, `deliveryLocalOnly`, `deliveryMerged`, `prState` | Delivery `ok`, `skipped`, `localOnly`, `merged`, and `pullRequest.state`; missing flags remain unavailable. |
@@ -61,14 +62,14 @@ Each run has the following fields. Unavailable scalar values are `null`, with a 
 | `startedAt` | Recorded run `status.json.startedAt`, if present. The current writer does not persist a run launch timestamp. |
 | `endedAt` | Recorded run `status.json.stoppedAt` when the phase is `stopped`. Other terminal phases do not have a dedicated run endpoint. |
 | `durationMs` | Difference between known run start and end times; normally unavailable. `updatedAt` is never an endpoint. |
-| `attemptCreatedAt`, `attemptEndedAt`, `attemptDurationMs` | Current attempt's `createdAt`, `stoppedAt` or `exitedAt`, and their difference, from contained `status.directImplementationStatus`. These measure an attempt, not the cycle. |
+| `attemptCreatedAt`, `attemptEndedAt`, `attemptDurationMs` | Latest attempt's `createdAt`, `stoppedAt` or `exitedAt`, and their difference, from contained `status.directCorrectionsStatus` when recorded, else `status.directImplementationStatus` (`start_implementation` clears the corrections pointer). These measure an attempt, not the cycle. |
 | `planPath` | Recorded `status.json.plan`, returned only as a contained path relative to the state root. Plan contents are never returned. |
 | `acceptanceChecks`, `solutionValue`, `cost` | Unavailable: no persisted external acceptance result, usefulness assessment, or run-level model/token cost. |
 | `unavailable` | Object mapping unavailable field names to `not_recorded`, `unreadable`, or `pruned`. |
 
-Markdown columns match the [baseline's per-run record](reliability-baseline.md#per-run-record): `run id, adapter, plan path`; `terminal phase`; `final decision`; `acceptance checks`; `solution value`; `failure class`; `interventions and corrections`; `automatic recoveries`; `duration and cost`, plus project. Cells show unavailable reasons instead of inventing zero counts.
+Markdown columns match the [baseline's per-run record](reliability-baseline.md#per-run-record): `run id, adapter, plan path`; `terminal phase`; `final decision`; `acceptance checks`; `solution value`; `failure class`; `interventions and corrections`; `automatic recoveries`; `duration and cost`, plus project. The terminal phase cell shows the phase and its `lifecycle`; the automatic recoveries cell shows `automaticRecoveryEvents`, the count from `automatic_recovery_events.jsonl`. Cells show unavailable reasons instead of inventing zero counts.
 
-Terminal outcome phases: `closed`, `merged`, `closed_success`, `closed_partial`, `closed_invalid`, `stopped`, `implementation_failed`, `review_infrastructure_failed`, `corrections_failed`, `repository_delivery_failed`, `final_validated`, `final_revised`, `council_validated`, `council_review_failed`, `external_validation_failed`, `external_validation_stopped`. Other known phases return `false`; unknown phases make `terminal` unavailable with `unreadable`. This presentation convention permits resumable failure outcomes and does not change transitions.
+Unknown phases make `terminal` and `lifecycle` unavailable with `unreadable`. A run in `awaiting_operator` has a recorded outcome for measurement but is not terminal: it can still be finalized or resumed.
 
 ## Confirmed persistence mappings
 

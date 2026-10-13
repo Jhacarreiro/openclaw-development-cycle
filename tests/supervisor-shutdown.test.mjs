@@ -236,7 +236,7 @@ test("launch_runner publishes process-group readiness before returning", () => {
 });
 
 test("reaped runner remains shutdown-visible until group termination completes", () => {
-  const loop = SUPERVISOR_SOURCE.slice(SUPERVISOR_SOURCE.indexOf("for pid, _status in reap_all(runners):"));
+  const loop = SUPERVISOR_SOURCE.slice(SUPERVISOR_SOURCE.lastIndexOf("in reap_all(runners):"));
   const lookup = loop.indexOf("runners.get(pid, pid)");
   const terminate = loop.indexOf("terminate_group(pgid, runners)", lookup);
   const remove = loop.indexOf("runners.pop(pid, None)", terminate);

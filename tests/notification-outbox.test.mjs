@@ -17,14 +17,26 @@ async function until(check) {
 }
 async function fixture(t) {
   const root = await mkdtemp(join(tmpdir(), "development-cycle-outbox-"));
-  t.after(() => rm(root, { recursive: true, force: true }));
-  return { root, store: createFilesystemStore(root) };
+  const store = createFilesystemStore(root);
+  const services = [];
+  const createService = (deliver) => {
+    const service = createNotificationService(store, root, config, deliver);
+    services.push(service);
+    return service;
+  };
+  t.after(async () => {
+    // Existing claimants must release their locks before the fixture is removed.
+    for (const service of services) service.dispose();
+    await until(() => services.every(service => !service.snapshot().draining));
+    await rm(root, { recursive: true, force: true });
+  });
+  return { root, store, createService };
 }
 
 test("pending notifications survive restart and defer delivery during active actions", async t => {
-  const { root, store } = await fixture(t);
+  const { root, createService } = await fixture(t);
   const delivered = [];
-  const before = createNotificationService(store, root, config, async payload => { delivered.push(payload); return { ok: true }; });
+  const before = createService(async payload => { delivered.push(payload); return { ok: true }; });
   before.beginExecution();
   const result = await before.send({ notificationDryRun: true }, "Phase", "Ready");
   const path = join(root, "notification-outbox", result.notificationId + ".json");
@@ -33,8 +45,7 @@ test("pending notifications survive restart and defer delivery during active act
   assert.deepEqual(delivered, []);
   assert.equal(saved.token, undefined);
   before.dispose();
-  const after = createNotificationService(store, root, config, async payload => { delivered.push(payload); return { ok: true }; });
-  t.after(() => after.dispose());
+  const after = createService(async payload => { delivered.push(payload); return { ok: true }; });
   after.beginExecution();
   await after.recover();
   await new Promise(resolve => setImmediate(resolve));
@@ -45,10 +56,9 @@ test("pending notifications survive restart and defer delivery during active act
 });
 
 test("failed deliveries retain retry state and stop retrying after five attempts", async t => {
-  const { root, store } = await fixture(t);
+  const { root, store, createService } = await fixture(t);
   let calls = 0;
-  const service = createNotificationService(store, root, config, async () => { calls++; throw new Error("offline"); });
-  t.after(() => service.dispose());
+  const service = createService(async () => { calls++; throw new Error("offline"); });
   const result = await service.send({}, "Phase", "Ready");
   const path = join(root, "notification-outbox", result.notificationId + ".json");
   for (let attempt = 1; attempt <= 5; attempt++) {
@@ -70,16 +80,15 @@ test("failed deliveries retain retry state and stop retrying after five attempts
 });
 
 test("two services sharing an outbox claim each notification once", async t => {
-  const { root, store } = await fixture(t);
-  const first = createNotificationService(store, root, config);
+  const { root, createService } = await fixture(t);
+  const first = createService();
   first.beginExecution();
   await first.send({}, "Phase", "Ready");
   first.dispose();
   let calls = 0;
   const deliver = async () => { calls++; await new Promise(resolve => setTimeout(resolve, 100)); return { ok: true }; };
-  const a = createNotificationService(store, root, config, deliver);
-  const b = createNotificationService(store, root, config, deliver);
-  t.after(() => { a.dispose(); b.dispose(); });
+  const a = createService(deliver);
+  const b = createService(deliver);
   await Promise.all([a.recover(), b.recover()]);
   await until(async () => (await readdir(join(root, "notification-outbox"))).length === 0);
   assert.equal(calls, 1);

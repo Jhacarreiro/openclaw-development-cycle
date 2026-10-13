@@ -1,4 +1,6 @@
-# OpenClaw Development Cycle
+# Development Cycle — Supervised Agentic Execution
+
+*From approved plans to validated outcomes.*
 
 [![CI](https://github.com/Jhacarreiro/openclaw-development-cycle/actions/workflows/ci.yml/badge.svg)](https://github.com/Jhacarreiro/openclaw-development-cycle/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
@@ -7,45 +9,7 @@ An experimental OpenClaw control plane for durable software-development cycles. 
 
 The control plane is implementation-runner agnostic. A generic command adapter is the default. Octopus is available as an optional adapter.
 
-A research direction, *Decision Multiverse*, is [documented below](#research-direction-decision-multiverse-proposal) as a proposal; it is not a shipped feature.
-
-## Elsewhere — architecture and research direction
-
-**Elsewhere — Same same, but different.** One problem. Different decisions. Different futures.
-
-```mermaid
-flowchart TB
-  E["Elsewhere<br/>Solution exploration vision"]
-  DC["Development Cycle<br/>Supervised control plane<br/>(existing)"]
-  DM["Decision Multiverse<br/>Decision provenance and counterfactuals<br/>(research proposal)"]
-  O["Octopus<br/>External orchestration engine<br/>(optional adapter)"]
-  A["Other implementation adapters<br/>(supported architecture)"]
-
-  E --> DC
-  E --> DM
-  DC -->|approved implementation| O
-  DC -->|alternative adapter| A
-  DC -.->|run artifacts and evidence| DM
-  DM -.->|future isolated replay requests through control plane| DC
-```
-
-The diagram distinguishes **existing components** from a **research proposal**. Octopus is an external, optional implementation adapter, not part of Development Cycle's owned code. Decision Multiverse should initially consume completed-run evidence read-only; future replay would be mediated by Development Cycle's authorized control plane. Arrows are conceptual relationships, not claims that replay exists today. No fixed number of decision branches is imposed.
-
-## Research direction: Decision Multiverse (proposal)
-
-We build **solutions**, not software output for its own sake. AI agents may perform implementation while people direct goals, alternatives, trade-offs, quality and accountability. We want to investigate whether consequential choices in an agentic development run can be captured and visualized as a navigable map, then eventually replayed in isolated branches to compare **observed** outcomes.
-
-**Research hypothesis, not a shipped feature.** The number and nature of alternatives must emerge from each decision and its implications; there is no predefined three-way branch template. An unexecuted alternative is a hypothesis, never a validated outcome. The first proposed milestone is *read-only post-run decision provenance*, without changing the execution engine.
-
-See [research roadmap](docs/ROADMAP.md), [working thesis](docs/THESIS_DRAFT.md) and [research questions and conversation synthesis](docs/CONVERSATION_NOTES.md). We are testing whether decision discovery is faithful and useful, whether counterfactual replay is valid and reproducible, and whether branch exploration improves real solution quality relative to its time and compute cost.
-
-## Experiments people are considering
-
-This is a list of **proposed, not necessarily executed** experiments to test solution-led, AI-assisted development. Entries are briefs, not claims of product functionality or verified results.
-
-- **[App Growth Lab — B2C mobile acquisition](experiments/app-growth-lab.md)** · **Proposed / not run.** Explore a bounded, measurable acquisition funnel for one iOS/Android consumer app, from audience and positioning through an experiment and evidence-based next decision. The task is intentionally solution-first and avoids prescribing technologies or a fixed set of alternatives. Any execution requires separate authorization.
-
-The research method and eventual observations belong in the [Decision Multiverse roadmap](docs/ROADMAP.md). Proposed experiments should distinguish hypotheses, execution evidence and actual outcomes.
+Related research: [Elsewhere](https://github.com/Jhacarreiro/elsewhere) explores decision provenance and alternative outcomes independently of this plugin.
 
 ## Workflow
 
@@ -75,11 +39,17 @@ The public tool API represents the final decision explicitly through `record_fin
 
 Experimental. The state machine, storage, adapters, shell quoting, and process-supervision boundaries are tested. Use a disposable or backed-up checkout for initial evaluation.
 
+### Operational baseline
+
+Evaluate the cycle on a meaningful real development task selected by the user. Agree the scope and independent behavioral acceptance criteria before the first run. Record the approved plan, delivery, mechanical validation, final decision, duration, cost and interventions, and assess whether the solution meets the user's actual need.
+
+The task and repository may remain private; publish only sanitized, portable evidence. Synthetic fixtures are useful for deterministic implementation tests and do not replace the real-task baseline.
+
 ## Requirements
 
 - Linux with `/proc/self/fd` support for guarded project-root filesystem operations
 - `projectRoot` must be an existing Git checkout for implementation and mechanical validation actions
-- Node.js 22.22.3+ on the 22.x line or 24.15.0+ on the 24.x line (the CI-tested versions supported by the pinned OpenClaw dependency)
+- Node.js 22.22.3+ on the 22.x line or 24.15.0+ on the 24.x line (the CI-tested versions supported by the pinned OpenClaw `2026.9.2` development SDK)
 - Python 3
 - `jq`
 - GNU coreutils `timeout` for validation, council and delivery command process groups
@@ -278,14 +248,6 @@ The supervisor performs one best-effort `reconcile` callback through the configu
 - child work is supervised as a process group;
 - final validation remains explicit in durable state even when the decision is produced automatically;
 - no credentials, private addresses, or operator-specific paths are embedded.
-
-## Research direction: Decision Multiverse (proposal)
-
-We build **solutions**, not software output for its own sake. AI agents may perform implementation while people direct goals, alternatives, trade-offs, quality and accountability. We want to investigate whether consequential choices in an agentic development run can be captured and visualized as a navigable map, then eventually replayed in isolated branches to compare **observed** outcomes.
-
-**Research hypothesis, not a shipped feature.** The number and nature of alternatives must emerge from each decision and its implications; there is no predefined three-way branch template. An unexecuted alternative is a hypothesis, never a validated outcome. The first proposed milestone is *read-only post-run decision provenance*, without changing the execution engine.
-
-See [research roadmap](docs/ROADMAP.md), [working thesis](docs/THESIS_DRAFT.md) and [research questions and conversation synthesis](docs/CONVERSATION_NOTES.md). We are testing whether decision discovery is faithful and useful, whether counterfactual replay is valid and reproducible, and whether branch exploration improves real solution quality relative to its time and compute cost.
 
 ## Development
 

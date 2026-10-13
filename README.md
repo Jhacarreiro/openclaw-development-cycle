@@ -39,6 +39,12 @@ The public tool API represents the final decision explicitly through `record_fin
 
 Experimental. The state machine, storage, adapters, shell quoting, and process-supervision boundaries are tested. Use a disposable or backed-up checkout for initial evaluation.
 
+### Operational baseline
+
+Evaluate the cycle on a meaningful real development task selected by the user. Agree the scope and independent behavioral acceptance criteria before the first run. Record the approved plan, delivery, mechanical validation, final decision, duration, cost and interventions, and assess whether the solution meets the user's actual need.
+
+The task and repository may remain private; publish only sanitized, portable evidence. Synthetic fixtures are useful for deterministic implementation tests and do not replace the real-task baseline.
+
 ## Requirements
 
 - Linux with `/proc/self/fd` support for guarded project-root filesystem operations

@@ -35,7 +35,7 @@ The format is based on Keep a Changelog and the project follows Semantic Version
 - The coordinator is split into factory modules under `src/cycle/`; `src/index.ts` keeps tool registration, the parameter schema and the action dispatcher.
 - README: the research proposal moved below the operational sections and the Octopus contextual-read notes moved into the Octopus adapter section.
 - The coordinator is checked by TypeScript without `@ts-nocheck`; tool arguments derive from the public schema and builds reject unused locals and parameters.
-- The pinned development SDK uses the maintained OpenClaw `2026.8.33` release, retaining Node 22 and 24 support and removing the previously reported development dependency vulnerabilities.
+- The pinned development SDK uses OpenClaw `2026.9.2`, retaining Node 22 and 24 support. Its MCP SDK dependency is overridden to `1.31.0` to fix OAuth credential issuer validation (GHSA-6qxp-vccf-f47h).
 - Audit JSONL writers serialize rotations and compress history at 8 MiB per file. Archives are preserved by default; finite archive retention is opt-in and does not remove run state or notification jobs.
 - Notification, process supervision, validation evidence, log reads and validation policy now have separate typed modules.
 - Octopus Codex seats now reuse the existing OpenClaw OAuth profile through an owned ephemeral `codex app-server` bridge that reads the auth-profile store directly instead of requiring a second persistent Codex CLI login.

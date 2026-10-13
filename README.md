@@ -49,7 +49,7 @@ The task and repository may remain private; publish only sanitized, portable evi
 
 - Linux with `/proc/self/fd` support for guarded project-root filesystem operations
 - `projectRoot` must be an existing Git checkout for implementation and mechanical validation actions
-- Node.js 22.22.3+ on the 22.x line or 24.15.0+ on the 24.x line (the CI-tested versions supported by the pinned OpenClaw dependency)
+- Node.js 22.22.3+ on the 22.x line or 24.15.0+ on the 24.x line (the CI-tested versions supported by the pinned OpenClaw `2026.9.2` development SDK)
 - Python 3
 - `jq`
 - GNU coreutils `timeout` for validation, council and delivery command process groups

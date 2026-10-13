@@ -16,7 +16,11 @@ export function createCycleStore(deps: CycleStoreDeps) {
   const saveJson = filesystemStore.saveJson;
   async function cycleStatus(dir: string, patch: any) {
     const previous = await filesystemStore.loadJson<any>(join(dir, "status.json"));
-    const next = await filesystemStore.updateStatus(dir, patch);
+    // A new run starts its own lifecycle record; older runs keep these fields absent instead of guessed.
+    const created = Object.keys(previous || {}).length === 0
+      ? { createdAt: new Date().toISOString(), interventionAnswerCount: 0, correctionRoundCount: 0 }
+      : {};
+    const next = await filesystemStore.updateStatus(dir, { ...created, ...patch });
     const notice = phaseNotificationForTransition(previous, next);
     if (!notice) return next;
 

@@ -164,4 +164,17 @@ test("implementation intervention waits for human and answer resumes the same ru
   const finalStatus = JSON.parse(await readFile(statusPath, "utf8"));
   assert.equal(finalStatus.implementationInterventionResolved.id, "choose-auth-mode");
   assert.equal(finalStatus.implementationInterventionResolved.response, "Choose A; preserve the existing API shape.");
+  assert.equal(finalStatus.interventionAnswerCount, 1);
+  assert.ok(Date.parse(finalStatus.startedAt) >= Date.parse(finalStatus.createdAt));
+
+  // Retrying the answer after a relaunch that did not leave the waiting phase counts the intervention once.
+  await writeFile(statusPath, JSON.stringify({ ...finalStatus, phase: "implementation_waiting_human" }, null, 2));
+  const retried = detailsOf(await tool.execute("human-intervention", {
+    action: "answer_intervention", ...params,
+    interventionId: "choose-auth-mode",
+    interventionResponse: "Choose A; preserve the existing API shape.",
+    implementationAdapter: "command",
+  }, undefined, undefined));
+  assert.equal(retried.ok, true, JSON.stringify(retried));
+  assert.equal(JSON.parse(await readFile(statusPath, "utf8")).interventionAnswerCount, 1);
 });

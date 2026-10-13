@@ -164,6 +164,14 @@ async function maybeAutoRecoverImplementationFailure(dir: string, status: any, p
   return { attempted: true, classification, pristineState, recoveryEvent, relaunch, status: nextStatus || marked };
 }
 
+// Run tracking fields exist only on runs created with them, so older runs never get partial counts.
+function countedOnce(status: any, field: "interventionAnswerCount" | "correctionRoundCount") {
+  return Number.isSafeInteger(status?.[field]) ? { [field]: status[field] + 1 } : {};
+}
+function firstLaunch(status: any) {
+  return status?.createdAt && !status?.startedAt ? { startedAt: new Date().toISOString() } : {};
+}
+
 async function latestRunDir(project: string) {
   const runsRoot = join(cycleRoot, "runs");
   const runsRootInfo = await lstat(runsRoot).catch(() => null);
@@ -374,7 +382,7 @@ async function projectCycle(params: CycleParameters | null | undefined): Promise
     await saveJson(responsePath, { schemaVersion: 1, id: intervention.id, runId, project, response, answeredAt, sourceInterventionPath: status?.implementationInterventionPath || null });
     const durableInterventionPath = String(status?.implementationInterventionPath || join(dir, "implementation_intervention.json"));
     await saveJson(durableInterventionPath, { ...intervention, status: "answered", responsePath, answeredAt });
-    await cycleStatus(dir, { implementationIntervention: { ...intervention, status: "answered", responsePath, answeredAt }, implementationInterventionResponsePath: responsePath, implementationInterventionAnsweredAt: answeredAt, nextAction: "Resuming implementation with the recorded human decision." });
+    await cycleStatus(dir, { implementationIntervention: { ...intervention, status: "answered", responsePath, answeredAt }, implementationInterventionResponsePath: responsePath, implementationInterventionAnsweredAt: answeredAt, nextAction: "Resuming implementation with the recorded human decision.", ...(intervention.status === "answered" ? {} : countedOnce(status, "interventionAnswerCount")) });
     return await projectCycle({
       ...params,
       action: "start_implementation",
@@ -595,7 +603,7 @@ Create or validate the implementation plan only. Do not implement. The plan must
     await updateImplementationObserverSession(dir, observerObservationId, { project, runId, command, projectRoot, projectWikiPath: containedProjectWikiPath, stdoutPath: launch.stdoutPath, stderrPath: launch.stderrPath, attemptId: launch.attemptId, pid: launch.status?.runnerPid, processGroup: launch.status?.processGroupId, status: "running", summary: `development_cycle ${command} ${project} running`, message: "Implementation runner launched and bound to the observer root process." });
     const launchRecord = join(dir, "implementation_launch.json");
     await writeFile(launchRecord, JSON.stringify(launch, null, 2) + "\n");
-    const next = await cycleStatus(dir, { phase: "implementation_launched", owner: "implementation", nextAction: "Use development_cycle status to watch the supervised implementation runner.", projectRoot, projectWikiPath: containedProjectWikiPath, implementationAdapter: launch.adapter, implementationCommand: command, codexSandbox: defaultCodexSandbox, implementationSessionId: launch.sessionId, implementationAttemptId: launch.attemptId, directImplementationStatus: launch.statusPath, directImplementationStdout: launch.stdoutPath, directImplementationStderr: launch.stderrPath, directCorrectionsStatus: null, directCorrectionsStdout: null, directCorrectionsStderr: null, correctionsStdout: null, correctionsStderr: null, observerCorrectionsObservationId: null, implementationCorrectionsSessionId: null, observerObservationId, implementationHandoffRequest: handoffRequest, implementationLaunch: launchRecord, implementationStdout: launch.stdoutPath, implementationStderr: launch.stderrPath, ...(resumeDecision ? { implementationInterventionResolved: { id: resumeDecision.id, response: resumeDecision.response, responsePath: resumeDecision.responsePath, answeredAt: resumeDecision.answeredAt, resumedAttemptId: launch.attemptId }, implementationInterventionResumedAt: new Date().toISOString() } : {}) });
+    const next = await cycleStatus(dir, { ...firstLaunch(status), phase: "implementation_launched", owner: "implementation", nextAction: "Use development_cycle status to watch the supervised implementation runner.", projectRoot, projectWikiPath: containedProjectWikiPath, implementationAdapter: launch.adapter, implementationCommand: command, codexSandbox: defaultCodexSandbox, implementationSessionId: launch.sessionId, implementationAttemptId: launch.attemptId, directImplementationStatus: launch.statusPath, directImplementationStdout: launch.stdoutPath, directImplementationStderr: launch.stderrPath, directCorrectionsStatus: null, directCorrectionsStdout: null, directCorrectionsStderr: null, correctionsStdout: null, correctionsStderr: null, observerCorrectionsObservationId: null, implementationCorrectionsSessionId: null, observerObservationId, implementationHandoffRequest: handoffRequest, implementationLaunch: launchRecord, implementationStdout: launch.stdoutPath, implementationStderr: launch.stderrPath, ...(resumeDecision ? { implementationInterventionResolved: { id: resumeDecision.id, response: resumeDecision.response, responsePath: resumeDecision.responsePath, answeredAt: resumeDecision.answeredAt, resumedAttemptId: launch.attemptId }, implementationInterventionResumedAt: new Date().toISOString() } : {}) });
     return { ok: true, project, runId, dir, phase: next.phase, implementationAdapter: launch.adapter, implementationSessionId: launch.sessionId, implementationAttemptId: launch.attemptId, observerObservationId, launchState: launch.status?.launchState || null, directImplementationStatus: launch.statusPath };
 
   }
@@ -738,7 +746,7 @@ Create or validate the implementation plan only. Do not implement. The plan must
     await updateImplementationObserverSession(dir, observerObservationId, { project, runId, command: "corrections", projectRoot, projectWikiPath: status.projectWikiPath || "", stdoutPath: launch.stdoutPath, stderrPath: launch.stderrPath, attemptId: launch.attemptId, status: "running", summary: `development_cycle corrections ${project} running`, message: "Corrections runner launched; observer integration is optional." });
     const launchRecord = join(dir, "implementation_corrections_launch.json");
     await writeFile(launchRecord, JSON.stringify(launch, null, 2) + "\n");
-    const next = await cycleStatus(dir, { phase: "corrections_launched", owner: "implementation", nextAction: "Use development_cycle status to watch the supervised corrections runner.", projectRoot, implementationAdapter: launch.adapter, implementationCorrectionsSessionId: launch.sessionId, correctionsAttemptId: launch.attemptId, directCorrectionsStatus: launch.statusPath, directCorrectionsStdout: launch.stdoutPath, directCorrectionsStderr: launch.stderrPath, observerCorrectionsObservationId: observerObservationId, implementationCorrectionsRequest: requestPath, implementationCorrectionsLaunch: launchRecord, correctionsStdout: launch.stdoutPath, correctionsStderr: launch.stderrPath });
+    const next = await cycleStatus(dir, { ...countedOnce(status, "correctionRoundCount"), phase: "corrections_launched", owner: "implementation", nextAction: "Use development_cycle status to watch the supervised corrections runner.", projectRoot, implementationAdapter: launch.adapter, implementationCorrectionsSessionId: launch.sessionId, correctionsAttemptId: launch.attemptId, directCorrectionsStatus: launch.statusPath, directCorrectionsStdout: launch.stdoutPath, directCorrectionsStderr: launch.stderrPath, observerCorrectionsObservationId: observerObservationId, implementationCorrectionsRequest: requestPath, implementationCorrectionsLaunch: launchRecord, correctionsStdout: launch.stdoutPath, correctionsStderr: launch.stderrPath });
     return { ok: true, project, runId, dir, phase: next.phase, implementationAdapter: launch.adapter, implementationCorrectionsSessionId: launch.sessionId, correctionsAttemptId: launch.attemptId, observerObservationId, launchState: launch.status?.launchState || null, directCorrectionsStatus: launch.statusPath };
 
   }
@@ -749,7 +757,7 @@ Create or validate the implementation plan only. Do not implement. The plan must
   }
 
   if (action === "close") {
-    const next = await cycleStatus(dir, { phase: "closed", owner: "main", nextAction: "none" });
+    const next = await cycleStatus(dir, { phase: "closed", owner: "main", nextAction: "none", closedAt: new Date().toISOString() });
     return { ok: true, project, runId, dir, phase: next.phase };
   }
   return { ok: false, error: "action_not_implemented", action };

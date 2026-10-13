@@ -382,7 +382,7 @@ async function projectCycle(params: CycleParameters | null | undefined): Promise
     await saveJson(responsePath, { schemaVersion: 1, id: intervention.id, runId, project, response, answeredAt, sourceInterventionPath: status?.implementationInterventionPath || null });
     const durableInterventionPath = String(status?.implementationInterventionPath || join(dir, "implementation_intervention.json"));
     await saveJson(durableInterventionPath, { ...intervention, status: "answered", responsePath, answeredAt });
-    await cycleStatus(dir, { implementationIntervention: { ...intervention, status: "answered", responsePath, answeredAt }, implementationInterventionResponsePath: responsePath, implementationInterventionAnsweredAt: answeredAt, nextAction: "Resuming implementation with the recorded human decision.", ...countedOnce(status, "interventionAnswerCount") });
+    await cycleStatus(dir, { implementationIntervention: { ...intervention, status: "answered", responsePath, answeredAt }, implementationInterventionResponsePath: responsePath, implementationInterventionAnsweredAt: answeredAt, nextAction: "Resuming implementation with the recorded human decision.", ...(intervention.status === "answered" ? {} : countedOnce(status, "interventionAnswerCount")) });
     return await projectCycle({
       ...params,
       action: "start_implementation",

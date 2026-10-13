@@ -1,4 +1,6 @@
-# OpenClaw Development Cycle
+# Development Cycle — Supervised Agentic Execution
+
+*From approved plans to validated outcomes.*
 
 [![CI](https://github.com/Jhacarreiro/openclaw-development-cycle/actions/workflows/ci.yml/badge.svg)](https://github.com/Jhacarreiro/openclaw-development-cycle/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
@@ -37,11 +39,17 @@ The public tool API represents the final decision explicitly through `record_fin
 
 Experimental. The state machine, storage, adapters, shell quoting, and process-supervision boundaries are tested. Use a disposable or backed-up checkout for initial evaluation.
 
+### Operational baseline
+
+Evaluate the cycle on a meaningful real development task selected by the user. Agree the scope and independent behavioral acceptance criteria before the first run. Record the approved plan, delivery, mechanical validation, final decision, duration, cost and interventions, and assess whether the solution meets the user's actual need.
+
+The task and repository may remain private; publish only sanitized, portable evidence. Synthetic fixtures are useful for deterministic implementation tests and do not replace the real-task baseline.
+
 ## Requirements
 
 - Linux with `/proc/self/fd` support for guarded project-root filesystem operations
 - `projectRoot` must be an existing Git checkout for implementation and mechanical validation actions
-- Node.js 22.22.3+ on the 22.x line or 24.15.0+ on the 24.x line (the CI-tested versions supported by the pinned OpenClaw dependency)
+- Node.js 22.22.3+ on the 22.x line or 24.15.0+ on the 24.x line (the CI-tested versions supported by the pinned OpenClaw `2026.9.2` development SDK)
 - Python 3
 - `jq`
 - GNU coreutils `timeout` for validation, council and delivery command process groups

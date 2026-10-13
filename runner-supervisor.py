@@ -9,6 +9,7 @@ import socket
 import sys
 import time
 import threading
+import tempfile
 import urllib.request
 from pathlib import Path
 
@@ -35,6 +36,57 @@ def reap_all(runners: dict[int, int]) -> list[tuple[int, int]]:
             exited.append((pid, status))
     return exited
 
+
+
+def atomic_write_text(path: Path, text: str) -> None:
+    fd, tmp = tempfile.mkstemp(prefix=f".{path.name}.tmp.", dir=path.parent)
+    try:
+        with os.fdopen(fd, 'w') as file:
+            file.write(text)
+            file.flush()
+            os.fsync(file.fileno())
+        os.replace(tmp, path)
+        directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    finally:
+        try:
+            os.unlink(tmp)
+        except FileNotFoundError:
+            pass
+
+
+def persist_terminal_state_if_missing(cwd: str, wait_status: int) -> None:
+    session_dir = Path(cwd)
+    exit_code_path = session_dir / 'exit-code.txt'
+    if exit_code_path.exists():
+        return
+    try:
+        exit_code = os.waitstatus_to_exitcode(wait_status)
+    except ValueError:
+        exit_code = 1
+    exited_at = time.strftime('%Y-%m-%dT%H:%M:%S%z')
+    status_path = session_dir / 'status.json'
+    try:
+        status = json.loads(status_path.read_text()) if status_path.exists() else {}
+    except (OSError, json.JSONDecodeError):
+        status = {}
+    if not isinstance(status, dict):
+        status = {}
+    status.update({
+        'status': 'completed' if exit_code == 0 else 'failed',
+        'launchState': 'exited',
+        'exitCode': exit_code,
+        'exitedAt': exited_at,
+        'updatedAt': exited_at,
+        'message': 'Runner terminal state materialized by supervisor after missing finalizer markers.',
+    })
+    atomic_write_text(status_path, json.dumps(status, indent=2) + '\n')
+    atomic_write_text(session_dir / 'exited-at.txt', f"{exited_at}\n")
+    # Publish the exit marker last so reconcile sees the complete terminal state.
+    atomic_write_text(exit_code_path, f"{exit_code}\n")
 
 def group_members(pgid: int) -> list[int]:
     members = []
@@ -123,6 +175,7 @@ def serve(socket_path: str) -> None:
     server.listen(16)
     server.settimeout(0.2)
     runners: dict[int, int] = {}
+    runner_cwds: dict[int, str] = {}
     callbacks: dict[int, dict] = {}
     launch_in_flight = False
     shutdown_requested = False
@@ -131,11 +184,20 @@ def serve(socket_path: str) -> None:
         return None
 
     def cleanup_and_exit() -> None:
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
         for pgid in list(runners.values()):
             try:
                 terminate_group(pgid, runners)
             except BaseException:
                 pass
+        for pid, wait_status in reap_all(runners):
+            cwd = runner_cwds.get(pid)
+            if cwd:
+                try:
+                    persist_terminal_state_if_missing(cwd, wait_status)
+                except Exception:
+                    print('runner terminal state persistence failed', file=sys.stderr, flush=True)
         os._exit(0)
 
     def shutdown(_sig, _frame):
@@ -186,6 +248,7 @@ def serve(socket_path: str) -> None:
                         try:
                             pid = launch_runner(runner_path, cwd)
                             runners[pid] = pid
+                            runner_cwds[pid] = cwd
                             if isinstance(request.get('reconcile'), dict):
                                 callbacks[pid] = request['reconcile']
                             response = {'ok': True, 'pid': pid, 'pgid': pid, 'supervisorPid': os.getpid()}
@@ -204,10 +267,17 @@ def serve(socket_path: str) -> None:
                     # the supervisor (it is the subreaper for running sessions).
                     pass
 
-        for pid, _status in reap_all(runners):
+        for pid, wait_status in reap_all(runners):
+            cwd = runner_cwds.get(pid)
+            if cwd:
+                try:
+                    persist_terminal_state_if_missing(cwd, wait_status)
+                except Exception:
+                    print('runner terminal state persistence failed', file=sys.stderr, flush=True)
             pgid = runners.get(pid, pid)
             terminate_group(pgid, runners)
             runners.pop(pid, None)
+            runner_cwds.pop(pid, None)
             callback = callbacks.pop(pid, None)
             if callback:
                 # Run outside the terminated runner group and outside the socket loop.

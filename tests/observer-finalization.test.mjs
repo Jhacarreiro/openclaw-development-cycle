@@ -3,8 +3,9 @@ import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { readCoordinatorSource } from "./helpers/coordinator-source.mjs";
 
-const source = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
+const source = await readCoordinatorSource();
 
 function detailsOf(result) {
   return result?.details ?? result;
@@ -87,10 +88,8 @@ async function loadTool(root, { failTerminal = false } = {}) {
 }
 
 test("finalizeObserverSessions covers runner-missing and launch-failure terminals", () => {
-  const finalizeFn = source.slice(
-    source.indexOf("async function finalizeObserverSessions"),
-    source.indexOf("async function refreshLaunchedImplementationStatus"),
-  );
+  const finalizeStart = source.indexOf("async function finalizeObserverSessions");
+  const finalizeFn = source.slice(finalizeStart, source.indexOf("\n  return {", finalizeStart));
   assert.match(finalizeFn, /result\.ok !== true/);
   assert.match(finalizeFn, /observer_update_unsuccessful/);
   assert.doesNotMatch(finalizeFn, /observer is optional/);

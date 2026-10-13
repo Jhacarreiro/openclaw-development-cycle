@@ -367,29 +367,6 @@ Do not implement:
 - second OpenClaw tool;
 - semantic repurposing of `squeeze` without an explicit Octopus redesign.
 
-## Shopping Assistant as first real fixture
-
-Use as an integration fixture only; do not hard-code policy.
-
-Useful brief areas:
-
-- owner/member authorization;
-- cross-household BOLA/IDOR;
-- invite entropy/expiry/replay/email binding;
-- member `scrypt` credential storage and brute-force exposure;
-- session fixation/hijacking/revocation;
-- CSRF;
-- XSS from product/retailer/user metadata;
-- retailer-profile isolation;
-- retailer secret/token leakage;
-- Cloudflare Access vs app-auth boundary;
-- checkout redirects;
-- container/nginx/API exposure;
-- secret/build-artifact leakage;
-- login/invite/join rate limiting.
-
-The audit should try to **prove** privilege escalation/cross-household access, not merely confirm that authorization checks exist.
-
 ## Tests required
 
 At minimum prove:

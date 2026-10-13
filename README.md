@@ -7,15 +7,7 @@ An experimental OpenClaw control plane for durable software-development cycles. 
 
 The control plane is implementation-runner agnostic. A generic command adapter is the default. Octopus is available as an optional adapter.
 
-A research direction, *Decision Multiverse*, is [documented below](#research-direction-decision-multiverse-proposal) as a proposal; it is not a shipped feature.
-
-## Experiments people are considering
-
-This is a list of **proposed, not necessarily executed** experiments to test solution-led, AI-assisted development. Entries are briefs, not claims of product functionality or verified results.
-
-- **[App Growth Lab — B2C mobile acquisition](experiments/app-growth-lab.md)** · **Proposed / not run.** Explore a bounded, measurable acquisition funnel for one iOS/Android consumer app, from audience and positioning through an experiment and evidence-based next decision. The task is intentionally solution-first and avoids prescribing technologies or a fixed set of alternatives. Any execution requires separate authorization.
-
-The research method and eventual observations belong in the [Decision Multiverse roadmap](docs/ROADMAP.md). Proposed experiments should distinguish hypotheses, execution evidence and actual outcomes.
+Related research: [Elsewhere](https://github.com/Jhacarreiro/elsewhere) explores decision provenance and alternative outcomes independently of this plugin.
 
 ## Workflow
 
@@ -44,6 +36,12 @@ The public tool API represents the final decision explicitly through `record_fin
 ## Status
 
 Experimental. The state machine, storage, adapters, shell quoting, and process-supervision boundaries are tested. Use a disposable or backed-up checkout for initial evaluation.
+
+### Operational baseline
+
+Evaluate the cycle on a meaningful real development task selected by the user. Agree the scope and independent behavioral acceptance criteria before the first run. Record the approved plan, delivery, mechanical validation, final decision, duration, cost and interventions, and assess whether the solution meets the user's actual need.
+
+The task and repository may remain private; publish only sanitized, portable evidence. Synthetic fixtures are useful for deterministic implementation tests and do not replace the real-task baseline.
 
 ## Requirements
 
@@ -248,14 +246,6 @@ The supervisor performs one best-effort `reconcile` callback through the configu
 - child work is supervised as a process group;
 - final validation remains explicit in durable state even when the decision is produced automatically;
 - no credentials, private addresses, or operator-specific paths are embedded.
-
-## Research direction: Decision Multiverse (proposal)
-
-We build **solutions**, not software output for its own sake. AI agents may perform implementation while people direct goals, alternatives, trade-offs, quality and accountability. We want to investigate whether consequential choices in an agentic development run can be captured and visualized as a navigable map, then eventually replayed in isolated branches to compare **observed** outcomes.
-
-**Research hypothesis, not a shipped feature.** The number and nature of alternatives must emerge from each decision and its implications; there is no predefined three-way branch template. An unexecuted alternative is a hypothesis, never a validated outcome. The first proposed milestone is *read-only post-run decision provenance*, without changing the execution engine.
-
-See [research roadmap](docs/ROADMAP.md), [working thesis](docs/THESIS_DRAFT.md) and [research questions and conversation synthesis](docs/CONVERSATION_NOTES.md). We are testing whether decision discovery is faithful and useful, whether counterfactual replay is valid and reproducible, and whether branch exploration improves real solution quality relative to its time and compute cost.
 
 ## Development
 

@@ -258,7 +258,7 @@ npm run check
 
 The check runs tests, the public-leak audit, and OpenClaw plugin validation.
 
-See [Contributing](CONTRIBUTING.md), [Architecture](docs/architecture.md), [Troubleshooting](docs/troubleshooting.md), and [Security](SECURITY.md).
+See [Contributing](CONTRIBUTING.md), [Architecture](docs/architecture.md), [Troubleshooting](docs/troubleshooting.md), [Reliability baseline](docs/reliability-baseline.md), and [Security](SECURITY.md).
 
 ## License
 

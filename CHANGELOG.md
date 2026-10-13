@@ -31,6 +31,9 @@ The format is based on Keep a Changelog and the project follows Semantic Version
 
 ### Changed
 
+- Phase-notification dedupe state and audit events are now written to `phase_notification_state.json` and `phase_notification_events.jsonl` (event types `development_cycle.phase_notification` and `development_cycle.phase_notification_delivery`), replacing channel-specific legacy names. Existing runs start a fresh dedupe file, so one repeated notification is possible for a run that is active during the upgrade.
+- The coordinator is split into factory modules under `src/cycle/`; `src/index.ts` keeps tool registration, the parameter schema and the action dispatcher.
+- README: the research proposal moved below the operational sections and the Octopus contextual-read notes moved into the Octopus adapter section.
 - The coordinator is checked by TypeScript without `@ts-nocheck`; tool arguments derive from the public schema and builds reject unused locals and parameters.
 - The pinned development SDK uses the maintained OpenClaw `2026.8.33` release, retaining Node 22 and 24 support and removing the previously reported development dependency vulnerabilities.
 - Audit JSONL writers serialize rotations and compress history at 8 MiB per file. Archives are preserved by default; finite archive retention is opt-in and does not remove run state or notification jobs.

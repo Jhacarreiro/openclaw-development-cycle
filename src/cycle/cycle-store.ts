@@ -20,18 +20,18 @@ export function createCycleStore(deps: CycleStoreDeps) {
     const notice = phaseNotificationForTransition(previous, next);
     if (!notice) return next;
 
-    const statePath = join(dir, "telegram_update_state.json");
-    const eventsPath = join(dir, "telegram_update_events.jsonl");
+    const statePath = join(dir, "phase_notification_state.json");
+    const eventsPath = join(dir, "phase_notification_events.jsonl");
     const signature = JSON.stringify({ phase: notice.phase, project: next?.project || "", runId: next?.runId || "" });
     const state = await filesystemStore.loadJson<any>(statePath);
     if (state?.lastSignature === signature) return next;
 
     const result = await sendCycleMessage({ __notificationAudit: { eventsPath, event: {
-      eventType: "development_cycle.telegram_delivery", project: next?.project || previous?.project || "",
+      eventType: "development_cycle.phase_notification_delivery", project: next?.project || previous?.project || "",
       runId: next?.runId || previous?.runId || "", phase: notice.phase, title: notice.title, signature,
     } } }, notice.title, notice.text).catch((error: any) => ({ ok: false, error: String(error?.message || error) }));
     const event = {
-      eventType: "development_cycle.telegram_update",
+      eventType: "development_cycle.phase_notification",
       createdAt: new Date().toISOString(),
       project: next?.project || previous?.project || "",
       runId: next?.runId || previous?.runId || "",

@@ -1,4 +1,6 @@
-# OpenClaw Development Cycle
+# Development Cycle — Supervised Agentic Execution
+
+*From approved plans to validated outcomes.*
 
 [![CI](https://github.com/Jhacarreiro/openclaw-development-cycle/actions/workflows/ci.yml/badge.svg)](https://github.com/Jhacarreiro/openclaw-development-cycle/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)

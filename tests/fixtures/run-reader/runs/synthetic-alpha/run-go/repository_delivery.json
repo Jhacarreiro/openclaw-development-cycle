@@ -1,0 +1,9 @@
+{
+  "ok": true,
+  "classification": "success",
+  "merged": true,
+  "pullRequest": {
+    "url": "https://github.com/example/synthetic-project/pull/1"
+  },
+  "completedAt": "2026-01-01T09:59:00.000Z"
+}

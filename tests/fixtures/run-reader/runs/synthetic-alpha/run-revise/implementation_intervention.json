@@ -1,0 +1,12 @@
+{
+  "schemaVersion": 1,
+  "id": "synthetic-intervention-1",
+  "status": "pending",
+  "kind": "human_decision",
+  "question": "SYNTHETIC_PRIVATE_INTERVENTION_BODY",
+  "context": "Synthetic request for a decision",
+  "options": [],
+  "recommendedOption": null,
+  "sourceAttemptId": "synthetic-attempt-1",
+  "createdAt": "2026-01-02T09:00:00.000Z"
+}

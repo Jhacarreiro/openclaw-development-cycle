@@ -50,18 +50,18 @@ Each run has the following fields. Unavailable scalar values are `null`, with a 
 | `finalDecision` | `go`, `revise`, or `stop`, parsed from `final_validation_response.md` with the existing `parseFinalDecision` helper. |
 | `implementationAdapter` | Recorded `status.json.implementationAdapter`. |
 | `failureClass` | `status.json.failureClass` verbatim; never derived from phase or logs. Absence does not establish success. |
-| `interventionCount` | Unavailable: the current format does not record a cumulative count of `answer_intervention` actions. |
-| `correctionRounds` | Unavailable: the current format does not record a complete count of manual and automatic correction rounds. |
+| `interventionCount` | Recorded `status.json.interventionAnswerCount`: answered interventions. Runs created before this field existed leave it unavailable. |
+| `correctionRounds` | Recorded `status.json.correctionRoundCount`: launched `start_corrections` rounds. Automatic council rounds are in `councilCorrectionRounds`. Older runs leave it unavailable. |
 | `councilCorrectionRounds` | Recorded `status.json.councilCorrectionCount`; automatic council corrections only. |
 | `automaticRecoveryCount` | Cumulative `status.json.automaticPlannerRecoveryCount` only; unavailable if absent. |
 | `automaticRecoveryEvents` | Retained automatic recovery JSONL event count; `0` when the recorded total is `0` and no log exists; unavailable when the recorded total proves history is missing. |
 | `deliveryOutcome` | Delivery `classification`: `success`, `partial`, or `invalid`. Source is `repository_delivery.json`, falling back to `status.repositoryDelivery` only if the file is absent. |
 | `prUrl` | Delivery `pullRequest.url`. |
 | `deliveryOk`, `deliverySkipped`, `deliveryLocalOnly`, `deliveryMerged`, `prState` | Delivery `ok`, `skipped`, `localOnly`, `merged`, and `pullRequest.state`; missing flags remain unavailable. |
-| `createdAt`, `updatedAt` | Recorded run `status.json` timestamps. The current run-status writer records `updatedAt` but does not create `createdAt`. |
-| `startedAt` | Recorded run `status.json.startedAt`, if present. The current writer does not persist a run launch timestamp. |
-| `endedAt` | Recorded run `status.json.stoppedAt` when the phase is `stopped`. Other terminal phases do not have a dedicated run endpoint. |
-| `durationMs` | Difference between known run start and end times; normally unavailable. `updatedAt` is never an endpoint. |
+| `createdAt`, `updatedAt` | Recorded run `status.json` timestamps. `createdAt` is written with the first status of runs created since run tracking was added; older runs leave it unavailable. |
+| `startedAt` | Recorded run `status.json.startedAt`: the first implementation launch of a run that has `createdAt`. |
+| `endedAt` | Recorded `status.json.closedAt` when the phase is `closed`, or `stoppedAt` when it is `stopped`. Other phases have no run endpoint yet. |
+| `durationMs` | Difference between `startedAt` and `endedAt` when both are recorded. `updatedAt` is never an endpoint. |
 | `attemptCreatedAt`, `attemptEndedAt`, `attemptDurationMs` | Latest attempt's `createdAt`, `stoppedAt` or `exitedAt`, and their difference, from contained `status.directCorrectionsStatus` when recorded, else `status.directImplementationStatus` (`start_implementation` clears the corrections pointer). These measure an attempt, not the cycle. |
 | `planPath` | Recorded `status.json.plan`, returned only as a contained path relative to the state root. Plan contents are never returned. |
 | `acceptanceChecks`, `solutionValue`, `cost` | Unavailable: no persisted external acceptance result, usefulness assessment, or run-level model/token cost. |

@@ -164,4 +164,6 @@ test("implementation intervention waits for human and answer resumes the same ru
   const finalStatus = JSON.parse(await readFile(statusPath, "utf8"));
   assert.equal(finalStatus.implementationInterventionResolved.id, "choose-auth-mode");
   assert.equal(finalStatus.implementationInterventionResolved.response, "Choose A; preserve the existing API shape.");
+  assert.equal(finalStatus.interventionAnswerCount, 1);
+  assert.ok(Date.parse(finalStatus.startedAt) >= Date.parse(finalStatus.createdAt));
 });

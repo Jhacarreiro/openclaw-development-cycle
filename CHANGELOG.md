@@ -8,6 +8,7 @@ The format is based on Keep a Changelog and the project follows Semantic Version
 
 ### Added
 
+- Run tracking for new runs: `status.json` records `createdAt`, `startedAt` (first implementation launch), `closedAt`, `interventionAnswerCount` and `correctionRoundCount`, and the run reader reports them. Runs created earlier keep these fields absent instead of receiving partial values.
 - `docs/reliability-baseline.md`: a proposed criterion and per-run record for measuring whether linear cycles reach a recorded decision on a meaningful real task chosen by the user, with acceptance checks defined before the runs and sanitized public evidence.
 
 ### Fixed

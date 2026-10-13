@@ -94,6 +94,7 @@ test("second correction launch failure cannot reuse first correction success", a
   }, undefined, undefined));
   assert.equal(firstReconcile.status.phase, "corrections_completed");
   assert.equal(firstReconcile.status.directCorrectionsStatus, first.directCorrectionsStatus);
+  assert.equal(firstReconcile.status.correctionRoundCount, 1);
 
   cycle = JSON.parse(await readFile(cycleStatusPath, "utf8"));
   await writeFile(cycleStatusPath, JSON.stringify({ ...cycle, phase: "needs_corrections", owner: "main" }, null, 2));
@@ -110,6 +111,8 @@ test("second correction launch failure cannot reuse first correction success", a
 
   const afterSecond = JSON.parse(await readFile(cycleStatusPath, "utf8"));
   assert.equal(afterSecond.phase, "corrections_failed");
+  // A round that failed to launch is not counted.
+  assert.equal(afterSecond.correctionRoundCount, 1);
   assert.equal(afterSecond.directCorrectionsStatus, null);
   assert.equal(afterSecond.directCorrectionsStdout, null);
   assert.equal(afterSecond.directCorrectionsStderr, null);

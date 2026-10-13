@@ -173,7 +173,10 @@ async function readRun(state: ReadonlyState, project: string, runId: string): Pr
   recorded(run, "councilCorrectionRounds", status.councilCorrectionCount, count);
   recorded(run, "automaticRecoveryCount", status.automaticPlannerRecoveryCount, count);
   for (const field of ["createdAt", "updatedAt", "startedAt"] as const) recorded(run, field, status[field], timestamp);
-  if (run.phase === "stopped") recorded(run, "endedAt", status.stoppedAt, timestamp);
+  recorded(run, "interventionCount", status.interventionAnswerCount, count);
+  recorded(run, "correctionRounds", status.correctionRoundCount, count);
+  if (run.phase === "closed") recorded(run, "endedAt", status.closedAt, timestamp);
+  else if (run.phase === "stopped") recorded(run, "endedAt", status.stoppedAt, timestamp);
   duration(run, "durationMs", run.startedAt, run.endedAt,
     run.unavailable.startedAt === "unreadable" || run.unavailable.endedAt === "unreadable" ? "unreadable" : "not_recorded");
 

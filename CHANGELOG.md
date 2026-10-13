@@ -6,6 +6,10 @@ The format is based on Keep a Changelog and the project follows Semantic Version
 
 ## [Unreleased]
 
+### Added
+
+- `docs/reliability-baseline.md`: a proposed criterion and per-run record for measuring whether linear cycles reach a recorded decision on a fixed synthetic task.
+
 ### Fixed
 
 - Council NO-GO, FAIL, STOP and inconclusive reviews no longer count as acceptance; rejected reviews do not auto-launch corrections.

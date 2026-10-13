@@ -15,6 +15,14 @@ We build **solutions**, not software output for its own sake. AI agents may perf
 
 See [research roadmap](docs/ROADMAP.md), [working thesis](docs/THESIS_DRAFT.md) and [research questions and conversation synthesis](docs/CONVERSATION_NOTES.md). We are testing whether decision discovery is faithful and useful, whether counterfactual replay is valid and reproducible, and whether branch exploration improves real solution quality relative to its time and compute cost.
 
+## Experiments people are considering
+
+This is a list of **proposed, not necessarily executed** experiments to test solution-led, AI-assisted development. Entries are briefs, not claims of product functionality or verified results.
+
+- **[App Growth Lab — B2C mobile acquisition](experiments/app-growth-lab.md)** · **Proposed / not run.** Explore a bounded, measurable acquisition funnel for one iOS/Android consumer app, from audience and positioning through an experiment and evidence-based next decision. The task is intentionally solution-first and avoids prescribing technologies or a fixed set of alternatives. Any execution requires separate authorization.
+
+The research method and eventual observations belong in the [Decision Multiverse roadmap](docs/ROADMAP.md). Proposed experiments should distinguish hypotheses, execution evidence and actual outcomes.
+
 ## Workflow
 
 The plugin registers one OpenClaw tool, `development_cycle`:

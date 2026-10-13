@@ -9,6 +9,36 @@ The control plane is implementation-runner agnostic. A generic command adapter i
 
 A research direction, *Decision Multiverse*, is [documented below](#research-direction-decision-multiverse-proposal) as a proposal; it is not a shipped feature.
 
+## Elsewhere — architecture and research direction
+
+**Elsewhere — Same same, but different.** One problem. Different decisions. Different futures.
+
+```mermaid
+flowchart TB
+  E["Elsewhere<br/>Solution exploration vision"]
+  DC["Development Cycle<br/>Supervised control plane<br/>(existing)"]
+  DM["Decision Multiverse<br/>Decision provenance and counterfactuals<br/>(research proposal)"]
+  O["Octopus<br/>External orchestration engine<br/>(optional adapter)"]
+  A["Other implementation adapters<br/>(supported architecture)"]
+
+  E --> DC
+  E --> DM
+  DC -->|approved implementation| O
+  DC -->|alternative adapter| A
+  DC -.->|run artifacts and evidence| DM
+  DM -.->|future isolated replay requests through control plane| DC
+```
+
+The diagram distinguishes **existing components** from a **research proposal**. Octopus is an external, optional implementation adapter, not part of Development Cycle's owned code. Decision Multiverse should initially consume completed-run evidence read-only; future replay would be mediated by Development Cycle's authorized control plane. Arrows are conceptual relationships, not claims that replay exists today. No fixed number of decision branches is imposed.
+
+## Research direction: Decision Multiverse (proposal)
+
+We build **solutions**, not software output for its own sake. AI agents may perform implementation while people direct goals, alternatives, trade-offs, quality and accountability. We want to investigate whether consequential choices in an agentic development run can be captured and visualized as a navigable map, then eventually replayed in isolated branches to compare **observed** outcomes.
+
+**Research hypothesis, not a shipped feature.** The number and nature of alternatives must emerge from each decision and its implications; there is no predefined three-way branch template. An unexecuted alternative is a hypothesis, never a validated outcome. The first proposed milestone is *read-only post-run decision provenance*, without changing the execution engine.
+
+See [research roadmap](docs/ROADMAP.md), [working thesis](docs/THESIS_DRAFT.md) and [research questions and conversation synthesis](docs/CONVERSATION_NOTES.md). We are testing whether decision discovery is faithful and useful, whether counterfactual replay is valid and reproducible, and whether branch exploration improves real solution quality relative to its time and compute cost.
+
 ## Experiments people are considering
 
 This is a list of **proposed, not necessarily executed** experiments to test solution-led, AI-assisted development. Entries are briefs, not claims of product functionality or verified results.

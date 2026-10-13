@@ -2,6 +2,28 @@
 
 *Working thesis / research proposal — 13 October 2026. Conceptual, not peer-reviewed; no experimental result is claimed.*
 
+## Elsewhere — architecture and research direction
+
+**Elsewhere — Same same, but different.** One problem. Different decisions. Different futures.
+
+```mermaid
+flowchart TB
+  E["Elsewhere<br/>Solution exploration vision"]
+  DC["Development Cycle<br/>Supervised control plane<br/>(existing)"]
+  DM["Decision Multiverse<br/>Decision provenance and counterfactuals<br/>(research proposal)"]
+  O["Octopus<br/>External orchestration engine<br/>(optional adapter)"]
+  A["Other implementation adapters<br/>(supported architecture)"]
+
+  E --> DC
+  E --> DM
+  DC -->|approved implementation| O
+  DC -->|alternative adapter| A
+  DC -.->|run artifacts and evidence| DM
+  DM -.->|future isolated replay requests through control plane| DC
+```
+
+The diagram distinguishes **existing components** from a **research proposal**. Octopus is an external, optional implementation adapter, not part of Development Cycle's owned code. Decision Multiverse should initially consume completed-run evidence read-only; future replay would be mediated by Development Cycle's authorized control plane. Arrows are conceptual relationships, not claims that replay exists today. No fixed number of decision branches is imposed.
+
 ## The kitchen
 
 I do not build software for its own sake. I build solutions. Software is often an ingredient, not the outcome. I imagine AI as an enormous kitchen: capable agents increasingly prepare the work, while the human's contribution becomes closer to that of a top chef — choosing what is worth making, setting standards, judging trade-offs, tasting the result and taking responsibility for what gets served.

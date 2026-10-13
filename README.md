@@ -7,13 +7,7 @@ An experimental OpenClaw control plane for durable software-development cycles. 
 
 The control plane is implementation-runner agnostic. A generic command adapter is the default. Octopus is available as an optional adapter.
 
-## Research direction: Decision Multiverse (proposal)
-
-We build **solutions**, not software output for its own sake. AI agents may perform implementation while people direct goals, alternatives, trade-offs, quality and accountability. We want to investigate whether consequential choices in an agentic development run can be captured and visualized as a navigable map, then eventually replayed in isolated branches to compare **observed** outcomes.
-
-**Research hypothesis, not a shipped feature.** The number and nature of alternatives must emerge from each decision and its implications; there is no predefined three-way branch template. An unexecuted alternative is a hypothesis, never a validated outcome. The first proposed milestone is *read-only post-run decision provenance*, without changing the execution engine.
-
-See [research roadmap](docs/ROADMAP.md), [working thesis](docs/THESIS_DRAFT.md) and [research questions and conversation synthesis](docs/CONVERSATION_NOTES.md). We are testing whether decision discovery is faithful and useful, whether counterfactual replay is valid and reproducible, and whether branch exploration improves real solution quality relative to its time and compute cost.
+A research direction, *Decision Multiverse*, is [documented below](#research-direction-decision-multiverse-proposal) as a proposal; it is not a shipped feature.
 
 ## Experiments people are considering
 
@@ -203,6 +197,23 @@ Managed Octopus launches fail closed on review routing. `~/.claude-octopus/confi
 
 Octopus council review remains available only when this adapter is active.
 
+#### Contextual reads
+
+`DEVELOPMENT_CYCLE_OCTOPUS_READ_SCOPE_MODE` defaults to `contextual`; `strict`
+keeps repository-relative reads only. Invalid values are rejected. Implementation
+and correction launches can select `readScopeMode: "strict"` or `"contextual"`.
+
+The adapter passes `OCTOPUS_TANGLE_READ_SCOPE_MODE` and
+`OCTOPUS_TANGLE_CONTEXTUAL_READ_ROOTS` from validated launch metadata: project
+root, project documentation root, this run-specific handoff directory, approved
+plan, request and prompt files. File entries never grant their parent directories.
+Task prose and inherited read-root environment variables cannot expand the list.
+
+This requires an Octopus revision supporting contextual reads. External read
+grants never authorize writing. Known secret/auth paths and symlink escapes are
+rejected. This is declaration validation and guidance, not OS sandboxing or
+complete secret isolation in full-access execution.
+
 See [Adapters](docs/adapters.md) and [Configuration](docs/configuration.md).
 
 ## Notifications
@@ -219,11 +230,11 @@ Any channel configured in the Gateway and supported by its `message` tool can be
 
 When notifications are enabled, the plugin sends best-effort, deduplicated messages for material lifecycle phase transitions only. Heartbeats and same-phase status refreshes remain silent. Current material notifications include implementation launch/running/delivery/failure, correction rounds, mechanical validation outcomes, council review outcomes, final validation decisions, stop, repository delivery, merge and close. Human-intervention/council-interrupt messages keep their dedicated notification paths and are not duplicated by the phase notifier.
 
-Lifecycle notification dedupe is persisted per run in `telegram_update_state.json`; audit events are appended to `telegram_update_events.jsonl`. Notification delivery failures are recorded in those event files but do not mutate the Development Cycle phase or fail the lifecycle action.
+Lifecycle notification dedupe is persisted per run in `phase_notification_state.json`; audit events are appended to `phase_notification_events.jsonl`. Notification delivery failures are recorded in those event files but do not mutate the Development Cycle phase or fail the lifecycle action.
 
 Notification delivery uses `OPENCLAW_GATEWAY_TOKEN` for bearer authentication when set. The Gateway URL is selected from `DEVELOPMENT_CYCLE_GATEWAY_URL`, then `OPENCLAW_GATEWAY_URL`, then `http://127.0.0.1:18789`. See [Configuration](docs/configuration.md#openclaw-notifications) for notification settings.
 
-Gateway message delivery is deferred until the current `development_cycle` tool execution has returned. Notifications are saved under `<state-root>/notification-outbox/` before they are queued, then drained when the active-action count reaches zero. Pending jobs are recovered when the plugin starts and checked every 30 seconds. Failed delivery retries up to five times with backoff; exhausted jobs remain on disk for inspection. Delivery is at least once: a crash after the Gateway sends a message but before acknowledgement is saved can cause a duplicate. Phase delivery results are appended asynchronously to `telegram_update_events.jsonl`.
+Gateway message delivery is deferred until the current `development_cycle` tool execution has returned. Notifications are saved under `<state-root>/notification-outbox/` before they are queued, then drained when the active-action count reaches zero. Pending jobs are recovered when the plugin starts and checked every 30 seconds. Failed delivery retries up to five times with backoff; exhausted jobs remain on disk for inspection. Delivery is at least once: a crash after the Gateway sends a message but before acknowledgement is saved can cause a duplicate. Phase delivery results are appended asynchronously to `phase_notification_events.jsonl`.
 
 The supervisor performs one best-effort `reconcile` callback through the configured Gateway after runner exit and process-group cleanup. This lets the control plane observe terminal runner state without polling. For one narrowly classified Octopus planner-reconsideration contract failure, `reconcile` may automatically relaunch the same approved plan exactly once, but only when the attempt worktree is pristine, its HEAD still matches the source checkout, and there is no pending human intervention. Unknown failures, dirty/committed worktrees, interventions, or a second occurrence fail closed and require normal operator handling. Recovery events are appended to `automatic_recovery_events.jsonl`.
 
@@ -237,6 +248,14 @@ The supervisor performs one best-effort `reconcile` callback through the configu
 - child work is supervised as a process group;
 - final validation remains explicit in durable state even when the decision is produced automatically;
 - no credentials, private addresses, or operator-specific paths are embedded.
+
+## Research direction: Decision Multiverse (proposal)
+
+We build **solutions**, not software output for its own sake. AI agents may perform implementation while people direct goals, alternatives, trade-offs, quality and accountability. We want to investigate whether consequential choices in an agentic development run can be captured and visualized as a navigable map, then eventually replayed in isolated branches to compare **observed** outcomes.
+
+**Research hypothesis, not a shipped feature.** The number and nature of alternatives must emerge from each decision and its implications; there is no predefined three-way branch template. An unexecuted alternative is a hypothesis, never a validated outcome. The first proposed milestone is *read-only post-run decision provenance*, without changing the execution engine.
+
+See [research roadmap](docs/ROADMAP.md), [working thesis](docs/THESIS_DRAFT.md) and [research questions and conversation synthesis](docs/CONVERSATION_NOTES.md). We are testing whether decision discovery is faithful and useful, whether counterfactual replay is valid and reproducible, and whether branch exploration improves real solution quality relative to its time and compute cost.
 
 ## Development
 
@@ -252,21 +271,3 @@ See [Contributing](CONTRIBUTING.md), [Architecture](docs/architecture.md), [Trou
 ## License
 
 MIT. See [LICENSE](LICENSE).
-
-
-### Contextual reads for Octopus
-
-`DEVELOPMENT_CYCLE_OCTOPUS_READ_SCOPE_MODE` defaults to `contextual`; `strict`
-keeps repository-relative reads only. Invalid values are rejected. Implementation
-and correction launches can select `readScopeMode: "strict"` or `"contextual"`.
-
-The adapter passes `OCTOPUS_TANGLE_READ_SCOPE_MODE` and
-`OCTOPUS_TANGLE_CONTEXTUAL_READ_ROOTS` from validated launch metadata: project
-root, project documentation root, this run-specific handoff directory, approved
-plan, request and prompt files. File entries never grant their parent directories.
-Task prose and inherited read-root environment variables cannot expand the list.
-
-This requires an Octopus revision supporting contextual reads. External read
-grants never authorize writing. Known secret/auth paths and symlink escapes are
-rejected. This is declaration validation and guidance, not OS sandboxing or
-complete secret isolation in full-access execution.

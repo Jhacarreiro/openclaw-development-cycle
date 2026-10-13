@@ -22,6 +22,12 @@ In an initial read-only phase, the map is a provenance-aware interpretation of a
 
 A later phase would let a human select a historical fork, reconstruct a suitable checkpoint, and execute another path in isolation. Only then can we compare the *actual* resulting artifacts, behavior, cost and product outcome under comparable criteria. A parallel search over many forks is a long-term research direction, not a current capability.
 
+## Related practice
+
+Several existing practices cover parts of this idea. Architecture decision records capture a human-written decision, its context and the alternatives considered. Best-of-N sampling and parallel agent attempts generate several complete solutions and pick one. Tree-of-thought style search explores branches inside a single reasoning episode.
+
+The proposal differs in where it forks and what it records: it branches at a consequential decision inside a supervised run rather than resampling the whole run, and every displayed alternative carries provenance (observed, agent-stated or inferred). Whether that distinction yields better solutions than best-of-N at equal cost is exactly question 6 below.
+
 ## What must be proven
 
 1. **Discovery:** can the system distinguish consequential decisions from routine actions without swamping the human in noise?
@@ -35,7 +41,7 @@ A later phase would let a human select a historical fork, reconstruct a suitable
 
 ## Minimal research protocol
 
-Start with one real completed development task and document a small number of material decisions. Define independent behavioral acceptance criteria before any replay. Compare linear execution, human-directed selection and constrained multi-branch exploration using comparable context and budgets. Record interventions, total cost, duration, functional results and downstream usability. This first study tests feasibility, not general superiority; larger replicated tasks would be required for robust conclusions.
+First establish a stable linear baseline on a fixed synthetic task (see the roadmap's Phase 0). Then take one completed run of that task and document a small number of material decisions. Define independent behavioral acceptance criteria before any replay. Compare linear execution, human-directed selection and constrained multi-branch exploration using comparable context and budgets. Record interventions, total cost, duration, functional results and downstream usability. This first study tests feasibility, not general superiority; larger replicated tasks would be required for robust conclusions.
 
 ## Risks and possible falsifications
 

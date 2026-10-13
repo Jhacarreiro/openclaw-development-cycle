@@ -12,12 +12,15 @@ Solutions, not software output, are the unit of value. AI agents execute; humans
 
 Every later comparison is against linear execution, so the linear cycle must first finish reliably on its own. Proposed criterion, to be confirmed before Phase 2:
 
-- a fixed, public, synthetic task with behavioral acceptance checks written before any run;
+- a meaningful real task chosen by the user, with agreed scope and independent behavioral acceptance checks written before any run;
 - repeated runs through the normal `development_cycle` flow reach a recorded `go`, `revise` or `stop` without an infrastructure-classified failure;
 - each run's evidence is complete: approved plan, delivery, mechanical validation and final decision;
+- results are assessed against those checks and the value the solution provides for the user's actual problem;
 - duration, cost and interventions are recorded per run, so they can serve as the comparison baseline.
 
 These runs are also the first evaluation data for Phase 1. Runs from unrelated projects are not used as evidence.
+
+The task and repository may remain private. Public examples and evidence must be sanitized and portable, without private infrastructure, credentials or production state. Synthetic fixtures remain useful for deterministic implementation tests; they do not substitute for the real-task research baseline.
 
 ## Phase 1 — decision provenance and post-run map (implementation target)
 
@@ -26,7 +29,7 @@ These runs are also the first evaluation data for Phase 1. Runs from unrelated p
 3. Extract consequential decisions from an existing finished run **read-only**, using observed evidence. Avoid logging every token or arbitrary implementation step. Include explicit 'unknown' when alternatives or rationale cannot be reconstructed.
 4. Produce a small portable JSON schema and readable visual map (Mermaid or static HTML). Progressive disclosure: one-line summaries first; show source, evidence, pros/cons and uncertainty on selection. Distinguish chosen/executed/validated, unexecuted hypotheses, and unknowns.
 5. Support a configurable relevance filter based on impact, reversibility, cost and uncertainty, without hard-coded option types or branch counts. Preserve the original record and provenance.
-6. Demonstrate with one sanitized, realistic example run. Do not read production state into the public repository or embed deployment-specific values.
+6. Demonstrate with one sanitized example from a completed run of the selected real task. Do not read production state into the public repository or embed deployment-specific values.
 
 **Out of scope for Phase 1:** live branching, automatic replay, unconstrained parallel execution, predicted outcomes stated as facts, hidden chain-of-thought extraction, production-runtime changes, new agent runs.
 

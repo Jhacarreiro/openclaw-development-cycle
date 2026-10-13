@@ -41,7 +41,9 @@ The proposal differs in where it forks and what it records: it branches at a con
 
 ## Minimal research protocol
 
-First establish a stable linear baseline on a fixed synthetic task (see the roadmap's Phase 0). Then take one completed run of that task and document a small number of material decisions. Define independent behavioral acceptance criteria before any replay. Compare linear execution, human-directed selection and constrained multi-branch exploration using comparable context and budgets. Record interventions, total cost, duration, functional results and downstream usability. This first study tests feasibility, not general superiority; larger replicated tasks would be required for robust conclusions.
+First establish a stable linear baseline on a meaningful real task chosen by the user (see the roadmap's Phase 0). Agree the scope and define independent behavioral acceptance checks before the first run, tied to the value the solution provides for the user's actual problem. Then take one completed run of that task and document a small number of material decisions. Compare linear execution, human-directed selection and constrained multi-branch exploration using the same acceptance checks and comparable context and budgets. Record interventions, total cost, duration, functional results and downstream usability. This first study tests feasibility, not general superiority; larger replicated tasks would be required for robust conclusions.
+
+The task and repository may remain private; publish only sanitized, portable examples and evidence. Synthetic fixtures can support deterministic implementation tests, but the research baseline must come from the selected real task.
 
 ## Risks and possible falsifications
 

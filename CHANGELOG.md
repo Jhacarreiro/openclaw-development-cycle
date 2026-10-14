@@ -15,6 +15,7 @@ The format is based on Keep a Changelog and the project follows Semantic Version
 
 - Octopus launches pass a 64000-token prompt budget (`DEVELOPMENT_CYCLE_OCTOPUS_CONTEXT_BUDGET`) for implementation and council reviews instead of inheriting Octopus's 12000-token default, which truncated the tail of planning, adequacy-review and council prompts after a slow summarizer attempt that always failed.
 - Octopus launches no longer fail Codex's health check after a container update: the runner links a missing `$HOME/.codex/auth.json` to the OpenClaw-managed Codex auth file before launching, without reading or replacing an existing file.
+- The `provider_processes_outside_observed_tree` runtime alert, which marks a run `runtime_observation_blocker`, now counts only provider processes whose working directory is in the run's checkout or one of its git worktrees, and also watches Command Code implementers. It no longer flags the host's own idle agent harnesses or interactive CLI sessions, and it now catches an implementer that outlived its helper.
 - The Codex bridge waits up to 60 seconds, instead of 15, to read the OpenClaw OAuth profile, so a loaded server no longer drops the Codex seat during decomposition.
 - Council NO-GO, FAIL, STOP and inconclusive reviews no longer count as acceptance; rejected reviews do not auto-launch corrections.
 - Requested delivery classification cannot promote failed phases to success or auto-merge.

@@ -1,4 +1,4 @@
-import { readdir, stat } from "node:fs/promises";
+import { readdir, readlink, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { findProviderProcessesOutsideObservedTree } from "../core/process-observation.js";
 import { execFileAsync } from "./exec.js";
@@ -64,7 +64,8 @@ export function createRuntimeObservation(deps: RuntimeObservationDeps) {
       }
     }
     const roots = rows.filter((r) => rootSet.has(r.pid));
-    const providers = rows.filter((r) => /^(codex|claude|gemini|agy|node)$/.test(String(r.comm || "")));
+    const providers = rows.filter((r) => /^(codex|claude|gemini|agy|command-code|node)$/.test(String(r.comm || "")));
+    for (const r of providers) r.cwd = await readlink(`/proc/${r.pid}/cwd`).catch(() => null);
     return { roots, descendants: tree, providers, zombies: rows.filter((r) => String(r.stat || "").includes("Z")), observedPids: pids };
   }
 
@@ -80,6 +81,17 @@ export function createRuntimeObservation(deps: RuntimeObservationDeps) {
     };
   }
 
+  async function runtimeWorkRoots(status: any) {
+    const roots = new Set<string>([status?.projectRoot, effectiveImplementationRoot(status)].filter(Boolean).map(String));
+    for (const root of [...roots]) {
+      try {
+        const out = (await execFileAsync("git", ["worktree", "list", "--porcelain"], { cwd: root, timeout: 10000, maxBuffer: 1024 * 1024 })).stdout || "";
+        for (const line of out.split(/\r?\n/)) if (line.startsWith("worktree ")) roots.add(line.slice("worktree ".length));
+      } catch {}
+    }
+    return [...roots];
+  }
+
   async function runtimeArtifacts(dir: string, status: any) {
     const paths = new Set<string>();
     for (const p of [status?.implementationStdout, status?.implementationStderr, status?.correctionsStdout, status?.correctionsStderr, status?.directImplementationStatus, status?.directCorrectionsStatus, status?.outputPath]) if (p) paths.add(String(p));
@@ -93,7 +105,7 @@ export function createRuntimeObservation(deps: RuntimeObservationDeps) {
     return out.slice(-200);
   }
 
-  function runtimeAlerts(status: any, process: any, git: any, timeline: any[], artifacts: any[]) {
+  function runtimeAlerts(status: any, process: any, git: any, timeline: any[], artifacts: any[], workRoots: string[] = []) {
     const alerts: any[] = [];
     const phase = String(status?.phase || "");
     if (phase.includes("running") || phase.includes("launched")) {
@@ -101,7 +113,7 @@ export function createRuntimeObservation(deps: RuntimeObservationDeps) {
       if (process.roots?.some((r: any) => String(r.stat || "").includes("Z"))) alerts.push({ severity: "warning", code: "root_process_zombie", message: "root process is zombie; status may be stale" });
     }
     if (process.zombies?.length) alerts.push({ severity: "info", code: "zombie_processes_present", count: process.zombies.length });
-    const providerOrphans = findProviderProcessesOutsideObservedTree(process.providers || [], process.descendants || [], process.roots || []);
+    const providerOrphans = findProviderProcessesOutsideObservedTree(process.providers || [], process.descendants || [], process.roots || [], workRoots);
     if (providerOrphans.length) alerts.push({ severity: "warning", code: "provider_processes_outside_observed_tree", count: providerOrphans.length, providers: providerOrphans.slice(0, 20) });
     const text = timeline.map((x) => x.line).join("\n");
     if (/no diff found/i.test(text)) alerts.push({ severity: "warning", code: "review_no_diff", message: "contextual review reported no diff" });
@@ -121,7 +133,7 @@ export function createRuntimeObservation(deps: RuntimeObservationDeps) {
     const process = await runtimeProcessSnapshot(status, sessions);
     const git = await runtimeGitSnapshot(effectiveImplementationRoot(status));
     const artifacts = await runtimeArtifacts(dir, status);
-    const alerts = runtimeAlerts(status, process, git, timeline, artifacts);
+    const alerts = runtimeAlerts(status, process, git, timeline, artifacts, await runtimeWorkRoots(status));
     const observation = { generatedAt: new Date().toISOString(), phase: status?.phase || null, owner: status?.owner || null, nextAction: status?.nextAction || null, process, git, artifacts, timelineTail: timeline.slice(-80), alerts };
     const observationPath = join(dir, "runtime_observation.json");
     const timelinePath = join(dir, "runtime_timeline.json");

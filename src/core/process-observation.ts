@@ -19,10 +19,11 @@ function isInside(path: string, root: string) {
 
 /**
  * Provider processes that are not in the observed run tree but still work in
- * this run's checkout or one of its worktrees, such as an implementer CLI that
- * outlived the helper that launched it. Providers elsewhere (the host's own
- * agent harnesses, interactive sessions) are not this run's, and a process
- * whose working directory cannot be read is not attributed to it.
+ * this run's checkouts (its source checkout or its current attempt's
+ * worktree), such as an implementer CLI that outlived the helper that launched
+ * it. Providers elsewhere (the host's own agent harnesses, interactive
+ * sessions, other runs) are not this run's, and a process whose working
+ * directory cannot be read is not attributed to it.
  */
 export function findProviderProcessesOutsideObservedTree(
   providers: ObservedProcess[] = [],

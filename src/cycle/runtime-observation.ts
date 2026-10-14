@@ -65,7 +65,6 @@ export function createRuntimeObservation(deps: RuntimeObservationDeps) {
     }
     const roots = rows.filter((r) => rootSet.has(r.pid));
     const providers = rows.filter((r) => /^(codex|claude|gemini|agy|command-code|node)$/.test(String(r.comm || "")));
-    for (const r of providers) r.cwd = await readlink(`/proc/${r.pid}/cwd`).catch(() => null);
     return { roots, descendants: tree, providers, zombies: rows.filter((r) => String(r.stat || "").includes("Z")), observedPids: pids };
   }
 
@@ -81,15 +80,28 @@ export function createRuntimeObservation(deps: RuntimeObservationDeps) {
     };
   }
 
+  // The run's own checkouts: the source checkout, the materialized output and
+  // the linked worktrees named after this run's current attempts. Other runs'
+  // worktrees of the same repository are not this run's.
   async function runtimeWorkRoots(status: any) {
     const roots = new Set<string>([status?.projectRoot, effectiveImplementationRoot(status)].filter(Boolean).map(String));
-    for (const root of [...roots]) {
+    const attempts = [status?.implementationAttemptId, status?.correctionsAttemptId].filter(Boolean).map(String);
+    if (status?.projectRoot && attempts.length) {
       try {
-        const out = (await execFileAsync("git", ["worktree", "list", "--porcelain"], { cwd: root, timeout: 10000, maxBuffer: 1024 * 1024 })).stdout || "";
-        for (const line of out.split(/\r?\n/)) if (line.startsWith("worktree ")) roots.add(line.slice("worktree ".length));
+        const out = (await execFileAsync("git", ["worktree", "list", "--porcelain"], { cwd: String(status.projectRoot), timeout: 10000, maxBuffer: 1024 * 1024 })).stdout || "";
+        for (const line of out.split(/\r?\n/)) {
+          const path = line.startsWith("worktree ") ? line.slice("worktree ".length) : "";
+          if (path && attempts.some((attempt) => path.split("/").includes(attempt))) roots.add(path);
+        }
       } catch {}
     }
     return [...roots];
+  }
+
+  // Working directories are read only for attribution and never persisted, so
+  // the observation does not record unrelated processes' paths.
+  async function withWorkingDirectories(processes: any[]) {
+    return Promise.all(processes.map(async (p) => ({ ...p, cwd: await readlink(`/proc/${p.pid}/cwd`).catch(() => null) })));
   }
 
   async function runtimeArtifacts(dir: string, status: any) {
@@ -105,7 +117,7 @@ export function createRuntimeObservation(deps: RuntimeObservationDeps) {
     return out.slice(-200);
   }
 
-  function runtimeAlerts(status: any, process: any, git: any, timeline: any[], artifacts: any[], workRoots: string[] = []) {
+  function runtimeAlerts(status: any, process: any, git: any, timeline: any[], artifacts: any[], workRoots: string[] = [], providersWithCwd: any[] = process.providers || []) {
     const alerts: any[] = [];
     const phase = String(status?.phase || "");
     if (phase.includes("running") || phase.includes("launched")) {
@@ -113,7 +125,7 @@ export function createRuntimeObservation(deps: RuntimeObservationDeps) {
       if (process.roots?.some((r: any) => String(r.stat || "").includes("Z"))) alerts.push({ severity: "warning", code: "root_process_zombie", message: "root process is zombie; status may be stale" });
     }
     if (process.zombies?.length) alerts.push({ severity: "info", code: "zombie_processes_present", count: process.zombies.length });
-    const providerOrphans = findProviderProcessesOutsideObservedTree(process.providers || [], process.descendants || [], process.roots || [], workRoots);
+    const providerOrphans = findProviderProcessesOutsideObservedTree(providersWithCwd, process.descendants || [], process.roots || [], workRoots);
     if (providerOrphans.length) alerts.push({ severity: "warning", code: "provider_processes_outside_observed_tree", count: providerOrphans.length, providers: providerOrphans.slice(0, 20) });
     const text = timeline.map((x) => x.line).join("\n");
     if (/no diff found/i.test(text)) alerts.push({ severity: "warning", code: "review_no_diff", message: "contextual review reported no diff" });
@@ -133,7 +145,7 @@ export function createRuntimeObservation(deps: RuntimeObservationDeps) {
     const process = await runtimeProcessSnapshot(status, sessions);
     const git = await runtimeGitSnapshot(effectiveImplementationRoot(status));
     const artifacts = await runtimeArtifacts(dir, status);
-    const alerts = runtimeAlerts(status, process, git, timeline, artifacts, await runtimeWorkRoots(status));
+    const alerts = runtimeAlerts(status, process, git, timeline, artifacts, await runtimeWorkRoots(status), await withWorkingDirectories(process.providers || []));
     const observation = { generatedAt: new Date().toISOString(), phase: status?.phase || null, owner: status?.owner || null, nextAction: status?.nextAction || null, process, git, artifacts, timelineTail: timeline.slice(-80), alerts };
     const observationPath = join(dir, "runtime_observation.json");
     const timelinePath = join(dir, "runtime_timeline.json");

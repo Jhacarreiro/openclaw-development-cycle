@@ -19,7 +19,7 @@ async function fixture(status = " M src/app.ts\n", { worktreeGitFile = false } =
 const fs=require("fs"), a=process.argv.slice(2), d=process.env.TEST_STATE_DIR;
 fs.appendFileSync(d+"/git.log",JSON.stringify(a)+"\\n");
 if(a[0]==="push") fs.writeFileSync(d+"/git-push-env.json",JSON.stringify({askpass:process.env.GIT_ASKPASS||"",terminal:process.env.GIT_TERMINAL_PROMPT||"",tokenVisible:Boolean(process.env.GH_TOKEN)}));
-if(a[0]==="status") process.stdout.write(process.env.TEST_GIT_STATUS||"");
+if(a[0]==="status") process.stdout.write(a.includes("-z")?(process.env.TEST_GIT_STATUS||"").replace(/\\n/g,"\\0"):(process.env.TEST_GIT_STATUS||""));
 else if(a[0]==="branch") process.stdout.write(process.env.TEST_BRANCH||"feat/test");
 else if(a[0]==="diff"&&a.includes("--cached")) process.stdout.write("src/app.ts\\n");
 else if(a[0]==="rev-parse") process.stdout.write("abc123def456\\n");
@@ -124,12 +124,12 @@ test("delivery runner refuses sensitive changed paths", async () => {
 });
 
 
-test("delivery refuses secret-looking files but not source or tests that mention auth", async () => {
-  for (const status of ["A  config/credentials.json\n", "?? deploy/server.pem\n", "?? .codex/auth.json\n"]) {
+test("delivery refuses secret-looking paths but not source or tests that mention auth", async () => {
+  for (const status of ["A  config/credentials.json\n", "?? deploy/server key.pem\n", "?? .codex/auth.json\n", "?? secrets/prod.json\n", "?? notes/token.txt\n", "R  docs/setup.md\n.env\n"]) {
     const f = await fixture(status);
     await assert.rejects(runFixture(f, { classification:"success", autoMerge:false, findings:[] }), /refusing_sensitive_paths/);
   }
-  const code = await fixture("A  src/publish/oauth.ts\nA  tests/unit/oauth.test.mjs\nA  docs/token-refresh.md\n");
+  const code = await fixture("A  src/publish/oauth.ts\nA  tests/unit/oauth.test.mjs\nA  src/auth/session.ts\n");
   const out = await runFixture(code, { classification:"success", autoMerge:false, findings:[] });
   assert.equal(out.ok, true);
 });

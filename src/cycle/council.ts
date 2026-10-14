@@ -117,7 +117,7 @@ export function createCouncil(deps: CouncilDeps) {
     const startedAt = new Date().toISOString();
     let execResult: any;
     try {
-      execResult = await execSupervisedCommand(scriptPath, args, { cwd: projectRoot, env: { ...process.env, OCTOPUS_PROJECT_DIR: projectRoot, OCTOPUS_COUNCIL_AUTO_PROVIDERS: councilProviders, OCTOPUS_CODEX_MODEL: councilCodexModel }, timeout: Number(params.councilTimeoutMs || 900000), maxBuffer: 8 * 1024 * 1024 });
+      execResult = await execSupervisedCommand(scriptPath, args, { cwd: projectRoot, env: { ...process.env, OCTOPUS_PROJECT_DIR: projectRoot, OCTOPUS_CONTEXT_BUDGET: String(implementationConfig.octopusContextBudget), OCTOPUS_COUNCIL_AUTO_PROVIDERS: councilProviders, OCTOPUS_CODEX_MODEL: councilCodexModel }, timeout: Number(params.councilTimeoutMs || 900000), maxBuffer: 8 * 1024 * 1024 });
     } catch (err: any) {
       execResult = { failed: true, code: err?.code ?? null, signal: err?.signal ?? null, stdout: err?.stdout || "", stderr: err?.stderr || "", error: String(err?.message || err) };
     }

@@ -13,6 +13,7 @@ export interface DevelopmentCycleConfig {
     args: string[];
     octopusRoot: string;
     octopusSandbox: string;
+    octopusContextBudget: number;
     octopusWriteScopeMode: "strict" | "adaptive";
     octopusReadScopeMode: "strict" | "contextual";
     loopUntilApproved: boolean;
@@ -54,6 +55,13 @@ export interface DevelopmentCycleConfig {
     owner: string;
   };
 }
+
+// Octopus defaults every provider to a 12000-token prompt budget, well below
+// the context windows of the models the cycle routes to. Planning prompts
+// already exceed it, so Octopus truncates their tail (the plan and the
+// decomposition under review) after a slow, failing summarizer attempt. The
+// budget is a ceiling: Octopus still caps it at each known model's window.
+export const DEFAULT_OCTOPUS_CONTEXT_BUDGET = 64000;
 
 function text(env: NodeJS.ProcessEnv, name: string, fallback = ""): string {
   const value = String(env[name] ?? "").trim();
@@ -123,6 +131,11 @@ export function loadDevelopmentCycleConfig(env: NodeJS.ProcessEnv = process.env)
       args: stringArray(env, "DEVELOPMENT_CYCLE_IMPLEMENTATION_ARGS_JSON"),
       octopusRoot: text(env, "DEVELOPMENT_CYCLE_OCTOPUS_ROOT"),
       octopusSandbox: text(env, "DEVELOPMENT_CYCLE_OCTOPUS_SANDBOX", "danger-full-access"),
+      octopusContextBudget: positiveInteger(
+        env,
+        "DEVELOPMENT_CYCLE_OCTOPUS_CONTEXT_BUDGET",
+        DEFAULT_OCTOPUS_CONTEXT_BUDGET,
+      ),
       octopusWriteScopeMode: text(env, "DEVELOPMENT_CYCLE_OCTOPUS_WRITE_SCOPE_MODE", "adaptive") === "strict" ? "strict" : "adaptive",
       octopusReadScopeMode: readScopeMode,
       loopUntilApproved: boolean(env, "DEVELOPMENT_CYCLE_LOOP_UNTIL_APPROVED", true),

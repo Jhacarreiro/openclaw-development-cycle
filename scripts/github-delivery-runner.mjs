@@ -44,6 +44,18 @@ async function pushWithGitHubToken(branch) {
 }
 const safe = (value) => String(value || "").replace(/[\r\n]+/g, " ").trim();
 
+// A fresh container has no git identity, and `git commit` then refuses.
+// Without a configured one, commit as the GitHub account the delivery pushes
+// and opens the PR with, using its noreply address.
+function commitIdentityArgs() {
+  try {
+    if (run("git", ["config", "user.email"])) return [];
+  } catch {}
+  const account = JSON.parse(run("gh", ["api", "user"]));
+  if (!account?.login || !account?.id) throw new Error("git_identity_unavailable");
+  return ["-c", `user.name=${account.login}`, "-c", `user.email=${account.id}+${account.login}@users.noreply.github.com`];
+}
+
 
 if (req.operation === "status") {
   const existing = req.existingDelivery || {};
@@ -83,7 +95,7 @@ if (porcelain) {
   run("git", ["add", "-A"]);
   const staged = run("git", ["diff", "--cached", "--name-only"]);
   if (staged) {
-    run("git", ["commit", "-m", `development-cycle: ${req.classification} delivery for ${req.project} ${req.runId}`]);
+    run("git", [...commitIdentityArgs(), "commit", "-m", `development-cycle: ${req.classification} delivery for ${req.project} ${req.runId}`]);
   }
 }
 const commit = run("git", ["rev-parse", "HEAD"]);

@@ -69,7 +69,7 @@ def resolve_openclaw_oauth():
  profile_id=os.getenv("DEVELOPMENT_CYCLE_OPENCLAW_PROFILE_ID","openai:default")
  js="import {ensureAuthProfileStore} from 'openclaw/plugin-sdk/agent-runtime'; const store=ensureAuthProfileStore(process.env.DC_AGENT_DIR); const p=store.profiles?.[process.env.DC_PROFILE_ID]; if(!p||p.type!=='oauth'||p.provider!=='openai') throw new Error('openai oauth profile unavailable'); const token=typeof p.access==='string'?p.access.trim():''; const accountId=typeof p.accountId==='string'?p.accountId.trim():''; const planType=typeof p.chatgptPlanType==='string'?p.chatgptPlanType.trim():''; const expires=Number(p.expires||0); if(!token||!accountId) throw new Error('openai oauth profile incomplete'); if(!Number.isFinite(expires)||expires<=Date.now()+60000) throw new Error('openai oauth profile expired or near expiry'); console.log(JSON.stringify({token,accountId,planType,expires}));"
  e=os.environ.copy(); e["DC_AGENT_DIR"]=agent_dir; e["DC_PROFILE_ID"]=profile_id
- r=subprocess.run(["node","--input-type=module","-e",js],cwd=root,env=e,text=True,capture_output=True,timeout=15)
+ r=subprocess.run(["node","--input-type=module","-e",js],cwd=root,env=e,text=True,capture_output=True,timeout=60)
  if r.returncode!=0: raise RuntimeError("OpenClaw OAuth profile read failed")
  try: q=json.loads(r.stdout)
  except Exception: raise RuntimeError("OpenClaw OAuth profile read returned invalid data")

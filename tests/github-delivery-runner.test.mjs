@@ -23,11 +23,13 @@ if(a[0]==="status") process.stdout.write(process.env.TEST_GIT_STATUS||"");
 else if(a[0]==="branch") process.stdout.write(process.env.TEST_BRANCH||"feat/test");
 else if(a[0]==="diff"&&a.includes("--cached")) process.stdout.write("src/app.ts\\n");
 else if(a[0]==="rev-parse") process.stdout.write("abc123def456\\n");
+else if(a[0]==="config") { if(process.env.TEST_GIT_EMAIL) process.stdout.write(process.env.TEST_GIT_EMAIL+"\\n"); else process.exit(1); }
 `;
   const gh = `#!/usr/bin/env node
 const fs=require("fs"), a=process.argv.slice(2), d=process.env.TEST_STATE_DIR;
 fs.appendFileSync(d+"/gh.log",JSON.stringify(a)+"\\n");
 if(a[0]==="repo") process.stdout.write("acme/demo\\n");
+else if(a[0]==="api"&&a[1]==="user") process.stdout.write(JSON.stringify({login:"octo-bot",id:4242}));
 else if(a[0]==="pr"&&a[1]==="view") {
   if(!fs.existsSync(d+"/pr")) process.exit(1);
   const merged=process.env.TEST_PR_MERGED==="1";
@@ -159,4 +161,16 @@ test("status operation reports completed merge", async () => {
   assert.equal(out.merged, true);
   assert.equal(out.pullRequest.state, "MERGED");
   assert.ok(out.pullRequest.mergedAt);
+});
+
+test("delivery commits as the GitHub account when the host has no git identity, and keeps a configured one", async () => {
+  const bare = await fixture();
+  await runFixture(bare, { classification:"success", autoMerge:false, findings:[] });
+  const bareCommit = (await readFile(join(bare.state, "git.log"), "utf8")).split("\n").filter(Boolean).map((l) => JSON.parse(l)).find((a) => a.includes("commit"));
+  assert.deepEqual(bareCommit.slice(0, 4), ["-c", "user.name=octo-bot", "-c", "user.email=4242+octo-bot@users.noreply.github.com"]);
+
+  const configured = await fixture();
+  await runFixture(configured, { classification:"success", autoMerge:false, findings:[] }, { TEST_GIT_EMAIL:"dev@example.test" });
+  const configuredCommit = (await readFile(join(configured.state, "git.log"), "utf8")).split("\n").filter(Boolean).map((l) => JSON.parse(l)).find((a) => a.includes("commit"));
+  assert.equal(configuredCommit[0], "commit");
 });

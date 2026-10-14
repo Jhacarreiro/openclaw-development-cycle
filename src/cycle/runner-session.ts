@@ -5,6 +5,7 @@ import { randomUUID } from "node:crypto";
 import { cleanId } from "../core/ids.js";
 import { readProcessIdentity } from "../runtime/processes.js";
 import { buildImplementationLaunchSpec, jsonShellQuote, renderShellCommand, renderShellEnvironment, shellQuote } from "../adapters/implementation.js";
+import { ensureOctopusCodexAuthLink } from "../adapters/octopus-codex-auth.js";
 import { execFileAsync } from "./exec.js";
 import { readTextIfExists, readJsonIfExists } from "./files.js";
 import type { createRunnerSupervisor } from "./runner-supervisor.js";
@@ -131,6 +132,11 @@ export function createRunnerSession(deps: RunnerSessionDeps) {
         adapter: launchSpec.adapter,
         executable: launchSpec.executable,
       };
+    }
+
+    if (launchSpec.adapter === "octopus") {
+      await ensureOctopusCodexAuthLink(runtimeHome, String(process.env.OPENCLAW_STATE_DIR || "").trim() || join(runtimeHome, ".openclaw"))
+        .catch(() => "link_failed");
     }
 
     const environment = renderShellEnvironment({ ...launchSpec.env, HOME: runtimeHome });

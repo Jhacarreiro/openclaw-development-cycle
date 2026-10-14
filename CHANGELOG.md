@@ -13,6 +13,7 @@ The format is based on Keep a Changelog and the project follows Semantic Version
 
 ### Fixed
 
+- Octopus launches no longer fail Codex's health check after a container update: the runner links a missing `$HOME/.codex/auth.json` to the OpenClaw-managed Codex auth file before launching, without reading or replacing an existing file.
 - Council NO-GO, FAIL, STOP and inconclusive reviews no longer count as acceptance; rejected reviews do not auto-launch corrections.
 - Requested delivery classification cannot promote failed phases to success or auto-merge.
 - Resumed finalization enforces mechanical validation and rechecks checkout evidence before GO and successful publication.

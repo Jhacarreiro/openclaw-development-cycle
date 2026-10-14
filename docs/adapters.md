@@ -90,6 +90,8 @@ When the optional observer integration is enabled, the adapter maps generic obse
 
 Codex seats use the owned `bin/codex` compatibility shim. The shim intercepts non-interactive `codex exec` calls, reads the current OpenClaw `openai` OAuth profile directly through the public auth-profile store API, and supplies the resulting ChatGPT auth ephemerally to `codex app-server`. The shim creates a temporary empty `CODEX_HOME` for the child process and removes it afterwards, so Octopus does not depend on a second persistent `$OPENCLAW_STATE_DIR/codex/auth.json`.
 
+Octopus's own Codex health check still refuses the seat unless `$HOME/.codex/auth.json` exists, even though the file is never used to authenticate `codex exec`. Because `$HOME/.codex` is usually not on a persistent volume, the runner links it to `$OPENCLAW_STATE_DIR/codex/auth.json` before every Octopus launch when it is missing. It never reads, copies or replaces an existing file, and skips the link when the OpenClaw-managed file does not exist.
+
 The bridge is deliberately narrow: it does not choose models, alter canonical Octopus role routing, copy OAuth credentials into repository/runtime state, or patch Octopus upstream. Commands other than `codex exec` are forwarded to the real Codex CLI unchanged.
 
 If the OpenClaw OAuth profile cannot be resolved, the bridge fails closed before launching a Codex turn.

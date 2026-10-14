@@ -135,8 +135,11 @@ export function createRunnerSession(deps: RunnerSessionDeps) {
     }
 
     if (launchSpec.adapter === "octopus") {
-      await ensureOctopusCodexAuthLink(runtimeHome, String(process.env.OPENCLAW_STATE_DIR || "").trim() || join(runtimeHome, ".openclaw"))
-        .catch(() => "link_failed");
+      try {
+        await ensureOctopusCodexAuthLink(runtimeHome, String(process.env.OPENCLAW_STATE_DIR || "").trim() || join(runtimeHome, ".openclaw"));
+      } catch (error: any) {
+        return { ok: false, error: `octopus_codex_auth_link_failed:${String(error?.code || error?.message || error)}`, adapter: launchSpec.adapter };
+      }
     }
 
     const environment = renderShellEnvironment({ ...launchSpec.env, HOME: runtimeHome });

@@ -78,11 +78,36 @@ if (req.operation === "status") {
   process.exit(0);
 }
 
-const porcelain = runRaw("git", ["status", "--porcelain"]);
-const paths = porcelain.split(/\r?\n/).filter(Boolean).map((line) => line.slice(3).split(" -> ").pop() || "");
-const forbidden = paths.filter((path) =>
-  /(^|\/)(\.env(?:\.|$)|.*(?:secret|credential|token|auth).*|id_[rd]sa(?:\.pub)?$)/i.test(path),
-);
+// List every untracked file, not just its new top-level directory, so a
+// secret inside a new directory is still checked. NUL-terminated entries keep
+// paths with spaces or special characters unquoted.
+const porcelain = runRaw("git", ["status", "--porcelain", "-z", "--untracked-files=all"]);
+const paths = [];
+{
+  const entries = porcelain.split("\0");
+  for (let i = 0; i < entries.length; i++) {
+    const entry = entries[i];
+    if (entry.length < 4) continue;
+    paths.push(entry.slice(3));
+    // A rename or copy is followed by its source path.
+    if (/[RC]/.test(entry.slice(0, 2)) && entries[i + 1]) paths.push(entries[++i]);
+  }
+}
+// Secret-looking paths: anything under a secrets or credentials directory,
+// env files, private keys and key stores, and files named after secrets,
+// credentials, tokens or auth. Source and test code is not refused for its
+// name (an OAuth signer and its tests); text and data files are.
+const SECRET_DIR = /^(?:\.?secrets?|\.?credentials?|\.ssh|\.gnupg|\.aws)$/i;
+const SOURCE_CODE = /\.(?:[cm]?[jt]sx?|py|rb|go|rs|java|kt|swift|sh)$/i;
+const isSensitivePath = (path) => {
+  const parts = String(path).split("/").filter(Boolean);
+  const name = parts.pop() || "";
+  if (parts.some((dir) => SECRET_DIR.test(dir))) return true;
+  if (/^\.env(?:\.|$)/i.test(name) || /^id_(?:rsa|dsa|ecdsa|ed25519)(?:\.pub)?$/i.test(name)) return true;
+  if (/\.(?:pem|key|p12|pfx|keystore)$/i.test(name)) return true;
+  return /secret|credential|token|auth/i.test(name) && !SOURCE_CODE.test(name);
+};
+const forbidden = paths.filter(isSensitivePath);
 if (forbidden.length) throw new Error(`refusing_sensitive_paths:${forbidden.slice(0, 10).join(",")}`);
 
 run("git", ["diff", "--check"]);

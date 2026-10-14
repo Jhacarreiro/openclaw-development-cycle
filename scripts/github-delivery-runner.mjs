@@ -78,11 +78,21 @@ if (req.operation === "status") {
   process.exit(0);
 }
 
-const porcelain = runRaw("git", ["status", "--porcelain"]);
+// List every untracked file, not just its new top-level directory, so a
+// secret inside a new directory is still checked by name.
+const porcelain = runRaw("git", ["status", "--porcelain", "--untracked-files=all"]);
 const paths = porcelain.split(/\r?\n/).filter(Boolean).map((line) => line.slice(3).split(" -> ").pop() || "");
-const forbidden = paths.filter((path) =>
-  /(^|\/)(\.env(?:\.|$)|.*(?:secret|credential|token|auth).*|id_[rd]sa(?:\.pub)?$)/i.test(path),
-);
+// Secret-looking files: env files, private keys and key stores, and data files
+// named after credentials. Source, test and documentation files are not, even
+// when their names mention auth or tokens (an OAuth signer and its tests).
+const SOURCE_OR_DOC = /\.(?:[cm]?[jt]sx?|py|rb|go|rs|java|kt|swift|sh|md|mdx|txt|html|css|snap)$/i;
+const isSensitivePath = (path) => {
+  const name = String(path).split("/").pop() || "";
+  if (/^\.env(?:\.|$)/i.test(name) || /^id_(?:rsa|dsa|ecdsa|ed25519)(?:\.pub)?$/i.test(name)) return true;
+  if (/\.(?:pem|key|p12|pfx|keystore)$/i.test(name)) return true;
+  return /secret|credential|token|auth/i.test(name) && !SOURCE_OR_DOC.test(name);
+};
+const forbidden = paths.filter(isSensitivePath);
 if (forbidden.length) throw new Error(`refusing_sensitive_paths:${forbidden.slice(0, 10).join(",")}`);
 
 run("git", ["diff", "--check"]);

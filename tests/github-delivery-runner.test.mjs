@@ -124,6 +124,16 @@ test("delivery runner refuses sensitive changed paths", async () => {
 });
 
 
+test("delivery refuses secret-looking files but not source or tests that mention auth", async () => {
+  for (const status of ["A  config/credentials.json\n", "?? deploy/server.pem\n", "?? .codex/auth.json\n"]) {
+    const f = await fixture(status);
+    await assert.rejects(runFixture(f, { classification:"success", autoMerge:false, findings:[] }), /refusing_sensitive_paths/);
+  }
+  const code = await fixture("A  src/publish/oauth.ts\nA  tests/unit/oauth.test.mjs\nA  docs/token-refresh.md\n");
+  const out = await runFixture(code, { classification:"success", autoMerge:false, findings:[] });
+  assert.equal(out.ok, true);
+});
+
 test("status operation is read-only and reports pending PR", async () => {
   const f = await fixture("");
   await writeFile(join(f.state, "pr"), "1");

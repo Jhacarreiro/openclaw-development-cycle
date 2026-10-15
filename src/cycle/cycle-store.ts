@@ -75,6 +75,7 @@ export function createCycleStore(deps: CycleStoreDeps) {
       validationEvidence: null,
       externalValidationDecision: null,
       repositoryDeliverySourcePhase: null,
+      reviewNonConvergence: null,
       implementationAttemptResetAt: new Date().toISOString(),
     });
   }

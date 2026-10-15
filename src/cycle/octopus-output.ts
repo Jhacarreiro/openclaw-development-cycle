@@ -1,5 +1,5 @@
 import { realpath } from "node:fs/promises";
-import { join } from "node:path";
+import { join, relative, isAbsolute } from "node:path";
 import { cleanId } from "../core/ids.js";
 import { execFileAsync } from "./exec.js";
 import { readJsonIfExists, textTail } from "./files.js";
@@ -129,6 +129,42 @@ export function createOctopusOutput(deps: OctopusOutputDeps) {
     };
   }
 
+  // Octopus stops its review/correction loop at a fixed round ceiling and names
+  // the last findings file in the error line. Those findings are the residue the
+  // cycle hands on as follow-up issues, so read them from the trusted results dir.
+  async function detectOctopusReviewNonConvergence(stderrPath: string) {
+    const stderr = stderrPath ? await textTail(stderrPath, 30000) : "";
+    const match = stderr.replace(/\x1b\[[0-9;]*m/g, "").match(/Correction loop hit the absolute round ceiling \((\d+)\) with (\d+) blocking finding\(s\) remaining: (\S+\.json)/);
+    if (!match) return { ok: false };
+    const resultsDir = join(runtimeHome, ".claude-octopus", "results");
+    let findingsPath = "";
+    try {
+      const [real, realDir] = await Promise.all([realpath(match[3]), realpath(resultsDir)]);
+      const rel = relative(realDir, real);
+      if (rel && !rel.startsWith("..") && !isAbsolute(rel)) findingsPath = real;
+    } catch {}
+    const doc = findingsPath ? await readJsonIfExists(findingsPath) : null;
+    const remaining = (Array.isArray(doc?.findings) ? doc.findings : [])
+      .filter((f: any) => String(f?.severity || "") === "normal")
+      .map((f: any) => ({
+        file: String(f?.file || ""),
+        line: Number.isFinite(Number(f?.line)) ? Number(f.line) : null,
+        category: String(f?.category || ""),
+        title: String(f?.title || "").trim(),
+        detail: String(f?.detail || "").trim(),
+      }))
+      .filter((f: any) => f.title);
+    return {
+      ok: true,
+      failureClass: "review_non_convergence",
+      roundCeiling: Number(match[1]),
+      blockingCount: Number(match[2]),
+      findingsPath: findingsPath || null,
+      remaining,
+      matched: { name: "octopus_correction_round_ceiling", pattern: "Correction loop hit the absolute round ceiling", match: match[0].slice(0, 220) },
+    };
+  }
+
   async function octopusAttemptPristine(status: any) {
     const attemptId = cleanId(status?.implementationAttemptId || "", "attempt");
     const projectRoot = String(status?.projectRoot || "").trim();
@@ -160,5 +196,5 @@ export function createOctopusOutput(deps: OctopusOutputDeps) {
     }
   }
 
-  return { execGit, effectiveImplementationRoot, repositoryDeliveryMissingRequiredOutput, resolveOctopusAttemptOutput, detectOctopusReviewInfrastructureFailure, octopusAttemptPristine };
+  return { execGit, effectiveImplementationRoot, repositoryDeliveryMissingRequiredOutput, resolveOctopusAttemptOutput, detectOctopusReviewInfrastructureFailure, detectOctopusReviewNonConvergence, octopusAttemptPristine };
 }

@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { DEFAULT_OCTOPUS_CONTEXT_BUDGET } from "../config.js";
+import { DEFAULT_OCTOPUS_CONTEXT_BUDGET, DEFAULT_OCTOPUS_CORRECTION_ROUND_CAP } from "../config.js";
 
 const DEVELOPMENT_CYCLE_BIN_DIR = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", "bin");
 
@@ -15,6 +15,7 @@ export interface ImplementationAdapterConfig {
   octopusRoot: string;
   octopusSandbox: string;
   octopusContextBudget?: number;
+  octopusCorrectionRoundCap?: number;
   octopusWriteScopeMode: "strict" | "adaptive";
   octopusReadScopeMode: "strict" | "contextual";
   loopUntilApproved: boolean;
@@ -203,6 +204,7 @@ export function buildImplementationLaunchSpec(
         PATH: `${DEVELOPMENT_CYCLE_BIN_DIR}:${process.env.PATH || ""}`,
         OCTOPUS_CODEX_SANDBOX: config.octopusSandbox,
         OCTOPUS_CONTEXT_BUDGET: String(config.octopusContextBudget || DEFAULT_OCTOPUS_CONTEXT_BUDGET),
+        OCTOPUS_TANGLE_CORRECTION_HARD_CAP: String(config.octopusCorrectionRoundCap || DEFAULT_OCTOPUS_CORRECTION_ROUND_CAP),
         OCTOPUS_TANGLE_RUN_ID: String(input.attemptId),
         OCTOPUS_TANGLE_WRITE_SCOPE_MODE: input.writeScopeMode || config.octopusWriteScopeMode,
         OCTOPUS_TANGLE_READ_SCOPE_MODE: readScopeMode,

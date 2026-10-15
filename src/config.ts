@@ -14,6 +14,7 @@ export interface DevelopmentCycleConfig {
     octopusRoot: string;
     octopusSandbox: string;
     octopusContextBudget: number;
+    octopusCorrectionRoundCap: number;
     octopusWriteScopeMode: "strict" | "adaptive";
     octopusReadScopeMode: "strict" | "contextual";
     loopUntilApproved: boolean;
@@ -62,6 +63,12 @@ export interface DevelopmentCycleConfig {
 // decomposition under review) after a slow, failing summarizer attempt. The
 // budget is a ceiling: Octopus still caps it at each known model's window.
 export const DEFAULT_OCTOPUS_CONTEXT_BUDGET = 64000;
+
+// Octopus repeats review and correction up to 10 rounds by default. When its
+// reviewers keep finding new issues each round, that is hours of paid calls
+// that end in the same partial delivery; the cycle stops earlier and hands the
+// remaining findings on as follow-up issues instead.
+export const DEFAULT_OCTOPUS_CORRECTION_ROUND_CAP = 3;
 
 function text(env: NodeJS.ProcessEnv, name: string, fallback = ""): string {
   const value = String(env[name] ?? "").trim();
@@ -135,6 +142,11 @@ export function loadDevelopmentCycleConfig(env: NodeJS.ProcessEnv = process.env)
         env,
         "DEVELOPMENT_CYCLE_OCTOPUS_CONTEXT_BUDGET",
         DEFAULT_OCTOPUS_CONTEXT_BUDGET,
+      ),
+      octopusCorrectionRoundCap: positiveInteger(
+        env,
+        "DEVELOPMENT_CYCLE_OCTOPUS_CORRECTION_ROUNDS",
+        DEFAULT_OCTOPUS_CORRECTION_ROUND_CAP,
       ),
       octopusWriteScopeMode: text(env, "DEVELOPMENT_CYCLE_OCTOPUS_WRITE_SCOPE_MODE", "adaptive") === "strict" ? "strict" : "adaptive",
       octopusReadScopeMode: readScopeMode,

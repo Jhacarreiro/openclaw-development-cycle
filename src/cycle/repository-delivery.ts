@@ -89,7 +89,12 @@ export function createRepositoryDelivery(deps: RepositoryDeliveryDeps) {
 
   function repositoryFindings(status: any, max = 12) {
     const raw = [...(status?.councilReviewFindings || [])];
-    if (status?.failureRecommendedAction) raw.push(String(status.failureRecommendedAction));
+    const residue = status?.reviewNonConvergence?.ok && Array.isArray(status.reviewNonConvergence.remaining) ? status.reviewNonConvergence.remaining : null;
+    if (residue) {
+      // One issue per finding the review left blocking; the failure's own
+      // recommended action describes the run, not work left in the code.
+      for (const f of residue) raw.push(`${f.title}${f.file ? ` (${f.file}${f.line ? `:${f.line}` : ""})` : ""}${f.detail ? `: ${f.detail}` : ""}`);
+    } else if (status?.failureRecommendedAction) raw.push(String(status.failureRecommendedAction));
     const out: string[] = [];
     for (const value of raw) {
       const text = String(value || "").trim().replace(/\s+/g, " ");

@@ -41,6 +41,16 @@ export function createMainUpdates(deps: MainUpdatesDeps) {
           recommendedAction: "Reply to main with the requested decision; main should call development_cycle answer_intervention for this run.",
           matched: { name: "human_intervention", pattern: "durable_phase", match: "implementation_waiting_human" },
         }
+      : status?.reviewNonConvergence?.ok
+      ? {
+          failureClass: "review_non_convergence",
+          severity: "warning",
+          humanRequired: false,
+          safeToAutoRetry: false,
+          autoStopRecommended: false,
+          recommendedAction: "Review did not converge within the Octopus correction ceiling. The partial output is delivered and each remaining blocking finding becomes a follow-up issue; do not relaunch this run.",
+          matched: status.reviewNonConvergence.matched || { name: "review_non_convergence", pattern: "durable_status", match: "reviewNonConvergence" },
+        }
       : phase === "review_infrastructure_failed"
       ? {
           failureClass: "review_infrastructure_failed",

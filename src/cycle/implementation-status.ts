@@ -13,12 +13,13 @@ export interface ImplementationStatusDeps {
   cycleStatus: ReturnType<typeof createCycleStore>["cycleStatus"];
   resolveOctopusAttemptOutput: ReturnType<typeof createOctopusOutput>["resolveOctopusAttemptOutput"];
   detectOctopusReviewInfrastructureFailure: ReturnType<typeof createOctopusOutput>["detectOctopusReviewInfrastructureFailure"];
+  detectOctopusReviewNonConvergence: ReturnType<typeof createOctopusOutput>["detectOctopusReviewNonConvergence"];
   finalizeObserverSessions: ReturnType<typeof createObserver>["finalizeObserverSessions"];
   sendCycleMessage: ReturnType<typeof createCycleStore>["sendCycleMessage"];
 }
 
 export function createImplementationStatus(deps: ImplementationStatusDeps) {
-  const { adapterSessionsRoot, saveJson, cycleStatus, resolveOctopusAttemptOutput, detectOctopusReviewInfrastructureFailure, finalizeObserverSessions, sendCycleMessage } = deps;
+  const { adapterSessionsRoot, saveJson, cycleStatus, resolveOctopusAttemptOutput, detectOctopusReviewInfrastructureFailure, detectOctopusReviewNonConvergence, finalizeObserverSessions, sendCycleMessage } = deps;
 
   async function refreshLaunchedImplementationStatus(dir: string, status: any) {
     const phase = String(status?.phase || "");
@@ -174,6 +175,9 @@ Reply to main; the run will resume after answer_intervention.`);
       const reviewInfrastructureFailure = !isCorrectionsRun && failedOutputHandoff?.ok
         ? await detectOctopusReviewInfrastructureFailure(stdoutPath, stderrPath)
         : null;
+      const reviewNonConvergence = !isCorrectionsRun && failedOutputHandoff?.ok && !reviewInfrastructureFailure?.resumeEligible
+        ? await detectOctopusReviewNonConvergence(stderrPath)
+        : null;
       let reviewInfrastructureFailureEvidence = "";
       if (reviewInfrastructureFailure?.ok && reviewInfrastructureFailure.resumeEligible) {
         reviewInfrastructureFailureEvidence = join(dir, "review_infrastructure_failure.json");
@@ -209,10 +213,13 @@ Reply to main; the run will resume after answer_intervention.`);
               phase: "implementation_failed",
               owner: "main",
               ok: false,
-              nextAction: failedOutputHandoff?.ok
+              nextAction: reviewNonConvergence?.ok
+                ? "Review did not converge: deliver the partial Octopus output and open one issue per remaining blocking finding."
+                : failedOutputHandoff?.ok
                 ? "A validated partial Octopus output is available for repository delivery."
                 : "Inspect Implementation stdout/stderr, fix blockers, then launch a new clean handoff.",
               error: `Implementation exited non-zero: ${exitCode}`,
+              ...(reviewNonConvergence?.ok ? { failureClass: "review_non_convergence", reviewNonConvergence } : {}),
               implementationStdout: stdoutPath,
               implementationStderr: stderrPath,
               directImplementationStatus: statusPath,

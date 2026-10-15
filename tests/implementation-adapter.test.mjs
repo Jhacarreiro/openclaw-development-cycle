@@ -79,6 +79,7 @@ test("Octopus adapter translates the generic request into orchestrate.sh", () =>
   assert.equal(spec.args.at(-1), "Implement the approved plan.");
   assert.equal(spec.env.OCTOPUS_CODEX_SANDBOX, "read-only");
   assert.equal(spec.env.OCTOPUS_CONTEXT_BUDGET, "64000");
+  assert.equal(spec.env.OCTOPUS_TANGLE_CORRECTION_HARD_CAP, "3");
   assert.equal(spec.env.DEVELOPMENT_CYCLE_ATTEMPT_ID, "delivery-attempt-1");
   assert.equal(spec.env.OCTOPUS_TANGLE_RUN_ID, "delivery-attempt-1");
   assert.equal(spec.env.OCTOPUS_TANGLE_WRITE_SCOPE_MODE, "adaptive");

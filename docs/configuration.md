@@ -35,6 +35,7 @@ The command adapter is the portable default.
 | `DEVELOPMENT_CYCLE_OCTOPUS_ROOT` | empty | Root of an optional Octopus checkout. |
 | `DEVELOPMENT_CYCLE_OCTOPUS_SANDBOX` | `danger-full-access` | Codex sandbox value passed by the Octopus adapter. |
 | `DEVELOPMENT_CYCLE_OCTOPUS_CONTEXT_BUDGET` | `64000` | Prompt budget in tokens passed to Octopus as `OCTOPUS_CONTEXT_BUDGET` for implementation launches and council reviews. Octopus's own default (12000) makes it truncate planning prompts; it still caps the budget at each known model's context window. |
+| `DEVELOPMENT_CYCLE_OCTOPUS_CORRECTION_ROUNDS` | `3` | Maximum Octopus review/correction rounds per implementation launch, passed as `OCTOPUS_TANGLE_CORRECTION_HARD_CAP` (Octopus defaults to 10). When review still has blocking findings at the cap, the cycle delivers the partial output and opens one follow-up issue per remaining finding. |
 | `DEVELOPMENT_CYCLE_OCTOPUS_WRITE_SCOPE_MODE` | `adaptive` | Tangle write-scope policy: `adaptive` or `strict`. |
 | `DEVELOPMENT_CYCLE_LOOP_UNTIL_APPROVED` | `true` | Retry failed Octopus subtasks until the configured quality retry limit is reached. Set `false` only for deliberate one-shot runs. |
 

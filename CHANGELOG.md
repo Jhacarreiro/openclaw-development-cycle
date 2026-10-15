@@ -11,6 +11,10 @@ The format is based on Keep a Changelog and the project follows Semantic Version
 - Run tracking for new runs: `status.json` records `createdAt`, `startedAt` (first implementation launch), `closedAt`, `interventionAnswerCount` and `correctionRoundCount`, and the run reader reports them. Runs created earlier keep these fields absent instead of receiving partial values.
 - `docs/reliability-baseline.md`: a proposed criterion and per-run record for measuring whether linear cycles reach a recorded decision on a meaningful real task chosen by the user, with acceptance checks defined before the runs and sanitized public evidence.
 
+### Changed
+
+- Octopus implementation launches stop after 3 review/correction rounds instead of Octopus's default 10 (`DEVELOPMENT_CYCLE_OCTOPUS_CORRECTION_ROUNDS`).
+
 ### Fixed
 
 - An Octopus run that stops at its review/correction round ceiling is now classified `review_non_convergence` instead of whichever generic pattern its log happened to match (an `EACCES` in reviewed code text made it `local_runtime_fault`). The partial delivery opens one follow-up issue per blocking finding left in Octopus's last review, instead of an issue built from the failure's recommended action.

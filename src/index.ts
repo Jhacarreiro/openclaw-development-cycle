@@ -114,6 +114,19 @@ const {
 export { isExactBroadProjectRoot };
 
 function newRunId(project: string) { return createRunId(project); }
+
+// Records and launches a linked follow-up run from where it stopped.
+async function continueFollowUp(dir: string, rawProject: string): Promise<any> {
+  let status: any = await loadJson(join(dir, "status.json"));
+  const common = { project: rawProject, projectRoot: String(status.projectRoot || ""), projectWikiPath: String(status.projectWikiPath || ""), [resolvedCycleDir]: dir, [lifecycleLockHeld]: true };
+  if (!status?.phase) {
+    const recorded = await projectCycle({ ...common, action: "record_plan", planPath: status.followUp.planPath });
+    if (!recorded.ok) return recorded;
+    status = await loadJson(join(dir, "status.json")) as any;
+  }
+  if (status?.phase !== "plan_ready_for_implementation") return { ok: true, phase: status?.phase };
+  return await projectCycle({ ...common, action: "start_implementation", implementationAdapter: status.implementationAdapter || undefined });
+}
 async function maybeAutoRecoverImplementationFailure(dir: string, status: any, params: any) {
   if (String(status?.phase || "") !== "implementation_failed") return { attempted: false, status };
   const stdoutPath = String(status?.implementationStdout || status?.directImplementationStdout || "");
@@ -294,6 +307,11 @@ async function projectCycle(params: CycleParameters | null | undefined): Promise
     };
   }
 
+  if (action === "reconcile" && status?.followUp && ["", "plan_ready_for_implementation"].includes(String(status?.phase || ""))) {
+    const continued = await continueFollowUp(dir, rawProject);
+    return { ...continued, project, runId, dir, resumedFollowUp: true };
+  }
+
   if (action === "reconcile") {
     const refreshedStatus = await refreshLaunchedImplementationStatus(dir, status);
     let effectiveStatus = refreshedStatus;
@@ -350,8 +368,8 @@ async function projectCycle(params: CycleParameters | null | undefined): Promise
       automaticFollowUp = await projectCycle({ action: "start_followup", project: rawProject, fromRunId: runId, implementationAdapter: effectiveStatus?.implementationAdapter });
       const error = String(automaticFollowUp?.error || "followup_start_failed");
       const retryable = ["followup_issue_lookup_failed", "followup_delivered_checkout_unreadable", "lifecycle_action_busy", "lifecycle_action_lock_lost"].includes(error);
-      // A follow-up whose plan was recorded exists even if its launch failed;
-      // that run's own recovery owns it from here.
+      // Once linked, the follow-up exists even if its launch failed; that run's
+      // own reconcile and recovery own it from here.
       effectiveStatus = await cycleStatus(dir, automaticFollowUp?.runId
         ? { followUpRunId: automaticFollowUp.runId, followUpLastError: automaticFollowUp?.ok ? null : { error, at: new Date().toISOString() }, nextAction: `Follow-up run ${automaticFollowUp.runId} is working the open issues on the delivery PR.` }
         : retryable
@@ -780,11 +798,19 @@ Create or validate the implementation plan only. Do not implement. The plan must
     // A refused follow-up leaves no status.json, so the directory is never
     // taken for a run.
     if (!prepared.ok) return { project, runId: null, ...prepared };
-    const recorded = await projectCycle({ action: "record_plan", project: rawProject, projectRoot: prepared.projectRoot, projectWikiPath: prepared.projectWikiPath, planText: prepared.planText, [resolvedCycleDir]: dir, [lifecycleLockHeld]: true });
-    if (!recorded.ok) return { ...recorded, project, runId: null, dir };
-    await cycleStatus(dir, { followUp: prepared.followUp });
-    const launched = await projectCycle({ action: "start_implementation", project: rawProject, projectRoot: prepared.projectRoot, projectWikiPath: prepared.projectWikiPath, implementationAdapter: (params.implementationAdapter || prepared.implementationAdapter || undefined) as any, [resolvedCycleDir]: dir, [lifecycleLockHeld]: true });
-    return { ...launched, project, runId, dir, followUp: prepared.followUp };
+    // Link both runs before anything launches: after a restart the source
+    // sees its follow-up instead of creating a second one, and the follow-up's
+    // own reconcile finishes recording and launching it.
+    const planPath = join(dir, "followup_plan.md");
+    await writeFile(planPath, prepared.planText);
+    await cycleStatus(dir, {
+      project, runId, projectRoot: prepared.projectRoot, projectWikiPath: prepared.projectWikiPath,
+      implementationAdapter: params.implementationAdapter || prepared.implementationAdapter || undefined,
+      followUp: { ...prepared.followUp, planPath },
+    });
+    await cycleStatus(prepared.sourceDir, { followUpRunId: runId });
+    const continued = await continueFollowUp(dir, rawProject);
+    return { ...continued, project, runId, dir, followUp: prepared.followUp };
   }
 
   if (action === "finalize_delivery") {

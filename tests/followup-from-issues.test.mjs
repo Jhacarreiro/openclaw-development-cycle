@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { promisify } from "node:util";
 import test from "node:test";
 import { writeCanonicalRoutingConfig } from "./helpers/octopus-routing.mjs";
@@ -151,6 +151,7 @@ test("A partial delivery whose review did not converge starts a follow-up run on
     pullRequest: { number: 7, url: "https://example.invalid/pull/7" },
     issues: [{ number: 11, title: "Follow-up: Publish never checks the hash-bound approval (src/workflow.ts:370)", url: "https://example.invalid/issues/11" }],
     originalPlan: reconciled.status.plan,
+    planPath: join(dirname(followUpStatus.plan), "followup_plan.md"),
   });
   const followUpPlan = await readFile(followUpStatus.plan, "utf8");
   assert.match(followUpPlan, /1\. Resolve issue #11 \(https:\/\/example\.invalid\/issues\/11\): Publish never checks the hash-bound approval \(src\/workflow\.ts:370\): Compare the approval hash before posting\./);

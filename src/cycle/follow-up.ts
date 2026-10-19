@@ -97,7 +97,9 @@ export function createFollowUp(deps: FollowUpDeps) {
 
     // The delivered checkout must still be at the commit the PR received, so
     // the follow-up builds on exactly what the PR holds.
-    const pinned = await pinTrustedProjectRoot(String(source?.outputPath || ""));
+    // A command-adapter delivery has no separate output path: it delivered from
+    // its projectRoot.
+    const pinned = await pinTrustedProjectRoot(String(source?.outputPath || source?.projectRoot || ""));
     if (!pinned) return { ok: false as const, error: "followup_delivered_checkout_missing" };
     const projectRoot = pinned.realPath;
     await pinned.handle.close().catch(() => null);

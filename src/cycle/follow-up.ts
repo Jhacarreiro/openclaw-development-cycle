@@ -81,6 +81,9 @@ export function createFollowUp(deps: FollowUpDeps) {
     const sourceDir = cycleDir(project, sourceRunId);
     const source: any = await loadJson(join(sourceDir, "status.json"));
     if (String(source?.phase || "") !== "closed_partial") return { ok: false as const, error: "followup_source_not_closed_partial", phase: source?.phase || null };
+    // One follow-up per source: a retried or repeated request gets the linked
+    // run instead of a second one working the same checkout and PR branch.
+    if (source?.followUpRunId) return { ok: false as const, error: "followup_already_started", followUpRunId: source.followUpRunId };
     const delivery: any = source?.repositoryDelivery || {};
     const pullRequestNumber = Number(delivery?.pullRequest?.number || 0);
     const branch = String(delivery?.branch || "");

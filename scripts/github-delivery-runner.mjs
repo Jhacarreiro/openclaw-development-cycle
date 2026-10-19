@@ -142,14 +142,20 @@ const commit = run("git", ["rev-parse", "HEAD"]);
 // instead of dropping commits if the branch moved since.
 const targetBranch = safe(req.targetBranch);
 const prBranch = targetBranch || branch;
+const findPullRequest = () => {
+  try {
+    return JSON.parse(run("gh", ["pr", "view", prBranch, "--json", "number,url,state"]));
+  } catch {
+    return null;
+  }
+};
+// Check before pushing: commits pushed to a closed or merged PR's branch
+// would land outside any PR.
+if (targetBranch && findPullRequest()?.state !== "OPEN") throw new Error(`followup_pull_request_not_open:${prBranch}`);
 await pushWithGitHubToken(targetBranch ? `HEAD:refs/heads/${targetBranch}` : branch);
 
 const repository = run("gh", ["repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"]);
-let pullRequest = null;
-try {
-  pullRequest = JSON.parse(run("gh", ["pr", "view", prBranch, "--json", "number,url,state"]));
-} catch {}
-if (targetBranch && pullRequest?.state !== "OPEN") throw new Error(`followup_pull_request_not_open:${prBranch}`);
+let pullRequest = findPullRequest();
 if (!pullRequest || pullRequest.state === "CLOSED") {
   const bodyDir = await mkdtemp(join(tmpdir(), "development-cycle-pr-body-"));
   const bodyPath = join(bodyDir, `development-cycle-${safe(req.runId)}-pr.md`);

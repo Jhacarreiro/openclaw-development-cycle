@@ -339,17 +339,26 @@ async function projectCycle(params: CycleParameters | null | undefined): Promise
       effectiveStatus = automaticRepositoryDelivery.status || effectiveStatus;
     }
     let automaticFollowUp: any = null;
-    if (automaticRepositoryDelivery && repositoryDeliveryConfig.followUpAutoStart && effectiveStatus?.phase === "closed_partial"
-      && effectiveStatus?.failureClass === "review_non_convergence" && effectiveStatus?.repositoryDelivery?.issues?.length && !effectiveStatus?.followUpRunId) {
+    // Keyed on durable state, so a restart or a failed issue lookup is retried
+    // by the next reconcile; only a refusal that cannot change records a block.
+    if (repositoryDeliveryConfig.followUpAutoStart && effectiveStatus?.phase === "closed_partial"
+      && effectiveStatus?.failureClass === "review_non_convergence" && effectiveStatus?.repositoryDelivery?.issues?.length
+      && !effectiveStatus?.followUpRunId && !effectiveStatus?.followUpBlocked) {
       // The residue of a review that did not converge is the next run's work:
       // continue on the same PR branch until the issues close or the
       // follow-up limit leaves them to an operator.
       automaticFollowUp = await projectCycle({ action: "start_followup", project: rawProject, fromRunId: runId, implementationAdapter: effectiveStatus?.implementationAdapter });
-      effectiveStatus = await cycleStatus(dir, automaticFollowUp?.ok
-        ? { followUpRunId: automaticFollowUp.runId, nextAction: `Follow-up run ${automaticFollowUp.runId} is working the open issues on the delivery PR.` }
-        : { followUpBlocked: { error: automaticFollowUp?.error || "followup_start_failed", at: new Date().toISOString() }, nextAction: automaticFollowUp?.error === "followup_generation_limit"
-          ? "Follow-up limit reached: the remaining issues stay open on the delivery PR for an operator decision."
-          : `Follow-up run could not start (${automaticFollowUp?.error || "unknown"}); the issues stay open on the delivery PR.` });
+      const error = String(automaticFollowUp?.error || "followup_start_failed");
+      const retryable = ["followup_issue_lookup_failed", "followup_delivered_checkout_unreadable", "lifecycle_action_busy", "lifecycle_action_lock_lost"].includes(error);
+      // A follow-up whose plan was recorded exists even if its launch failed;
+      // that run's own recovery owns it from here.
+      effectiveStatus = await cycleStatus(dir, automaticFollowUp?.runId
+        ? { followUpRunId: automaticFollowUp.runId, followUpLastError: automaticFollowUp?.ok ? null : { error, at: new Date().toISOString() }, nextAction: `Follow-up run ${automaticFollowUp.runId} is working the open issues on the delivery PR.` }
+        : retryable
+          ? { followUpLastError: { error, at: new Date().toISOString() }, nextAction: `Follow-up run could not start yet (${error}); the next reconcile retries it.` }
+          : { followUpBlocked: { error, at: new Date().toISOString() }, nextAction: error === "followup_generation_limit"
+            ? "Follow-up limit reached: the remaining issues stay open on the delivery PR for an operator decision."
+            : `Follow-up run could not start (${error}); the issues stay open on the delivery PR.` });
     }
     const mainUpdate = await dcNotifyMain(dir, project, runId, effectiveStatus, params, runtimeEvent);
     return { ok: true, readOnly: false, project, runId, dir, status: effectiveStatus, files, runtime, stall, automaticValidation, councilEndgate, repositoryDeliveryReconcile, automaticRepositoryDelivery, automaticFollowUp, failurePolicy: runtimeEvent, mainUpdate };
@@ -772,7 +781,7 @@ Create or validate the implementation plan only. Do not implement. The plan must
     // taken for a run.
     if (!prepared.ok) return { project, runId: null, ...prepared };
     const recorded = await projectCycle({ action: "record_plan", project: rawProject, projectRoot: prepared.projectRoot, projectWikiPath: prepared.projectWikiPath, planText: prepared.planText, [resolvedCycleDir]: dir, [lifecycleLockHeld]: true });
-    if (!recorded.ok) return { ...recorded, project, runId, dir };
+    if (!recorded.ok) return { ...recorded, project, runId: null, dir };
     await cycleStatus(dir, { followUp: prepared.followUp });
     const launched = await projectCycle({ action: "start_implementation", project: rawProject, projectRoot: prepared.projectRoot, projectWikiPath: prepared.projectWikiPath, implementationAdapter: (params.implementationAdapter || prepared.implementationAdapter || undefined) as any, [resolvedCycleDir]: dir, [lifecycleLockHeld]: true });
     return { ...launched, project, runId, dir, followUp: prepared.followUp };

@@ -58,6 +58,7 @@ test("A partial delivery whose review did not converge starts a follow-up run on
     "const fs = require('fs');",
     "const { execFileSync } = require('child_process');",
     "const req = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));",
+    "if (!req.projectRoot) throw new Error('projectRoot_missing');",
     `fs.appendFileSync(${JSON.stringify(deliveryMarker)}, JSON.stringify(req) + '\\n');`,
     "const head = String(execFileSync('git', ['rev-parse', 'HEAD'])).trim();",
     "if (req.operation === 'issues') {",

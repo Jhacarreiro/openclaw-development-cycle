@@ -225,7 +225,7 @@ export function createRepositoryDelivery(deps: RepositoryDeliveryDeps) {
     if (!repositoryDeliveryConfig.enabled) return { ok: false, error: "repository_delivery_disabled" };
     if (!repositoryDeliveryConfig.command) return { ok: false, error: "repository_delivery_command_missing" };
     const requestPath = join(dir, "followup_issues_request.json");
-    await saveJson(requestPath, { schemaVersion: 1, operation: "issues", issueNumbers, pullRequest, createdAt: new Date().toISOString() });
+    await saveJson(requestPath, { schemaVersion: 1, operation: "issues", projectRoot: cwd, issueNumbers, pullRequest, createdAt: new Date().toISOString() });
     try {
       const execResult = await execSupervisedCommand(repositoryDeliveryConfig.command, [...repositoryDeliveryConfig.args, requestPath], {
         cwd,

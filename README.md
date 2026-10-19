@@ -154,6 +154,7 @@ stop
 | `run_final_validation` | Run configured validation commands. |
 | `request_final_validation` | Build the final validation pack. |
 | `record_final_validation` | Record `go`, `revise`, or `stop`. |
+| `start_followup` | Start a run from the open follow-up issues of a `closed_partial` run (`fromRunId`). It works on the delivery PR's checkout and adds its commits to that PR's branch; on success the PR is renamed and closes those issues when it merges. `reconcile` starts it automatically after a review that did not converge, up to `DEVELOPMENT_CYCLE_FOLLOWUP_MAX_GENERATIONS`. |
 | `start_corrections` | Optional/manual targeted correction pass for legacy or explicitly supervised correction workflows. A final `revise` no longer launches corrections automatically. |
 | `finalize_delivery` | Classify a terminal outcome as `success`, `partial` or `invalid`; publish success/partial work through the repository delivery adapter, or close locally when delivery is disabled. |
 | `close` | Close a validated or stopped cycle. |

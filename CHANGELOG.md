@@ -8,6 +8,7 @@ The format is based on Keep a Changelog and the project follows Semantic Version
 
 ### Added
 
+- `start_followup`: when a review does not converge, `reconcile` starts a follow-up run from the issues the partial delivery opened that are still open. It runs on the delivered checkout and pushes to the same PR branch (fast-forward only), so the PR accumulates the work; a successful follow-up retitles the PR and closes the issues when it merges. Bounded by `DEVELOPMENT_CYCLE_FOLLOWUP_MAX_GENERATIONS` (default 2); turn the automatic start off with `DEVELOPMENT_CYCLE_FOLLOWUP_AUTO_START=false`.
 - Run tracking for new runs: `status.json` records `createdAt`, `startedAt` (first implementation launch), `closedAt`, `interventionAnswerCount` and `correctionRoundCount`, and the run reader reports them. Runs created earlier keep these fields absent instead of receiving partial values.
 - `docs/reliability-baseline.md`: a proposed criterion and per-run record for measuring whether linear cycles reach a recorded decision on a meaningful real task chosen by the user, with acceptance checks defined before the runs and sanitized public evidence.
 

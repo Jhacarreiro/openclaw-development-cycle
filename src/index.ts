@@ -22,6 +22,7 @@ import { looksLikePlanRequest, analyzeImplementationPlan, normalizeImplementatio
 import { createPlanningPack } from "./cycle/planning-pack.js";
 import { createOctopusOutput } from "./cycle/octopus-output.js";
 import { createRepositoryDelivery } from "./cycle/repository-delivery.js";
+import { createFollowUp } from "./cycle/follow-up.js";
 import { createImplementationStatus } from "./cycle/implementation-status.js";
 import { createRuntimeObservation } from "./cycle/runtime-observation.js";
 import { createFinalValidation } from "./cycle/final-validation.js";
@@ -97,6 +98,7 @@ const cycleContext12 = { ...cycleContext11, ...createRuntimeObservation(cycleCon
 const cycleContext13 = { ...cycleContext12, ...createFinalValidation(cycleContext12) };
 const cycleContext14 = { ...cycleContext13, ...createCouncil(cycleContext13) };
 const cycleContext15 = { ...cycleContext14, ...createStop(cycleContext14) };
+const cycleContext16 = { ...cycleContext15, ...createFollowUp(cycleContext15) };
 const {
   sendCycleNotice, cycleDir, loadJson, saveJson, cycleStatus, sendCycleMessage,
   clearActiveImplementationAttempt, clearActiveCorrectionsAttempt, dcClassify, dcPersistFailure,
@@ -107,8 +109,8 @@ const {
   resumeReviewInfrastructureFinalization, requiredValidationError, finalizeRepositoryDeliveryState,
   reconcileRepositoryDeliveryState, autoCommitCanonicalPlan, refreshLaunchedImplementationStatus,
   cycleRuntimeSummary, writeFinalValidationPack, runExternalFinalValidation, maybeRunCouncilEndgate,
-  stopLaunchedImplementation, maybeHandleStalledRun, isExactBroadProjectRoot,
-} = cycleContext15;
+  stopLaunchedImplementation, maybeHandleStalledRun, isExactBroadProjectRoot, prepareFollowUp,
+} = cycleContext16;
 export { isExactBroadProjectRoot };
 
 function newRunId(project: string) { return createRunId(project); }
@@ -245,7 +247,7 @@ async function projectCycle(params: CycleParameters | null | undefined): Promise
 
   const rawProject = params.project || "default";
   let project = cleanId(rawProject);
-  const createRun = action === "request_plan" || action === "record_plan";
+  const createRun = action === "request_plan" || action === "record_plan" || action === "start_followup";
 
   let dir = params[resolvedCycleDir] ? String(params[resolvedCycleDir]) : "";
   if (!dir) {
@@ -336,8 +338,21 @@ async function projectCycle(params: CycleParameters | null | undefined): Promise
       automaticRepositoryDelivery = await finalizeRepositoryDeliveryState(dir, { ...effectiveStatus, project, runId }, params);
       effectiveStatus = automaticRepositoryDelivery.status || effectiveStatus;
     }
+    let automaticFollowUp: any = null;
+    if (automaticRepositoryDelivery && repositoryDeliveryConfig.followUpAutoStart && effectiveStatus?.phase === "closed_partial"
+      && effectiveStatus?.failureClass === "review_non_convergence" && effectiveStatus?.repositoryDelivery?.issues?.length && !effectiveStatus?.followUpRunId) {
+      // The residue of a review that did not converge is the next run's work:
+      // continue on the same PR branch until the issues close or the
+      // follow-up limit leaves them to an operator.
+      automaticFollowUp = await projectCycle({ action: "start_followup", project: rawProject, fromRunId: runId, implementationAdapter: effectiveStatus?.implementationAdapter });
+      effectiveStatus = await cycleStatus(dir, automaticFollowUp?.ok
+        ? { followUpRunId: automaticFollowUp.runId, nextAction: `Follow-up run ${automaticFollowUp.runId} is working the open issues on the delivery PR.` }
+        : { followUpBlocked: { error: automaticFollowUp?.error || "followup_start_failed", at: new Date().toISOString() }, nextAction: automaticFollowUp?.error === "followup_generation_limit"
+          ? "Follow-up limit reached: the remaining issues stay open on the delivery PR for an operator decision."
+          : `Follow-up run could not start (${automaticFollowUp?.error || "unknown"}); the issues stay open on the delivery PR.` });
+    }
     const mainUpdate = await dcNotifyMain(dir, project, runId, effectiveStatus, params, runtimeEvent);
-    return { ok: true, readOnly: false, project, runId, dir, status: effectiveStatus, files, runtime, stall, automaticValidation, councilEndgate, repositoryDeliveryReconcile, automaticRepositoryDelivery, failurePolicy: runtimeEvent, mainUpdate };
+    return { ok: true, readOnly: false, project, runId, dir, status: effectiveStatus, files, runtime, stall, automaticValidation, councilEndgate, repositoryDeliveryReconcile, automaticRepositoryDelivery, automaticFollowUp, failurePolicy: runtimeEvent, mainUpdate };
   }
 
   const transition = checkActionTransition(action, status?.phase);
@@ -751,6 +766,18 @@ Create or validate the implementation plan only. Do not implement. The plan must
 
   }
 
+  if (action === "start_followup") {
+    const prepared = await prepareFollowUp(rawProject, String(params.fromRunId || ""), dir);
+    // A refused follow-up leaves no status.json, so the directory is never
+    // taken for a run.
+    if (!prepared.ok) return { project, runId: null, ...prepared };
+    const recorded = await projectCycle({ action: "record_plan", project: rawProject, projectRoot: prepared.projectRoot, projectWikiPath: prepared.projectWikiPath, planText: prepared.planText, [resolvedCycleDir]: dir, [lifecycleLockHeld]: true });
+    if (!recorded.ok) return { ...recorded, project, runId, dir };
+    await cycleStatus(dir, { followUp: prepared.followUp });
+    const launched = await projectCycle({ action: "start_implementation", project: rawProject, projectRoot: prepared.projectRoot, projectWikiPath: prepared.projectWikiPath, implementationAdapter: (params.implementationAdapter || prepared.implementationAdapter || undefined) as any, [resolvedCycleDir]: dir, [lifecycleLockHeld]: true });
+    return { ...launched, project, runId, dir, followUp: prepared.followUp };
+  }
+
   if (action === "finalize_delivery") {
     const finalized = await finalizeRepositoryDeliveryState(dir, { ...status, project, runId }, params);
     return { ok: finalized.ok, project, runId, dir, phase: finalized.phase, delivery: finalized.delivery };
@@ -769,6 +796,7 @@ const cycleParameters = Type.Object({
   action: lit(...ACTIONS),
   project: Type.String(),
   runId: Type.Optional(Type.String()),
+  fromRunId: Type.Optional(Type.String({ description: "start_followup: the closed_partial run whose open follow-up issues the new run works on its delivery PR branch." })),
   projectRoot: Type.Optional(Type.String({ description: "Real code checkout directory for Implementation. Must exist; do not infer it from the project wiki id." })),
   projectWikiPath: Type.Optional(Type.String({ description: "Project documentation folder. Defaults under DEVELOPMENT_CYCLE_PROJECT_DOCS_ROOT and is separate from the source checkout." })),
   direction: Type.Optional(Type.String()),

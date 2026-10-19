@@ -158,6 +158,10 @@ export function createRepositoryDelivery(deps: RepositoryDeliveryDeps) {
       baseBranch: String(params.repositoryBaseBranch || repositoryDeliveryConfig.baseBranch || "main"),
       autoMerge: operation !== "status" && classification === "success" && repositoryDeliveryConfig.autoMergeSuccessful,
       findings: repositoryFindings(status),
+      ...(status?.followUp?.branch ? {
+        targetBranch: String(status.followUp.branch),
+        closesIssues: (status.followUp.issues || []).map((issue: any) => Number(issue?.number)).filter((n: number) => Number.isInteger(n) && n > 0),
+      } : {}),
       existingDelivery: status?.repositoryDelivery || null,
       createdAt: new Date().toISOString(),
     };
@@ -213,6 +217,26 @@ export function createRepositoryDelivery(deps: RepositoryDeliveryDeps) {
     };
     await saveJson(resultPath, result);
     return { ...result, resultPath };
+  }
+
+  // Current state of the issues and PR a partial delivery left, read through
+  // the same adapter from the delivered checkout.
+  async function readRepositoryFollowUps(dir: string, cwd: string, issueNumbers: number[], pullRequest: number) {
+    if (!repositoryDeliveryConfig.enabled) return { ok: false, error: "repository_delivery_disabled" };
+    if (!repositoryDeliveryConfig.command) return { ok: false, error: "repository_delivery_command_missing" };
+    const requestPath = join(dir, "followup_issues_request.json");
+    await saveJson(requestPath, { schemaVersion: 1, operation: "issues", issueNumbers, pullRequest, createdAt: new Date().toISOString() });
+    try {
+      const execResult = await execSupervisedCommand(repositoryDeliveryConfig.command, [...repositoryDeliveryConfig.args, requestPath], {
+        cwd,
+        timeout: 120000,
+        maxBuffer: 2 * 1024 * 1024,
+      });
+      const parsed = JSON.parse(String(execResult.stdout || "").trim());
+      return parsed && typeof parsed === "object" ? parsed : { ok: false, error: "repository_issues_invalid_json" };
+    } catch (err: any) {
+      return { ok: false, error: String(err?.message || err), stderr: excerpt(err?.stderr || "", 2000) };
+    }
   }
 
   async function finalizeRepositoryDeliveryState(dir: string, status: any, params: any) {
@@ -314,5 +338,5 @@ export function createRepositoryDelivery(deps: RepositoryDeliveryDeps) {
     }
   }
 
-  return { resumeReviewInfrastructureFinalization, requiredValidationError, finalizeRepositoryDeliveryState, reconcileRepositoryDeliveryState, autoCommitCanonicalPlan };
+  return { resumeReviewInfrastructureFinalization, requiredValidationError, readRepositoryFollowUps, finalizeRepositoryDeliveryState, reconcileRepositoryDeliveryState, autoCommitCanonicalPlan };
 }

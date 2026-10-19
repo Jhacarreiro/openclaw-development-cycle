@@ -78,6 +78,19 @@ if (req.operation === "status") {
   process.exit(0);
 }
 
+// A follow-up run reads the current state of the issues an earlier partial
+// delivery opened, so only the ones still open become its tasks.
+if (req.operation === "issues") {
+  const issues = [];
+  for (const number of req.issueNumbers || []) {
+    if (!Number.isInteger(number) || number <= 0) continue;
+    issues.push(JSON.parse(run("gh", ["issue", "view", String(number), "--json", "number,title,body,state,url"])));
+  }
+  const pullRequest = req.pullRequest ? JSON.parse(run("gh", ["pr", "view", String(req.pullRequest), "--json", "number,url,state,headRefName,headRefOid"])) : null;
+  process.stdout.write(JSON.stringify({ ok: true, operation: "issues", issues, pullRequest }));
+  process.exit(0);
+}
+
 // List every untracked file, not just its new top-level directory, so a
 // secret inside a new directory is still checked. NUL-terminated entries keep
 // paths with spaces or special characters unquoted.
@@ -124,13 +137,25 @@ if (porcelain) {
   }
 }
 const commit = run("git", ["rev-parse", "HEAD"]);
-await pushWithGitHubToken(branch);
+// A follow-up run starts from the head of an open delivery PR and adds its
+// commits to that PR's branch. A plain push only fast-forwards, so it fails
+// instead of dropping commits if the branch moved since.
+const targetBranch = safe(req.targetBranch);
+const prBranch = targetBranch || branch;
+const findPullRequest = () => {
+  try {
+    return JSON.parse(run("gh", ["pr", "view", prBranch, "--json", "number,url,state"]));
+  } catch {
+    return null;
+  }
+};
+// Check before pushing: commits pushed to a closed or merged PR's branch
+// would land outside any PR.
+if (targetBranch && findPullRequest()?.state !== "OPEN") throw new Error(`followup_pull_request_not_open:${prBranch}`);
+await pushWithGitHubToken(targetBranch ? `HEAD:refs/heads/${targetBranch}` : branch);
 
 const repository = run("gh", ["repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"]);
-let pullRequest = null;
-try {
-  pullRequest = JSON.parse(run("gh", ["pr", "view", branch, "--json", "number,url,state"]));
-} catch {}
+let pullRequest = findPullRequest();
 if (!pullRequest || pullRequest.state === "CLOSED") {
   const bodyDir = await mkdtemp(join(tmpdir(), "development-cycle-pr-body-"));
   const bodyPath = join(bodyDir, `development-cycle-${safe(req.runId)}-pr.md`);
@@ -195,6 +220,25 @@ if (req.classification === "partial") {
   }
 }
 
+// When a follow-up run succeeds, the PR now carries the whole delivery: give
+// it a success title and close the issues it resolved when it merges.
+const closesIssues = (req.closesIssues || []).filter((number) => Number.isInteger(number) && number > 0);
+if (targetBranch && req.classification === "success") {
+  const current = JSON.parse(run("gh", ["pr", "view", String(pullRequest.number), "--json", "body"]));
+  const closing = closesIssues.map((number) => `Closes #${number}`).join("\n");
+  const bodyDir = await mkdtemp(join(tmpdir(), "development-cycle-pr-edit-"));
+  const editPath = join(bodyDir, "edit.json");
+  try {
+    await writeFile(editPath, JSON.stringify({
+      title: `${req.project}: delivery ${req.runId}`,
+      body: [String(current.body || "").trim(), `Completed by follow-up run ${req.runId}.`, closing].filter(Boolean).join("\n\n"),
+    }));
+    run("gh", ["api", "-X", "PATCH", `repos/${repository}/pulls/${pullRequest.number}`, "--input", editPath]);
+  } finally {
+    await rm(bodyDir, { recursive: true, force: true });
+  }
+}
+
 let merged = pullRequest?.state === "MERGED";
 let mergeQueued = false;
 if (req.classification === "success" && req.autoMerge && !merged) {
@@ -209,7 +253,7 @@ if (req.classification === "success" && req.autoMerge && !merged) {
 process.stdout.write(JSON.stringify({
   ok: true,
   repository,
-  branch,
+  branch: prBranch,
   commit,
   pullRequest,
   issues,

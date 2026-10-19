@@ -12,6 +12,7 @@ export const ACTIONS = [
   "request_final_validation",
   "record_final_validation",
   "start_corrections",
+  "start_followup",
   "finalize_delivery",
   "close",
 ] as const;
@@ -54,6 +55,7 @@ const ALLOWED_PHASES: Partial<Record<DevelopmentCycleAction, ReadonlySet<string>
   ]),
   record_final_validation: new Set(["waiting_final_validation"]),
   start_corrections: new Set(["needs_corrections", "council_review_needs_corrections"]),
+  start_followup: new Set([""]),
   finalize_delivery: new Set([
     "final_validated",
     "final_revised",

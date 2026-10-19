@@ -71,6 +71,8 @@ Repository delivery is opt-in and disabled by default. The core lifecycle writes
 | `DEVELOPMENT_CYCLE_REPOSITORY_DELIVERY_ARGS_JSON` | `[]` | Fixed arguments placed before the request JSON path. |
 | `DEVELOPMENT_CYCLE_REPOSITORY_DELIVERY_AUTO_MERGE_SUCCESSFUL` | `true` | Ask the adapter to auto-merge successful deliveries after repository checks permit it. |
 | `DEVELOPMENT_CYCLE_REPOSITORY_DELIVERY_BASE_BRANCH` | `main` | Default base branch for delivery PRs. |
+| `DEVELOPMENT_CYCLE_FOLLOWUP_AUTO_START` | `true` | When review does not converge and the partial delivery opens follow-up issues, start a follow-up run on the delivery PR branch automatically. |
+| `DEVELOPMENT_CYCLE_FOLLOWUP_MAX_GENERATIONS` | `2` | Follow-up runs allowed after the first run before the open issues are left for an operator. |
 
 `finalize_delivery` classifies `final_validated` as `success`; recoverable terminal failure/correction phases as `partial`; and other explicitly requested outcomes as `invalid`. A partial delivery should publish the coherent work as a normal PR and create repository issues for residual findings. A successful delivery may queue auto-merge. While checks are pending, `reconcile` performs a read-only PR status check and promotes `delivery_published` to `merged` once the forge confirms the merge. Invalid output is recorded but not published. When repository delivery is disabled (the default), `finalize_delivery` performs no forge action and closes the cycle locally as `closed_success` or `closed_partial`, preserving an explicit terminal path without pretending anything was published.
 

@@ -1,0 +1,159 @@
+import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
+import { mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
+import { promisify } from "node:util";
+import test from "node:test";
+import { writeCanonicalRoutingConfig } from "./helpers/octopus-routing.mjs";
+
+const execFileAsync = promisify(execFile);
+function detailsOf(result) { return result?.details ?? result; }
+async function git(cwd, ...args) { return String((await execFileAsync("git", args, { cwd })).stdout || "").trim(); }
+function planText(projectRoot, wikiPath) {
+  return [
+    "# Implementation plan", "",
+    "## Ordered implementation tasks", "- Produce a partial Octopus delivery when possible.", "",
+    "## Validation checks", "- Reconcile the exact attempt output manifest.", "",
+    "## Stop conditions", "- Stop when no materialized output exists.", "",
+    "## Expected artifacts", "- Partial output only when a validated worktree exists.", "",
+    "## Project paths", `- projectWikiPath: ${wikiPath}`, `- projectRoot: ${projectRoot}`,
+  ].join("\n");
+}
+
+test("A partial delivery whose review did not converge starts a follow-up run on the delivery PR branch from its open issues", async (t) => {
+  const root = join(tmpdir(), `development-cycle-followup-${process.pid}-${Date.now()}`);
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const home = join(root, "home");
+  writeCanonicalRoutingConfig(home);
+  const checkout = join(root, "checkout");
+  const project = "octopus-review-followup";
+  const runId = "run-octopus-review-followup";
+  const projectWikiPath = join(root, "docs", project);
+  const supervisorPath = join(root, "runner-supervisor.py");
+  const octopusRoot = join(root, "octopus");
+  const deliveryCommand = join(root, "delivery-runner.sh");
+  const deliveryMarker = join(root, "delivery-called.json");
+  await mkdir(checkout, { recursive: true });
+  await git(checkout, "init");
+  await git(checkout, "config", "user.email", "test@example.com");
+  await git(checkout, "config", "user.name", "Test Runner");
+  await writeFile(join(checkout, "README.md"), "source\n");
+  await git(checkout, "add", "README.md");
+  await git(checkout, "commit", "-m", "initial");
+  await mkdir(join(octopusRoot, "scripts"), { recursive: true });
+  await writeFile(join(octopusRoot, "scripts", "orchestrate.sh"), "#!/bin/sh\nexit 1\n", { mode: 0o755 });
+  await writeFile(supervisorPath, [
+    "import json, os, sys",
+    "cmd = sys.argv[-1] if len(sys.argv) else ''",
+    "pid = os.getppid()",
+    "if cmd == 'ping': print(json.dumps({'ok': True, 'subreaper': True, 'pid': pid}))",
+    "elif len(sys.argv) >= 3 and sys.argv[-3] == 'launch': print(json.dumps({'ok': True, 'pid': pid, 'pgid': os.getpgid(pid), 'supervisorPid': pid}))",
+    "else: print(json.dumps({'ok': False, 'argv': sys.argv}))",
+  ].join("\n"));
+  // Stands in for the GitHub runner: publishing opens PR #7 with issues #11
+  // and #12, and the issues lookup reports #12 already closed.
+  await writeFile(deliveryCommand, [
+    "#!/usr/bin/env node",
+    "const fs = require('fs');",
+    "const { execFileSync } = require('child_process');",
+    "const req = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));",
+    "if (!req.projectRoot) throw new Error('projectRoot_missing');",
+    `fs.appendFileSync(${JSON.stringify(deliveryMarker)}, JSON.stringify(req) + '\\n');`,
+    "const head = String(execFileSync('git', ['rev-parse', 'HEAD'])).trim();",
+    "if (req.operation === 'issues') {",
+    "  process.stdout.write(JSON.stringify({ ok: true, operation: 'issues',",
+    "    pullRequest: { number: 7, url: 'https://example.invalid/pull/7', state: 'OPEN', headRefOid: head },",
+    "    issues: [",
+    "      { number: 11, state: 'OPEN', url: 'https://example.invalid/issues/11', title: 'Follow-up: Publish never checks the hash-bound approval (src/workflow.ts:370)', body: 'Created from development-cycle run x.\\n\\nFinding:\\nPublish never checks the hash-bound approval (src/workflow.ts:370): Compare the approval hash before posting.\\n\\nAcceptance criteria:\\n- Resolve it.' },",
+    "      { number: 12, state: 'CLOSED', url: 'https://example.invalid/issues/12', title: 'Follow-up: Database files are created without O_NOFOLLOW (src/db.ts:12)', body: '' },",
+    "    ] }));",
+    "} else {",
+    "  execFileSync('git', ['add', '-A']);",
+    "  execFileSync('git', ['-c', 'user.email=t@example.com', '-c', 'user.name=t', 'commit', '-qm', 'delivery']);",
+    "  const commit = String(execFileSync('git', ['rev-parse', 'HEAD'])).trim();",
+    "  const branch = String(execFileSync('git', ['branch', '--show-current'])).trim();",
+    "  process.stdout.write(JSON.stringify({ ok: true, branch, commit, merged: false,",
+    "    pullRequest: { number: 7, url: 'https://example.invalid/pull/7', state: 'OPEN' },",
+    "    issues: [{ number: 11, url: 'https://example.invalid/issues/11', title: 'a' }, { number: 12, url: 'https://example.invalid/issues/12', title: 'b' }] }));",
+    "}",
+    "",
+  ].join("\n"), { mode: 0o755 });
+  Object.assign(process.env, {
+    HOME: home,
+    DEVELOPMENT_CYCLE_STATE_ROOT: join(root, "state"),
+    DEVELOPMENT_CYCLE_PROJECT_DOCS_ROOT: join(root, "docs"),
+    DEVELOPMENT_CYCLE_NOTIFICATIONS_ENABLED: "false",
+    DEVELOPMENT_CYCLE_OBSERVER_ENABLED: "false",
+    DEVELOPMENT_CYCLE_REPOSITORY_DELIVERY_ENABLED: "true",
+    DEVELOPMENT_CYCLE_REPOSITORY_DELIVERY_COMMAND: deliveryCommand,
+    DEVELOPMENT_CYCLE_REPOSITORY_DELIVERY_ARGS_JSON: "[]",
+    DEVELOPMENT_CYCLE_OCTOPUS_ROOT: octopusRoot,
+    DEVELOPMENT_CYCLE_RUNNER_SUPERVISOR_PATH: supervisorPath,
+    DEVELOPMENT_CYCLE_RUNNER_SUPERVISOR_SOCKET: join(root, "runner-supervisor.sock"),
+  });
+  const { default: plugin } = await import(`../dist/index.js?octopus-nonconvergence=${Date.now()}-${Math.random()}`);
+  let tool;
+  plugin.register({ pluginConfig: {}, registerTool(v) { tool = v; } });
+  const params = { project, runId, projectRoot: checkout, projectWikiPath };
+  detailsOf(await tool.execute("request", { action: "request_plan", ...params }, undefined, undefined));
+  detailsOf(await tool.execute("record", { action: "record_plan", ...params, planText: planText(checkout, projectWikiPath) }, undefined, undefined));
+  const launched = detailsOf(await tool.execute("launch", { action: "start_implementation", ...params, implementationAdapter: "octopus" }, undefined, undefined));
+  const attemptId = launched.implementationAttemptId;
+  const outputPath = join(home, ".claude-octopus", "worktrees", "tangle", attemptId, "integration");
+  const runBranch = `octopus/run/${attemptId}/integration`;
+  await mkdir(join(home, ".claude-octopus", "worktrees", "tangle", attemptId), { recursive: true });
+  await git(checkout, "worktree", "add", "-b", runBranch, outputPath);
+  await writeFile(join(outputPath, "partial.txt"), "partial delivery\n");
+  const manifestDir = join(home, ".claude-octopus", "results");
+  await mkdir(manifestDir, { recursive: true });
+  await writeFile(join(manifestDir, `.tangle-${attemptId}-git.json`), JSON.stringify({
+    sourceRepository: await realpath(checkout),
+    sourceCommit: await git(checkout, "rev-parse", "HEAD"),
+    runBranch,
+    runWorktree: await realpath(outputPath),
+  }, null, 2));
+  const findingsPath = join(manifestDir, "review-findings-1-octopus-tangle-review-marker.test.json");
+  await writeFile(findingsPath, JSON.stringify({ findings: [
+    { file: "src/workflow.ts", line: 370, severity: "normal", category: "auth", title: "Publish never checks the hash-bound approval", detail: "Compare the approval hash before posting." },
+    { file: "src/db.ts", line: 12, severity: "normal", category: "data-exposure", title: "Database files are created without O_NOFOLLOW", detail: "" },
+    { file: "src/cli.ts", line: 5, severity: "nit", category: "usability", title: "Option values that begin with -- are rejected", detail: "" },
+  ] }));
+  const session = JSON.parse(await readFile(launched.directImplementationStatus, "utf8"));
+  // The reviewed code handles EACCES; that text in the log must not reclassify the run as a local runtime fault.
+  await writeFile(session.stderrPath, [
+    "\u001b[0;34m[2026-10-15 07:50:00]\u001b[0m INFO: review_run: finding mentions EACCES when chmod fails",
+    `\u001b[0;34m[2026-10-15 08:12:12]\u001b[0m \u001b[0;31mERROR\u001b[0m: Correction loop hit the absolute round ceiling (10) with 2 blocking finding(s) remaining: ${findingsPath} — raise or disable with OCTOPUS_TANGLE_CORRECTION_HARD_CAP (0 = no ceiling)`,
+    "",
+  ].join("\n"));
+  await writeFile(session.exitCodePath, "8\n");
+  await writeFile(session.exitedAtPath, "2026-08-30T06:30:00Z\n");
+  await writeFile(launched.directImplementationStatus, JSON.stringify({ ...session, status: "failed", launchState: "exited", exitCode: 8, exitedAt: "2026-08-30T06:30:00Z" }, null, 2));
+
+  const reconciled = detailsOf(await tool.execute("reconcile", {
+    action: "reconcile", ...params, notifyMain: false, autoStopStalled: false, autoRunFinalValidation: false, autoRunCouncilReview: false,
+  }, undefined, undefined));
+  assert.equal(reconciled.status.phase, "closed_partial", JSON.stringify(reconciled.status));
+  const followUp = reconciled.automaticFollowUp;
+  assert.equal(followUp.ok, true, JSON.stringify(followUp));
+  assert.equal(followUp.phase, "implementation_launched");
+  assert.equal(reconciled.status.followUpRunId, followUp.runId);
+
+  const followUpStatus = detailsOf(await tool.execute("status", { action: "status", project, runId: followUp.runId }, undefined, undefined)).status;
+  const deliveredCommit = await git(outputPath, "rev-parse", "HEAD");
+  assert.equal(followUpStatus.projectRoot, await realpath(outputPath));
+  assert.deepEqual(followUpStatus.followUp, {
+    fromRunId: runId,
+    rootRunId: runId,
+    generation: 1,
+    branch: runBranch,
+    commit: deliveredCommit,
+    pullRequest: { number: 7, url: "https://example.invalid/pull/7" },
+    issues: [{ number: 11, title: "Follow-up: Publish never checks the hash-bound approval (src/workflow.ts:370)", url: "https://example.invalid/issues/11" }],
+    originalPlan: reconciled.status.plan,
+    planPath: join(dirname(followUpStatus.plan), "followup_plan.md"),
+  });
+  const followUpPlan = await readFile(followUpStatus.plan, "utf8");
+  assert.match(followUpPlan, /1\. Resolve issue #11 \(https:\/\/example\.invalid\/issues\/11\): Publish never checks the hash-bound approval \(src\/workflow\.ts:370\): Compare the approval hash before posting\./);
+  assert.doesNotMatch(followUpPlan, /#12/);
+});

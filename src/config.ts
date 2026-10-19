@@ -25,6 +25,8 @@ export interface DevelopmentCycleConfig {
     args: string[];
     autoMergeSuccessful: boolean;
     baseBranch: string;
+    followUpAutoStart: boolean;
+    followUpMaxGenerations: number;
   };
   notifications: {
     enabled: boolean;
@@ -158,6 +160,8 @@ export function loadDevelopmentCycleConfig(env: NodeJS.ProcessEnv = process.env)
       args: stringArray(env, "DEVELOPMENT_CYCLE_REPOSITORY_DELIVERY_ARGS_JSON"),
       autoMergeSuccessful: boolean(env, "DEVELOPMENT_CYCLE_REPOSITORY_DELIVERY_AUTO_MERGE_SUCCESSFUL", true),
       baseBranch: text(env, "DEVELOPMENT_CYCLE_REPOSITORY_DELIVERY_BASE_BRANCH", "main"),
+      followUpAutoStart: boolean(env, "DEVELOPMENT_CYCLE_FOLLOWUP_AUTO_START", true),
+      followUpMaxGenerations: positiveInteger(env, "DEVELOPMENT_CYCLE_FOLLOWUP_MAX_GENERATIONS", 2),
     },
     notifications: {
       enabled: boolean(env, "DEVELOPMENT_CYCLE_NOTIFICATIONS_ENABLED", false),

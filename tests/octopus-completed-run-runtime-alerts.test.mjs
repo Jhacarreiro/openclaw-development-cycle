@@ -119,3 +119,15 @@ test("A run whose council review passed is delivered by reconcile itself when au
   assert.equal((await delivered.reconcile()).status.phase, "council_validated");
   assert.equal((await delivered.reconcile({ autoFinalizeDelivery: true })).status.phase, "closed_success");
 });
+
+test("A council-validated run is not delivered once a newer run of the project has started", async (t) => {
+  const validated = await reconcileCompletedOctopusRun(t, [
+    "\u001b[0;34m[2026-10-20 17:17:18]\u001b[0m \u001b[0;32mINFO\u001b[0m: Tangle run completed; preserving isolated branch and worktree for review: octopus/run/x/integration",
+  ]);
+  const status = JSON.parse(await readFile(validated.statusPath, "utf8"));
+  await writeFile(validated.statusPath, JSON.stringify({ ...status, phase: "council_validated", councilDecision: "go" }, null, 2));
+  const newer = join(validated.statusPath, "..", "..", "octopus-completed-run-20991231000000000-zzzzzz");
+  await mkdir(newer, { recursive: true });
+  await writeFile(join(newer, "status.json"), JSON.stringify({ phase: "waiting_external_plan" }));
+  assert.equal((await validated.reconcile({ autoFinalizeDelivery: true })).status.phase, "council_validated");
+});

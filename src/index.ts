@@ -352,7 +352,10 @@ async function projectCycle(params: CycleParameters | null | undefined): Promise
       effectiveStatus = councilEndgate?.status || effectiveStatus;
     }
     let automaticFinalDelivery: any = null;
-    if (params.autoFinalizeDelivery === true && effectiveStatus?.phase === "council_validated") {
+    // Validation and council review can take long enough for a newer run of the project to start; a superseded
+    // run is left for an operator instead of publishing its output.
+    if (params.autoFinalizeDelivery === true && effectiveStatus?.phase === "council_validated"
+      && basename(await latestRunDir(rawProject).catch(() => "")) === runId) {
       automaticFinalDelivery = await finalizeRepositoryDeliveryState(dir, { ...effectiveStatus, project, runId }, params);
       effectiveStatus = automaticFinalDelivery.status || effectiveStatus;
     }

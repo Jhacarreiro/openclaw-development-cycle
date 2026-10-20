@@ -934,13 +934,13 @@ const developmentCyclePlugin = defineToolPlugin({
   ],
 });
 
-// The cycle drives its own open runs: after a restart or a missed event nothing else may call reconcile, and
-// the steps after delivery (validation, council review, repository delivery) should not wait on an agent.
+// The cycle drives its own open runs: after a restart or a missed event nothing else may call reconcile. When the
+// operator opts in, the steps after delivery (validation, council review, repository delivery) no longer wait on an agent.
 const runDriverConfig = developmentCycleConfig.runDriver;
 const runDriver = createRunDriver({
   intervalMs: runDriverConfig.intervalSeconds * 1000,
   listRuns: () => runsToDrive(join(cycleRoot, "runs"), latestRunDir, runDriverConfig.maxIdleHours * 3600 * 1000),
-  drive: ({ project, runId }) => projectCycle({ action: "reconcile", project, runId, autoRunFinalValidation: true, autoRunCouncilReview: true, autoFinalizeDelivery: true }),
+  drive: ({ project, runId }) => projectCycle({ action: "reconcile", project, runId, autoRunFinalValidation: runDriverConfig.autoFinalSteps, autoRunCouncilReview: runDriverConfig.autoFinalSteps, autoFinalizeDelivery: runDriverConfig.autoFinalSteps }),
 });
 const registerTools = developmentCyclePlugin.register.bind(developmentCyclePlugin);
 developmentCyclePlugin.register = (api: any) => {

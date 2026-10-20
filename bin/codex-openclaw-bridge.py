@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import json,os,signal,subprocess,sys,tempfile,shutil,threading
+import json,os,re,signal,subprocess,sys,tempfile,shutil,threading
 S=("DEVELOPMENT_CYCLE_CODEX_ACCESS_TOKEN","DEVELOPMENT_CYCLE_CODEX_ACCOUNT_ID","DEVELOPMENT_CYCLE_CODEX_PLAN_TYPE")
 def env(home):
  e=os.environ.copy()
@@ -66,12 +66,22 @@ def resolve_openclaw_oauth():
  if not root: raise RuntimeError("openclaw package root not found")
  state_dir=os.getenv("OPENCLAW_STATE_DIR","").strip() or os.path.join(os.path.expanduser("~"),".openclaw")
  agent_dir=os.getenv("DEVELOPMENT_CYCLE_OPENCLAW_AGENT_DIR",os.path.join(state_dir,"agents","main","agent"))
- profile_id=os.getenv("DEVELOPMENT_CYCLE_OPENCLAW_PROFILE_ID","openai:default")
- js="import {ensureAuthProfileStore} from 'openclaw/plugin-sdk/agent-runtime'; const store=ensureAuthProfileStore(process.env.DC_AGENT_DIR); const p=store.profiles?.[process.env.DC_PROFILE_ID]; if(!p||p.type!=='oauth'||p.provider!=='openai') throw new Error('openai oauth profile unavailable'); const token=typeof p.access==='string'?p.access.trim():''; const accountId=typeof p.accountId==='string'?p.accountId.trim():''; const planType=typeof p.chatgptPlanType==='string'?p.chatgptPlanType.trim():''; const expires=Number(p.expires||0); if(!token||!accountId) throw new Error('openai oauth profile incomplete'); if(!Number.isFinite(expires)||expires<=Date.now()+60000) throw new Error('openai oauth profile expired or near expiry'); console.log(JSON.stringify({token,accountId,planType,expires}));"
+ # Without an explicit profile id, take the openai profiles in the order
+ # OpenClaw itself would use them, from its own resolver and config (authored
+ # order as a hard limit, cooldowns last): OpenClaw now keeps the live login
+ # under an account-keyed id and can leave a stale openai:default behind. When
+ # none is usable, the profiles that order names (or every openai profile, for
+ # no order) say why; the resolver has already dropped ineligible ones.
+ profile_id=os.getenv("DEVELOPMENT_CYCLE_OPENCLAW_PROFILE_ID","").strip()
+ js="import {ensureAuthProfileStore,resolveAuthProfileOrder} from 'openclaw/plugin-sdk/agent-runtime'; import {loadConfig} from 'openclaw/plugin-sdk/config-runtime'; const cfg=await loadConfig(); const store=ensureAuthProfileStore(process.env.DC_AGENT_DIR); const profiles=store.profiles||{}; const ids=process.env.DC_PROFILE_ID?[process.env.DC_PROFILE_ID]:resolveAuthProfileOrder({cfg,store,provider:'openai'}); const usable=(p)=>{ if(!p||p.type!=='oauth'||p.provider!=='openai') return 'openai oauth profile unavailable'; const expires=Number(p.expires||0); if(!(typeof p.access==='string'&&p.access.trim())||!(typeof p.accountId==='string'&&p.accountId.trim())) return 'openai oauth profile incomplete'; if(!Number.isFinite(expires)||expires<=Date.now()+60000) return 'openai oauth profile expired or near expiry'; return ''; }; const id=ids.find((id)=>!usable(profiles[id])); if(!id){ const authored=store.order?.openai||cfg?.auth?.order?.openai; const named=ids.length?ids:(authored||Object.keys(profiles).filter((id)=>profiles[id]?.provider==='openai')); const reasons=named.map((id)=>usable(profiles[id])); throw new Error(reasons.find((r)=>r!=='openai oauth profile unavailable')||'openai oauth profile unavailable'); } const p=profiles[id]; console.log('DC_OAUTH '+JSON.stringify({token:p.access.trim(),accountId:p.accountId.trim(),planType:typeof p.chatgptPlanType==='string'?p.chatgptPlanType.trim():'',expires:Number(p.expires)}));"
  e=os.environ.copy(); e["DC_AGENT_DIR"]=agent_dir; e["DC_PROFILE_ID"]=profile_id
  r=subprocess.run(["node","--input-type=module","-e",js],cwd=root,env=e,text=True,capture_output=True,timeout=60)
- if r.returncode!=0: raise RuntimeError("OpenClaw OAuth profile read failed")
- try: q=json.loads(r.stdout)
+ if r.returncode!=0:
+  m=re.search(r"Error: (openai oauth profile (?:unavailable|incomplete|expired or near expiry))",r.stderr or "")
+  raise RuntimeError("OpenClaw OAuth profile read failed"+(": "+m.group(1) if m else ""))
+ # Loading the config can print warnings on stdout too.
+ line=next((l for l in (r.stdout or "").splitlines() if l.startswith("DC_OAUTH ")),"")
+ try: q=json.loads(line[len("DC_OAUTH "):])
  except Exception: raise RuntimeError("OpenClaw OAuth profile read returned invalid data")
  if not q.get("token") or not q.get("accountId"): raise RuntimeError("OpenClaw OAuth profile read returned incomplete data")
  return q["token"],q["accountId"],q.get("planType","")

@@ -1,5 +1,7 @@
 # Development Cycle — Supervised Agentic Execution
 
+Run supervised agentic development from an approved plan through execution, evidence gathering and validation. This experimental control plane keeps state across steps and supports corrections without assuming a particular implementation runner.
+
 *From approved plans to validated outcomes.*
 
 [![CI](https://github.com/Jhacarreiro/openclaw-development-cycle/actions/workflows/ci.yml/badge.svg)](https://github.com/Jhacarreiro/openclaw-development-cycle/actions/workflows/ci.yml)

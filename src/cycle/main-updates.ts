@@ -19,8 +19,10 @@ export function createMainUpdates(deps: MainUpdatesDeps) {
   function dcAlerts(runtime: any): string[] { return [...new Set<string>((runtime?.richObservation?.alerts || []).map((a: any) => String(a?.code || "")).filter(Boolean))].sort(); }
   function dcLines(runtime: any) { return (runtime?.richObservation?.latestTimeline || []).map((x: any) => String(x?.line || "")).filter(Boolean).join("\n"); }
   function dcMatch(text: string, pairs: any[]) { for (const [name, re] of pairs) { const m = re.exec(text); if (m) return { name, pattern: String(re), match: dcShort(m[0], 220) }; } return null; }
-  // Process-level runtime alerts only mean something while a supervised run is still active.
+  // Alerts about the run's root process only mean something while a supervised run is still active.
+  // A provider still working in the attempt outside the observed tree blocks in any phase.
   const dcRuntimeActivePhases = new Set(["implementation_launched", "implementation_running", "corrections_launched", "corrections_running"]);
+  const dcActiveRunAlerts = new Set(["status_running_but_root_missing", "root_process_zombie", "wall_clock_timeout_seen"]);
   async function dcClassify(dir: string, status: any, runtime: any) {
     const out = String(status?.implementationStdout || status?.correctionsStdout || status?.directImplementationStdout || "");
     const err = String(status?.implementationStderr || status?.correctionsStderr || status?.directImplementationStderr || "");
@@ -65,7 +67,7 @@ export function createMainUpdates(deps: MainUpdatesDeps) {
         }
       : null;
     if (!c) for (const p of policies) { const m = dcMatch(text, p[6]); if (m) { c = { failureClass:p[0], severity:p[1], humanRequired:p[2], safeToAutoRetry:p[3], autoStopRecommended:p[4], recommendedAction:p[5], matched:m }; break; } }
-    const codes = dcAlerts(runtime); if (!c && dcRuntimeActivePhases.has(phase)) { const b = codes.filter((x: string) => ["status_running_but_root_missing","root_process_zombie","wall_clock_timeout_seen","provider_processes_outside_observed_tree"].includes(x)); if (b.length) c = { failureClass:"runtime_observation_blocker", severity:"warning", humanRequired:true, safeToAutoRetry:false, autoStopRecommended:false, recommendedAction:"Inspect Observer runtime observation before deciding whether to stop or relaunch.", matched:{name:"runtime_alert", pattern:b.join(","), match:b.join(", ")} }; }
+    const codes = dcAlerts(runtime); if (!c) { const b = codes.filter((x: string) => x === "provider_processes_outside_observed_tree" || (dcActiveRunAlerts.has(x) && dcRuntimeActivePhases.has(phase))); if (b.length) c = { failureClass:"runtime_observation_blocker", severity:"warning", humanRequired:true, safeToAutoRetry:false, autoStopRecommended:false, recommendedAction:"Inspect Observer runtime observation before deciding whether to stop or relaunch.", matched:{name:"runtime_alert", pattern:b.join(","), match:b.join(", ")} }; }
     const important = new Set(["implementation_launched","implementation_waiting_human","implementation_delivered","implementation_failed","review_infrastructure_failed","corrections_launched","corrections_completed","corrections_failed","external_validation_passed","external_validation_failed","stopped","closed"]);
     return { eventType:"development_cycle.update", phase, phaseSeverity:/failed|blocked|stopped/i.test(phase)?"blocking":"info", classification:c, shouldNotifyMain:Boolean(c)||important.has(phase), alertCodes:codes, evidencePaths:[join(dir,"status.json"),join(dir,"runtime_alerts.json"),join(dir,"runtime_observation.json"),out,err].filter(Boolean), textExcerpt:dcShort(text.replace(/\s+/g," ").trim(),1600) };
   }

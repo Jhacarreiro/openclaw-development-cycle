@@ -18,6 +18,8 @@ The format is based on Keep a Changelog and the project follows Semantic Version
 
 ### Fixed
 
+- An Octopus run that gives up on corrections after a review left blocking findings (a stalled correction round, retries it cannot supervise) is now classified `review_non_convergence` like one that hits the round ceiling, so its partial delivery opens one issue per finding left in that review and the follow-up run works them. Before, a stale runtime alert classified it as `runtime_observation_blocker` and no follow-up started.
+- A partial delivery no longer opens an issue from the failure's recommended action. That text is an instruction for whoever runs the cycle (for example "Inspect Observer runtime observation before deciding whether to stop or relaunch."), not work left in the code.
 - Codex bridge: without `DEVELOPMENT_CYCLE_OPENCLAW_PROFILE_ID`, it now takes the first usable OpenAI OAuth profile in the order OpenClaw's own resolver returns from its config and auth store (authored order respected, profiles in cooldown last) instead of always `openai:default`. Newer OpenClaw keeps the live login under an account-keyed profile and can leave a stale `openai:default` behind, which made every Codex seat fail. When no profile is usable, the error now says whether it was unavailable, incomplete or expired.
 
 - An Octopus run that stops at its review/correction round ceiling is now classified `review_non_convergence` instead of whichever generic pattern its log happened to match (an `EACCES` in reviewed code text made it `local_runtime_fault`). The partial delivery opens one follow-up issue per blocking finding left in Octopus's last review, instead of an issue built from the failure's recommended action.

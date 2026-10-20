@@ -91,15 +91,16 @@ export function createRepositoryDelivery(deps: RepositoryDeliveryDeps) {
     const raw = [...(status?.councilReviewFindings || [])];
     const residue = status?.reviewNonConvergence?.ok && Array.isArray(status.reviewNonConvergence.remaining) ? status.reviewNonConvergence.remaining : null;
     if (residue) {
-      // One issue per finding the review left blocking; the failure's own
-      // recommended action describes the run, not work left in the code.
+      // One issue per finding the review left blocking.
       for (const f of residue) raw.push(`${f.title}${f.file ? ` (${f.file}${f.line ? `:${f.line}` : ""})` : ""}${f.detail ? `: ${f.detail}` : ""}`);
       // Octopus reported blocking findings but its findings file could not be
       // read: keep one follow-up so the residue is never dropped silently.
       if (!residue.length && Number(status.reviewNonConvergence.blockingCount) > 0) {
         raw.push(`Review stopped after ${status.reviewNonConvergence.roundCeiling} correction round(s) with ${status.reviewNonConvergence.blockingCount} blocking finding(s) left, but the findings file could not be read: re-review this branch.`);
       }
-    } else if (status?.failureRecommendedAction) raw.push(String(status.failureRecommendedAction));
+    }
+    // A failure's recommended action is an instruction for whoever runs the
+    // cycle, not work left in the code, so it never becomes an issue.
     const out: string[] = [];
     for (const value of raw) {
       const text = String(value || "").trim().replace(/\s+/g, " ");

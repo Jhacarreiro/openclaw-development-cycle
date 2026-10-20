@@ -130,16 +130,32 @@ export function createOctopusOutput(deps: OctopusOutputDeps) {
   }
 
   // Octopus stops its review/correction loop at a fixed round ceiling and names
-  // the last findings file in the error line. Those findings are the residue the
-  // cycle hands on as follow-up issues, so read them from the trusted results dir.
+  // the last findings file in the error line. It can also give up earlier, when
+  // a correction round stalls or its retries cannot be supervised, after a
+  // review already left blocking findings. Either way those findings are the
+  // residue the cycle hands on as follow-up issues, so read them from the
+  // trusted results dir.
   async function detectOctopusReviewNonConvergence(stderrPath: string) {
-    const stderr = stderrPath ? await textTail(stderrPath, 30000) : "";
-    const match = stderr.replace(/\x1b\[[0-9;]*m/g, "").match(/Correction loop hit the absolute round ceiling \((\d+)\) with (\d+) blocking finding\(s\) remaining: (\S+\.json)/);
-    if (!match) return { ok: false };
+    const stderr = (stderrPath ? await textTail(stderrPath, 30000) : "").replace(/\x1b\[[0-9;]*m/g, "");
+    const ceiling = stderr.match(/Correction loop hit the absolute round ceiling \((\d+)\) with (\d+) blocking finding\(s\) remaining: (\S+\.json)/);
+    let rounds = 0, blockingCount = 0, reported = "", matched: any = null;
+    if (ceiling) {
+      rounds = Number(ceiling[1]); blockingCount = Number(ceiling[2]); reported = ceiling[3];
+      matched = { name: "octopus_correction_round_ceiling", pattern: "Correction loop hit the absolute round ceiling", match: ceiling[0].slice(0, 220) };
+    } else {
+      const reviews = [...stderr.matchAll(/Contextual code review findings: (\S+\.json) \(normal=(\d+)\)/g)];
+      const last = reviews[reviews.length - 1];
+      const stopped = last ? stderr.slice((last.index || 0) + last[0].length).match(/Tangle run failed[^\n]*/) : null;
+      if (!last || !stopped || Number(last[2]) <= 0) return { ok: false };
+      const correctionRounds = [...stderr.matchAll(/Applying contextual review corrections \(round=(\d+)/g)];
+      rounds = correctionRounds.length ? Number(correctionRounds[correctionRounds.length - 1][1]) : 0;
+      blockingCount = Number(last[2]); reported = last[1];
+      matched = { name: "octopus_stopped_with_review_findings", pattern: "Tangle run failed after a review left blocking findings", match: stopped[0].slice(0, 220) };
+    }
     const resultsDir = join(runtimeHome, ".claude-octopus", "results");
     let findingsPath = "";
     try {
-      const [real, realDir] = await Promise.all([realpath(match[3]), realpath(resultsDir)]);
+      const [real, realDir] = await Promise.all([realpath(reported), realpath(resultsDir)]);
       const rel = relative(realDir, real);
       if (rel && !rel.startsWith("..") && !isAbsolute(rel)) findingsPath = real;
     } catch {}
@@ -157,11 +173,11 @@ export function createOctopusOutput(deps: OctopusOutputDeps) {
     return {
       ok: true,
       failureClass: "review_non_convergence",
-      roundCeiling: Number(match[1]),
-      blockingCount: Number(match[2]),
+      roundCeiling: rounds,
+      blockingCount,
       findingsPath: findingsPath || null,
       remaining,
-      matched: { name: "octopus_correction_round_ceiling", pattern: "Correction loop hit the absolute round ceiling", match: match[0].slice(0, 220) },
+      matched,
     };
   }
 

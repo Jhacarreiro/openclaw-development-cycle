@@ -33,6 +33,7 @@ import { createRunDriver, projectsWithRuns, runToDrive } from "./cycle/run-drive
 const lifecycleLockHeld = Symbol("developmentCycleLifecycleLockHeld");
 const resolvedCycleDir = Symbol("developmentCycleResolvedCycleDir");
 const interventionResume = Symbol("developmentCycleInterventionResume");
+const followUpOnlyIfSourceIsLatest = Symbol("developmentCycleFollowUpOnlyIfSourceIsLatest");
 const lifecycleLockTimeoutMs = 30000;
 
 type CycleParameters = Partial<Static<typeof cycleParameters>> & {
@@ -40,6 +41,7 @@ type CycleParameters = Partial<Static<typeof cycleParameters>> & {
   [resolvedCycleDir]?: string;
   [interventionResume]?: { id: string; response: string; responsePath: string; answeredAt: string; sourceAttemptId: string | null };
   automaticRecovery?: boolean;
+  [followUpOnlyIfSourceIsLatest]?: boolean;
 };
 
 interface CycleResult {
@@ -390,7 +392,7 @@ async function projectCycle(params: CycleParameters | null | undefined): Promise
       // The residue of a review that did not converge is the next run's work:
       // continue on the same PR branch until the issues close or the
       // follow-up limit leaves them to an operator.
-      automaticFollowUp = await projectCycle({ action: "start_followup", project: rawProject, fromRunId: runId, implementationAdapter: effectiveStatus?.implementationAdapter });
+      automaticFollowUp = await projectCycle({ action: "start_followup", project: rawProject, fromRunId: runId, implementationAdapter: effectiveStatus?.implementationAdapter, [followUpOnlyIfSourceIsLatest]: true });
       const error = String(automaticFollowUp?.error || "followup_start_failed");
       const retryable = ["followup_issue_lookup_failed", "followup_delivered_checkout_unreadable", "lifecycle_action_busy", "lifecycle_action_lock_lost"].includes(error);
       // Once linked, the follow-up exists even if its launch failed; that run's
@@ -823,6 +825,11 @@ Create or validate the implementation plan only. Do not implement. The plan must
     // A refused follow-up leaves no status.json, so the directory is never
     // taken for a run.
     if (!prepared.ok) return { project, runId: null, ...prepared };
+    // Checking the delivery PR and its issues takes a while; an automatic follow-up whose source was superseded by a
+    // newer run meanwhile is not started, so the project never ends up with two active runs.
+    if (params[followUpOnlyIfSourceIsLatest] === true && basename(await latestRunDir(rawProject).catch(() => "")) !== String(params.fromRunId || "")) {
+      return { ok: false, project, runId: null, error: "followup_source_superseded" };
+    }
     // Link both runs before anything launches: after a restart the source
     // sees its follow-up instead of creating a second one, and the follow-up's
     // own reconcile finishes recording and launching it.

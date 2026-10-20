@@ -37,3 +37,15 @@ test("clears a stale blocker after implementation delivery without overwriting t
   assert.equal(Object.hasOwn(patch, "nextAction"), false);
   assert.ok(patch.failureClearedAt);
 });
+
+test("clearing a stale blocker after delivery restores the delivery next action the blocker had replaced", () => {
+  const recommendedAction = "Inspect Observer runtime observation before deciding whether to stop or relaunch.";
+  const patch = transientRuntimeObservationRecoveryPatch({
+    phase: "implementation_delivered",
+    failureClass: "runtime_observation_blocker",
+    failureRecommendedAction: recommendedAction,
+    nextAction: recommendedAction,
+  }, null);
+  assert.equal(patch.failureClass, null);
+  assert.match(patch.nextAction, /final validation/);
+});

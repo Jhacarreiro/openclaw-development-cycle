@@ -7,7 +7,11 @@ export function transientRuntimeObservationRecoveryPatch(status: any, currentCla
     ? "Continue observing the supervised implementation; no current runtime observation blocker is detected."
     : phase === "corrections_launched"
       ? "Continue observing the supervised corrections; no current runtime observation blocker is detected."
-      : null;
+      : phase === "implementation_delivered" && status?.nextAction === status?.failureRecommendedAction
+        ? "Run mechanical final validation, then council code review."
+        : phase === "corrections_completed" && status?.nextAction === status?.failureRecommendedAction
+          ? "Run mechanical validation and council code review again for the corrected delivery."
+          : null;
 
   return {
     failureClass: null,

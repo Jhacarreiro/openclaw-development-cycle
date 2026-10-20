@@ -130,7 +130,8 @@ export function createRuntimeObservation(deps: RuntimeObservationDeps) {
     const text = timeline.map((x) => x.line).join("\n");
     if (/no diff found/i.test(text)) alerts.push({ severity: "warning", code: "review_no_diff", message: "contextual review reported no diff" });
     if (/Quality Gate: FAILED|Quality gate FAILED/i.test(text)) alerts.push({ severity: "warning", code: "quality_gate_failed" });
-    if (/timed out|Operation timed out/i.test(text)) alerts.push({ severity: "warning", code: "wall_clock_timeout_seen" });
+    // Octopus review summaries count providers as "missing/failed/timed out", even when the count is zero.
+    if (/timed out/i.test(text.replace(/missing\/failed\/timed out/gi, ""))) alerts.push({ severity: "warning", code: "wall_clock_timeout_seen" });
     if (/Skipping ink/i.test(text)) alerts.push({ severity: "info", code: "ink_skipped" });
     if (git?.available && /^## .*\n?$/m.test(String(git.status || "")) && !artifacts.some((a) => /review-findings|tangle-validation|delivery/.test(a.path))) alerts.push({ severity: "info", code: "clean_worktree_with_limited_artifacts" });
     return alerts;

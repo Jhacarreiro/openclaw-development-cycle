@@ -16,7 +16,9 @@ const RESTING_PHASES = new Set([
 
 export function runNeedsDriving(status: any, maxIdleMs: number, now: number) {
   const phase = String(status?.phase || "");
-  if (RESTING_PHASES.has(phase)) return false;
+  // A follow-up linked before a restart rests in these phases until reconcile records and launches it.
+  const unlaunchedFollowUp = status?.followUp && ["", "plan_ready_for_implementation"].includes(phase);
+  if (RESTING_PHASES.has(phase) && !unlaunchedFollowUp) return false;
   // A non-converged partial delivery still has its follow-up to start until one is linked or refused.
   if (phase === "closed_partial" && (status?.failureClass !== "review_non_convergence" || status?.followUpRunId || status?.followUpBlocked)) return false;
   const updatedAt = Date.parse(String(status?.updatedAt || ""));

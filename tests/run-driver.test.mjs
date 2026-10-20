@@ -20,6 +20,9 @@ test("the run driver reconciles only each project's latest run while it is open 
     "human/human-20261020100000000-eeeeee": { phase: "implementation_waiting_human", updatedAt: "2026-10-20T17:00:00Z" },
     "partial/partial-20261020100000000-ffffff": { phase: "closed_partial", failureClass: "review_non_convergence", updatedAt: "2026-10-20T17:00:00Z" },
     "continued/continued-20261020100000000-gggggg": { phase: "closed_partial", failureClass: "review_non_convergence", followUpRunId: "continued-x", updatedAt: "2026-10-20T17:00:00Z" },
+    // A follow-up linked just before a restart, not yet launched.
+    "linked/linked-20261020100000000-hhhhhh": { phase: "plan_ready_for_implementation", followUp: { sourceRunId: "x" }, updatedAt: "2026-10-20T17:00:00Z" },
+    "planned/planned-20261020100000000-iiiiii": { phase: "plan_ready_for_implementation", updatedAt: "2026-10-20T17:00:00Z" },
   };
   for (const [path, status] of Object.entries(runs)) {
     await mkdir(join(runsRoot, path), { recursive: true });
@@ -35,6 +38,7 @@ test("the run driver reconciles only each project's latest run while it is open 
     if (run) driven.push({ project: run.project, runId: run.runId });
   }
   assert.deepEqual(driven, [
+    { project: "linked", runId: "linked-20261020100000000-hhhhhh" },
     { project: "partial", runId: "partial-20261020100000000-ffffff" },
     { project: "publisher", runId: "publisher-20261020135547455-bbbbbb" },
   ]);

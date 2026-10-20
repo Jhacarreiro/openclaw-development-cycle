@@ -38,3 +38,8 @@ test("a blocker that outlives the runner keeps directing the run after the runne
   await updates.dcPersistFailure("/nonexistent", status, await updates.dcClassify("/nonexistent", status, runtimeWith()));
   assert.equal(status.nextAction, "Run mechanical final validation, then council code review.");
 });
+
+test("a provider still running in the attempt outranks a review that did not converge", async () => {
+  const ev = await dcClassify("/nonexistent", { phase: "implementation_failed", reviewNonConvergence: { ok: true } }, runtimeWith("provider_processes_outside_observed_tree"));
+  assert.equal(ev.classification?.failureClass, "runtime_observation_blocker");
+});

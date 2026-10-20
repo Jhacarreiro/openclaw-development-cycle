@@ -184,12 +184,12 @@ function runCodexBridge(store, config = {}) {
     type: "module",
     exports: { "./plugin-sdk/agent-runtime": "./agent-runtime.js", "./plugin-sdk/config-runtime": "./config-runtime.js" },
   }));
-  // Like OpenClaw's resolver: the configured order wins over the store's, and
+  // Like OpenClaw's resolver: the store's order wins over the configured one, and
   // expired OAuth profiles are dropped before the caller sees the order.
   writeFileSync(join(pkg, "agent-runtime.js"), [
     "export function ensureAuthProfileStore() { return JSON.parse(process.env.FAKE_OPENCLAW_STORE); }",
     "export function resolveAuthProfileOrder({ cfg, store, provider }) {",
-    "  const order = cfg?.auth?.order?.[provider] || store.order?.[provider] || Object.keys(store.profiles);",
+    "  const order = store.order?.[provider] || cfg?.auth?.order?.[provider] || Object.keys(store.profiles);",
     "  return order.filter((id) => Number(store.profiles[id]?.expires) > Date.now());",
     "}",
     "",

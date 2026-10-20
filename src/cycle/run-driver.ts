@@ -45,31 +45,37 @@ export function createRunDriver(options: {
   drive: (run: { project: string; runId: string }) => Promise<unknown>;
 }) {
   let timer: ReturnType<typeof setInterval> | null = null;
-  let ticking = false;
-  async function tick() {
-    if (ticking) return;
-    ticking = true;
+  let active: Promise<void> | null = null;
+  let stopped = false;
+  async function drainRuns() {
     try {
       for (const run of await options.listRuns()) {
+        // A stopped driver starts no further reconcile; the one in flight finishes before stop() returns.
+        if (stopped) return;
         await options.drive(run).catch((error: any) => console.error("[development-cycle] run driver reconcile failed:", run.project, run.runId, String(error?.message || error)));
       }
     } catch (error: any) {
       console.error("[development-cycle] run driver failed:", String(error?.message || error));
-    } finally {
-      ticking = false;
     }
+  }
+  function tick() {
+    if (!active) active = drainRuns().finally(() => { active = null; });
+    return active;
   }
   return {
     tick,
     start() {
       if (timer) return;
+      stopped = false;
       void tick();
       timer = setInterval(() => { void tick(); }, options.intervalMs);
       timer.unref?.();
     },
-    stop() {
+    async stop() {
+      stopped = true;
       if (timer) clearInterval(timer);
       timer = null;
+      await active;
     },
   };
 }

@@ -3,7 +3,7 @@ import { mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { runsToDrive } from "../dist/cycle/run-driver.js";
+import { createRunDriver, runsToDrive } from "../dist/cycle/run-driver.js";
 
 const hour = 3600 * 1000;
 
@@ -34,4 +34,24 @@ test("the run driver reconciles only each project's latest run while it is open 
     { project: "partial", runId: "partial-20261020100000000-ffffff" },
     { project: "publisher", runId: "publisher-20261020135547455-bbbbbb" },
   ]);
+});
+
+test("stopping the run driver waits for the reconcile in flight and starts no further one", async () => {
+  const driven = [];
+  let release;
+  const blocked = new Promise((resolve) => { release = resolve; });
+  const driver = createRunDriver({
+    intervalMs: 60_000,
+    listRuns: async () => [{ project: "a", runId: "a-1" }, { project: "b", runId: "b-1" }],
+    drive: async (run) => { driven.push(run.runId); if (run.runId === "a-1") await blocked; },
+  });
+  driver.start();
+  await new Promise((resolve) => setImmediate(resolve));
+  let stopped = false;
+  const stopping = driver.stop().then(() => { stopped = true; });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(stopped, false);
+  release();
+  await stopping;
+  assert.deepEqual(driven, ["a-1"]);
 });

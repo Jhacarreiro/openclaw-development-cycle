@@ -25,3 +25,16 @@ test("once a provider outside the observed tree is gone, the run gets back the n
   assert.equal(status.failureClass, null);
   assert.equal(status.nextAction, "Finalize the delivery.");
 });
+
+test("a blocker that outlives the runner keeps directing the run after the runner's phase change", async () => {
+  let status = { phase: "implementation_running", nextAction: "Observe the implementation." };
+  const store = { runtimeHome: "/nonexistent", loadJson: async () => null, saveJson: async () => {}, appendJsonl: async () => {}, cycleStatus: async (_dir, patch) => (status = { ...status, ...patch }) };
+  const updates = createMainUpdates(store);
+  const orphan = runtimeWith("provider_processes_outside_observed_tree");
+  await updates.dcPersistFailure("/nonexistent", status, await updates.dcClassify("/nonexistent", status, orphan));
+  status = { ...status, phase: "implementation_delivered", nextAction: "Run mechanical final validation, then council code review." };
+  await updates.dcPersistFailure("/nonexistent", status, await updates.dcClassify("/nonexistent", status, orphan));
+  assert.equal(status.nextAction, status.failureRecommendedAction);
+  await updates.dcPersistFailure("/nonexistent", status, await updates.dcClassify("/nonexistent", status, runtimeWith()));
+  assert.equal(status.nextAction, "Run mechanical final validation, then council code review.");
+});

@@ -34,6 +34,7 @@ const lifecycleLockHeld = Symbol("developmentCycleLifecycleLockHeld");
 const resolvedCycleDir = Symbol("developmentCycleResolvedCycleDir");
 const interventionResume = Symbol("developmentCycleInterventionResume");
 const followUpOnlyIfSourceIsLatest = Symbol("developmentCycleFollowUpOnlyIfSourceIsLatest");
+const drivenOnlyWhileLatest = Symbol("developmentCycleDrivenOnlyWhileLatest");
 const lifecycleLockTimeoutMs = 30000;
 
 type CycleParameters = Partial<Static<typeof cycleParameters>> & {
@@ -42,6 +43,7 @@ type CycleParameters = Partial<Static<typeof cycleParameters>> & {
   [interventionResume]?: { id: string; response: string; responsePath: string; answeredAt: string; sourceAttemptId: string | null };
   automaticRecovery?: boolean;
   [followUpOnlyIfSourceIsLatest]?: boolean;
+  [drivenOnlyWhileLatest]?: boolean;
 };
 
 interface CycleResult {
@@ -316,6 +318,9 @@ async function projectCycle(params: CycleParameters | null | undefined): Promise
   }
 
   if (action === "reconcile") {
+    // A newer run of the project can start while the run driver reconciles this one; the driver then relaunches,
+    // delivers or continues nothing here, since those steps would compete with the newer run.
+    const supersededForDriver = async () => params[drivenOnlyWhileLatest] === true && basename(await latestRunDir(rawProject).catch(() => "")) !== runId;
     const refreshedStatus = await refreshLaunchedImplementationStatus(dir, status);
     let effectiveStatus = refreshedStatus;
     // A provider still writing to the attempt outside the observed tree would change the output under
@@ -334,7 +339,9 @@ async function projectCycle(params: CycleParameters | null | undefined): Promise
       const earlyPolicy = await dcPersistFailure(dir, effectiveStatus, await dcClassify(dir, { ...effectiveStatus, project, runId }, earlyRuntime));
       effectiveStatus = earlyPolicy.status || effectiveStatus;
     }
-    const automaticRecovery = await maybeAutoRecoverImplementationFailure(dir, { ...effectiveStatus, project, runId }, params);
+    const automaticRecovery = await supersededForDriver()
+      ? { attempted: false, status: null, relaunch: null }
+      : await maybeAutoRecoverImplementationFailure(dir, { ...effectiveStatus, project, runId }, params);
     effectiveStatus = automaticRecovery.status || effectiveStatus;
     if (automaticRecovery.attempted && automaticRecovery.relaunch?.ok) {
       const files = (await readdir(dir).catch(() => [])).sort();
@@ -379,7 +386,7 @@ async function projectCycle(params: CycleParameters | null | undefined): Promise
         },
         nextAction: "No deliverable Octopus output exists for this attempt. Start a new clean plan/implementation handoff after fixing the blocker.",
       });
-    } else if (repositoryDeliveryConfig.enabled && failureDeliveryPhase) {
+    } else if (repositoryDeliveryConfig.enabled && failureDeliveryPhase && !(await supersededForDriver())) {
       automaticRepositoryDelivery = await finalizeRepositoryDeliveryState(dir, { ...effectiveStatus, project, runId }, params);
       effectiveStatus = automaticRepositoryDelivery.status || effectiveStatus;
     }
@@ -951,7 +958,7 @@ const runDriver = createRunDriver({
   intervalMs: runDriverConfig.intervalSeconds * 1000,
   listProjects: () => projectsWithRuns(join(cycleRoot, "runs")),
   resolveRun: (project) => runToDrive(project, latestRunDir, runDriverConfig.maxIdleHours * 3600 * 1000),
-  drive: ({ project, runId }) => projectCycle({ action: "reconcile", project, runId, autoRunFinalValidation: runDriverConfig.autoFinalSteps, autoRunCouncilReview: runDriverConfig.autoFinalSteps, autoFinalizeDelivery: runDriverConfig.autoFinalSteps }),
+  drive: ({ project, runId }) => projectCycle({ action: "reconcile", project, runId, [drivenOnlyWhileLatest]: true, autoRunFinalValidation: runDriverConfig.autoFinalSteps, autoRunCouncilReview: runDriverConfig.autoFinalSteps, autoFinalizeDelivery: runDriverConfig.autoFinalSteps }),
 });
 const registerTools = developmentCyclePlugin.register.bind(developmentCyclePlugin);
 developmentCyclePlugin.register = (api: any) => {

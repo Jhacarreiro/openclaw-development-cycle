@@ -145,12 +145,15 @@ export function createOctopusOutput(deps: OctopusOutputDeps) {
     } else {
       const reviews = [...stderr.matchAll(/Contextual code review findings: (\S+\.json) \(normal=(\d+)\)/g)];
       const last = reviews[reviews.length - 1];
-      const stopped = last ? stderr.slice((last.index || 0) + last[0].length).match(/Tangle run failed[^\n]*/) : null;
+      // Only a correction that stalled or whose retries could not be supervised
+      // counts; any other failure after the review is that failure, not the
+      // review failing to converge.
+      const stopped = last ? stderr.slice((last.index || 0) + last[0].length).match(/Correction round \d+ stalled[^\n]*|Tangle retry supervision failed after correction[^\n]*/) : null;
       if (!last || !stopped || Number(last[2]) <= 0) return { ok: false };
       const correctionRounds = [...stderr.matchAll(/Applying contextual review corrections \(round=(\d+)/g)];
       rounds = correctionRounds.length ? Number(correctionRounds[correctionRounds.length - 1][1]) : 0;
       blockingCount = Number(last[2]); reported = last[1];
-      matched = { name: "octopus_stopped_with_review_findings", pattern: "Tangle run failed after a review left blocking findings", match: stopped[0].slice(0, 220) };
+      matched = { name: "octopus_stopped_with_review_findings", pattern: "Correction stalled or retry supervision failed after a review left blocking findings", match: stopped[0].slice(0, 220) };
     }
     const resultsDir = join(runtimeHome, ".claude-octopus", "results");
     let findingsPath = "";

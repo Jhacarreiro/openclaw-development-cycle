@@ -138,8 +138,9 @@ test("Octopus that gives up on corrections after a review left blocking findings
   assert.deepEqual(request.findings, remainingBlockingFindings);
 });
 
-test("A failed Octopus run with no review findings opens no follow-up issue from the cycle's own advice", async (t) => {
-  const { status, request } = await reconcileFailedOctopusRun(t, () => [
+test("A run that fails for another reason after a review is classified by that failure and opens no issue from the cycle's own advice", async (t) => {
+  const { status, request } = await reconcileFailedOctopusRun(t, (findingsPath) => [
+    `\u001b[0;34m[2026-10-19 02:13:00]\u001b[0m \u001b[0;32mINFO\u001b[0m: Contextual code review findings: ${findingsPath} (normal=2)`,
     "\u001b[0;34m[2026-10-19 02:14:30]\u001b[0m \u001b[0;31mERROR\u001b[0m: Permission denied writing the provider history",
     "\u001b[0;34m[2026-10-19 02:14:33]\u001b[0m \u001b[0;31mERROR\u001b[0m: Quality gate FAILED with 66%. Aborting workflow.",
     "\u001b[0;34m[2026-10-19 03:08:47]\u001b[0m \u001b[1;33mWARN\u001b[0m: Tangle run failed; preserving isolated branch and worktree for inspection: octopus/run/x/integration",

@@ -20,7 +20,7 @@ export function createMainUpdates(deps: MainUpdatesDeps) {
   function dcLines(runtime: any) { return (runtime?.richObservation?.latestTimeline || []).map((x: any) => String(x?.line || "")).filter(Boolean).join("\n"); }
   function dcMatch(text: string, pairs: any[]) { for (const [name, re] of pairs) { const m = re.exec(text); if (m) return { name, pattern: String(re), match: dcShort(m[0], 220) }; } return null; }
   // Alerts about the run's root process only mean something while a supervised run is still active.
-  // A provider still working in the attempt outside the observed tree blocks in any phase. and outranks every
+  // A provider still working in the attempt outside the observed tree blocks in any phase and outranks every
   // other classification: nothing should act on output that is still changing.
   const dcRuntimeActivePhases = new Set(["implementation_launched", "implementation_running", "corrections_launched", "corrections_running"]);
   const dcActiveRunAlerts = new Set(["status_running_but_root_missing", "root_process_zombie", "wall_clock_timeout_seen"]);

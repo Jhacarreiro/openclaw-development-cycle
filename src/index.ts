@@ -318,8 +318,8 @@ async function projectCycle(params: CycleParameters | null | undefined): Promise
   }
 
   if (action === "reconcile") {
-    // A newer run of the project can start while the run driver reconciles this one; the driver then relaunches,
-    // delivers or continues nothing here, since those steps would compete with the newer run.
+    // A newer run of the project can start while the run driver reconciles this one; the driver then validates,
+    // reviews, relaunches or delivers nothing here, since those steps would compete with the newer run.
     const supersededForDriver = async () => params[drivenOnlyWhileLatest] === true && basename(await latestRunDir(rawProject).catch(() => "")) !== runId;
     const refreshedStatus = await refreshLaunchedImplementationStatus(dir, status);
     let effectiveStatus = refreshedStatus;
@@ -351,12 +351,12 @@ async function projectCycle(params: CycleParameters | null | undefined): Promise
     const repositoryDeliveryReconcile = await reconcileRepositoryDeliveryState(dir, { ...effectiveStatus, project, runId }, params);
     effectiveStatus = repositoryDeliveryReconcile?.status || effectiveStatus;
     let automaticValidation: any = null;
-    if (params.autoRunFinalValidation === true && ["implementation_delivered", "corrections_completed"].includes(String(effectiveStatus?.phase || "")) && !effectiveStatus?.externalValidation) {
+    if (params.autoRunFinalValidation === true && ["implementation_delivered", "corrections_completed"].includes(String(effectiveStatus?.phase || "")) && !effectiveStatus?.externalValidation && !(await supersededForDriver())) {
       automaticValidation = await runExternalFinalValidation(dir, { ...effectiveStatus, project, runId }, params, "implementation_delivered");
       effectiveStatus = automaticValidation.status || effectiveStatus;
     }
     let councilEndgate: any = null;
-    if (params.autoRunCouncilReview === true) {
+    if (params.autoRunCouncilReview === true && !(await supersededForDriver())) {
       councilEndgate = await maybeRunCouncilEndgate(dir, { ...effectiveStatus, project, runId }, params);
       effectiveStatus = councilEndgate?.status || effectiveStatus;
     }
@@ -956,6 +956,7 @@ const developmentCyclePlugin = defineToolPlugin({
 const runDriverConfig = developmentCycleConfig.runDriver;
 const runDriver = createRunDriver({
   intervalMs: runDriverConfig.intervalSeconds * 1000,
+  maxIdleMs: runDriverConfig.maxIdleHours * 3600 * 1000,
   listProjects: () => projectsWithRuns(join(cycleRoot, "runs")),
   resolveRun: (project) => runToDrive(project, latestRunDir, runDriverConfig.maxIdleHours * 3600 * 1000),
   drive: ({ project, runId }) => projectCycle({ action: "reconcile", project, runId, [drivenOnlyWhileLatest]: true, autoRunFinalValidation: runDriverConfig.autoFinalSteps, autoRunCouncilReview: runDriverConfig.autoFinalSteps, autoFinalizeDelivery: runDriverConfig.autoFinalSteps }),

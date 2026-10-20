@@ -32,7 +32,7 @@ test("the run driver reconciles only each project's latest run while it is open 
   const driven = [];
   for (const project of (await projectsWithRuns(runsRoot)).sort()) {
     const run = await runToDrive(project, latestRunDir, 24 * hour, now);
-    if (run) driven.push(run);
+    if (run) driven.push({ project: run.project, runId: run.runId });
   }
   assert.deepEqual(driven, [
     { project: "partial", runId: "partial-20261020100000000-ffffff" },
@@ -46,6 +46,7 @@ test("stopping the run driver waits for the reconcile in flight and starts no fu
   const blocked = new Promise((resolve) => { release = resolve; });
   const driver = createRunDriver({
     intervalMs: 60_000,
+    maxIdleMs: 24 * hour,
     listProjects: async () => ["a", "b"],
     resolveRun: async (project) => ({ project, runId: `${project}-1` }),
     drive: async (run) => { driven.push(run.runId); if (run.runId === "a-1") await blocked; },
@@ -66,6 +67,7 @@ test("the run driver picks each project's run only when its turn comes", async (
   const driven = [];
   const driver = createRunDriver({
     intervalMs: 60_000,
+    maxIdleMs: 24 * hour,
     listProjects: async () => ["a", "b"],
     resolveRun: async (project) => ({ project, runId: latest[project] }),
     // A newer run of b starts while a is still being reconciled.
@@ -73,4 +75,23 @@ test("the run driver picks each project's run only when its turn comes", async (
   });
   await driver.tick();
   assert.deepEqual(driven, ["a-1", "b-2"]);
+});
+
+test("the run driver leaves a run its own reconciles have not moved for longer than the idle limit", async () => {
+  let clock = 0;
+  const driven = [];
+  const progress = { a: "delivered" };
+  const driver = createRunDriver({
+    intervalMs: 60_000,
+    maxIdleMs: 10 * hour,
+    now: () => clock,
+    listProjects: async () => ["a"],
+    resolveRun: async (project) => ({ project, runId: "a-1", progress: progress[project] }),
+    drive: async () => { driven.push(clock); },
+  });
+  for (clock = 0; clock <= 12 * hour; clock += 4 * hour) await driver.tick();
+  assert.deepEqual(driven, [0, 4 * hour, 8 * hour]);
+  progress.a = "validated";
+  await driver.tick();
+  assert.deepEqual(driven, [0, 4 * hour, 8 * hour, 16 * hour]);
 });

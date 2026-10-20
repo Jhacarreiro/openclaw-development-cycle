@@ -28,6 +28,7 @@ import { createRuntimeObservation } from "./cycle/runtime-observation.js";
 import { createFinalValidation } from "./cycle/final-validation.js";
 import { createCouncil } from "./cycle/council.js";
 import { createStop } from "./cycle/stop.js";
+import { createRunDriver, runsToDrive } from "./cycle/run-driver.js";
 
 const lifecycleLockHeld = Symbol("developmentCycleLifecycleLockHeld");
 const resolvedCycleDir = Symbol("developmentCycleResolvedCycleDir");
@@ -350,6 +351,11 @@ async function projectCycle(params: CycleParameters | null | undefined): Promise
       councilEndgate = await maybeRunCouncilEndgate(dir, { ...effectiveStatus, project, runId }, params);
       effectiveStatus = councilEndgate?.status || effectiveStatus;
     }
+    let automaticFinalDelivery: any = null;
+    if (params.autoFinalizeDelivery === true && effectiveStatus?.phase === "council_validated") {
+      automaticFinalDelivery = await finalizeRepositoryDeliveryState(dir, { ...effectiveStatus, project, runId }, params);
+      effectiveStatus = automaticFinalDelivery.status || effectiveStatus;
+    }
     const stall = await maybeHandleStalledRun(dir, effectiveStatus, params);
     effectiveStatus = stall?.status || effectiveStatus;
     const files = (await readdir(dir).catch(() => [])).sort();
@@ -395,7 +401,7 @@ async function projectCycle(params: CycleParameters | null | undefined): Promise
             : `Follow-up run could not start (${error}); the issues stay open on the delivery PR.` });
     }
     const mainUpdate = await dcNotifyMain(dir, project, runId, effectiveStatus, params, runtimeEvent);
-    return { ok: true, readOnly: false, project, runId, dir, status: effectiveStatus, files, runtime, stall, automaticValidation, councilEndgate, repositoryDeliveryReconcile, automaticRepositoryDelivery, automaticFollowUp, failurePolicy: runtimeEvent, mainUpdate };
+    return { ok: true, readOnly: false, project, runId, dir, status: effectiveStatus, files, runtime, stall, automaticValidation, councilEndgate, automaticFinalDelivery, repositoryDeliveryReconcile, automaticRepositoryDelivery, automaticFollowUp, failurePolicy: runtimeEvent, mainUpdate };
   }
 
   const transition = checkActionTransition(action, status?.phase);
@@ -875,6 +881,7 @@ const cycleParameters = Type.Object({
   autoStopStalled: Type.Optional(Type.Boolean()),
   autoRunFinalValidation: Type.Optional(Type.Boolean()),
   autoRunCouncilReview: Type.Optional(Type.Boolean()),
+  autoFinalizeDelivery: Type.Optional(Type.Boolean()),
   autoCouncilCorrections: Type.Optional(Type.Boolean()),
   autoCouncilCorrectionsMax: Type.Optional(Type.Number()),
   councilDepth: Type.Optional(Type.String()),
@@ -902,7 +909,7 @@ const cycleParameters = Type.Object({
   repositoryDeliveryTimeoutMs: Type.Optional(Type.Number()),
 });
 
-export default defineToolPlugin({
+const developmentCyclePlugin = defineToolPlugin({
   id: "development-cycle",
   name: "Development Cycle",
   description: "Adapter-agnostic supervised development cycles for OpenClaw with durable state, process supervision, validation gates, and correction loops.",
@@ -926,3 +933,19 @@ export default defineToolPlugin({
     }),
   ],
 });
+
+// The cycle drives its own open runs: after a restart or a missed event nothing else may call reconcile, and
+// the steps after delivery (validation, council review, repository delivery) should not wait on an agent.
+const runDriverConfig = developmentCycleConfig.runDriver;
+const runDriver = createRunDriver({
+  intervalMs: runDriverConfig.intervalSeconds * 1000,
+  listRuns: () => runsToDrive(join(cycleRoot, "runs"), latestRunDir, runDriverConfig.maxIdleHours * 3600 * 1000),
+  drive: ({ project, runId }) => projectCycle({ action: "reconcile", project, runId, autoRunFinalValidation: true, autoRunCouncilReview: true, autoFinalizeDelivery: true }),
+});
+const registerTools = developmentCyclePlugin.register.bind(developmentCyclePlugin);
+developmentCyclePlugin.register = (api: any) => {
+  if (runDriverConfig.enabled) api.registerService?.({ id: "development-cycle-run-driver", start: async () => runDriver.start(), stop: async () => runDriver.stop() });
+  return registerTools(api);
+};
+
+export default developmentCyclePlugin;

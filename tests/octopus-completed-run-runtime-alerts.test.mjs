@@ -89,10 +89,11 @@ async function reconcileCompletedOctopusRun(t, stderrLines) {
   await writeFile(session.exitedAtPath, "2026-10-20T16:17:18Z\n");
   await writeFile(launched.directImplementationStatus, JSON.stringify({ ...session, status: "completed", launchState: "exited", exitCode: 0, exitedAt: "2026-10-20T16:17:18Z" }, null, 2));
 
-  const reconciled = detailsOf(await tool.execute("reconcile", {
-    action: "reconcile", ...params, notifyMain: false, autoStopStalled: false, autoRunFinalValidation: false, autoRunCouncilReview: false,
+  const reconcile = async (extra = {}) => detailsOf(await tool.execute("reconcile", {
+    action: "reconcile", ...params, notifyMain: false, autoStopStalled: false, autoRunFinalValidation: false, autoRunCouncilReview: false, ...extra,
   }, undefined, undefined));
-  return reconciled.status;
+  const reconciled = await reconcile();
+  return Object.assign(reconciled.status, { reconcile, statusPath: join(root, "state", "runs", project, runId, "status.json") });
 }
 
 test("A run Octopus completed after its review converged goes on to final validation despite review warnings about timed-out providers", async (t) => {
@@ -106,4 +107,15 @@ test("A run Octopus completed after its review converged goes on to final valida
   assert.equal(status.phase, "implementation_delivered", JSON.stringify(status));
   assert.equal(status.failureClass ?? null, null, JSON.stringify(status));
   assert.match(status.nextAction, /final validation/);
+});
+
+test("A run whose council review passed is delivered by reconcile itself when automatic delivery is on", async (t) => {
+  const delivered = await reconcileCompletedOctopusRun(t, [
+    "\u001b[0;34m[2026-10-20 17:17:18]\u001b[0m \u001b[0;32mINFO\u001b[0m: Tangle run completed; preserving isolated branch and worktree for review: octopus/run/x/integration",
+  ]);
+  const status = JSON.parse(await readFile(delivered.statusPath, "utf8"));
+  // Validation and council review already passed; their own tests cover how the run gets here.
+  await writeFile(delivered.statusPath, JSON.stringify({ ...status, phase: "council_validated", councilDecision: "go", nextAction: "Council review passed; write/read one-pager and close or deploy." }, null, 2));
+  assert.equal((await delivered.reconcile()).status.phase, "council_validated");
+  assert.equal((await delivered.reconcile({ autoFinalizeDelivery: true })).status.phase, "closed_success");
 });

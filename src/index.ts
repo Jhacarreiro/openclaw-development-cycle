@@ -315,6 +315,17 @@ async function projectCycle(params: CycleParameters | null | undefined): Promise
   if (action === "reconcile") {
     const refreshedStatus = await refreshLaunchedImplementationStatus(dir, status);
     let effectiveStatus = refreshedStatus;
+    // A provider still writing to the attempt outside the observed tree would change the output under
+    // recovery, validation, review or delivery: record the blocker and advance nothing until it is gone.
+    const earlyRuntime = await cycleRuntimeSummary(dir, effectiveStatus);
+    if ((earlyRuntime?.richObservation?.alerts || []).some((a: any) => a?.code === "provider_processes_outside_observed_tree")) {
+      const files = (await readdir(dir).catch(() => [])).sort();
+      const runtimeEvent = await dcClassify(dir, { ...effectiveStatus, project, runId }, earlyRuntime);
+      const failurePolicy = await dcPersistFailure(dir, effectiveStatus, runtimeEvent);
+      effectiveStatus = failurePolicy.status || effectiveStatus;
+      const mainUpdate = await dcNotifyMain(dir, project, runId, effectiveStatus, params, runtimeEvent);
+      return { ok: true, readOnly: false, project, runId, dir, status: effectiveStatus, files, runtime: earlyRuntime, heldForActiveProvider: true, failurePolicy: runtimeEvent, mainUpdate };
+    }
     const automaticRecovery = await maybeAutoRecoverImplementationFailure(dir, { ...effectiveStatus, project, runId }, params);
     effectiveStatus = automaticRecovery.status || effectiveStatus;
     if (automaticRecovery.attempted && automaticRecovery.relaunch?.ok) {
@@ -324,17 +335,13 @@ async function projectCycle(params: CycleParameters | null | undefined): Promise
     }
     const repositoryDeliveryReconcile = await reconcileRepositoryDeliveryState(dir, { ...effectiveStatus, project, runId }, params);
     effectiveStatus = repositoryDeliveryReconcile?.status || effectiveStatus;
-    // A provider still writing to the attempt outside the observed tree would change the output under validation.
-    const automaticReviewRequested = params.autoRunFinalValidation === true || params.autoRunCouncilReview === true;
-    const providerStillWorking = automaticReviewRequested
-      && ((await cycleRuntimeSummary(dir, effectiveStatus))?.richObservation?.alerts || []).some((a: any) => a?.code === "provider_processes_outside_observed_tree");
     let automaticValidation: any = null;
-    if (!providerStillWorking && params.autoRunFinalValidation === true && ["implementation_delivered", "corrections_completed"].includes(String(effectiveStatus?.phase || "")) && !effectiveStatus?.externalValidation) {
+    if (params.autoRunFinalValidation === true && ["implementation_delivered", "corrections_completed"].includes(String(effectiveStatus?.phase || "")) && !effectiveStatus?.externalValidation) {
       automaticValidation = await runExternalFinalValidation(dir, { ...effectiveStatus, project, runId }, params, "implementation_delivered");
       effectiveStatus = automaticValidation.status || effectiveStatus;
     }
     let councilEndgate: any = null;
-    if (!providerStillWorking && params.autoRunCouncilReview === true) {
+    if (params.autoRunCouncilReview === true) {
       councilEndgate = await maybeRunCouncilEndgate(dir, { ...effectiveStatus, project, runId }, params);
       effectiveStatus = councilEndgate?.status || effectiveStatus;
     }

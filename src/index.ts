@@ -326,6 +326,11 @@ async function projectCycle(params: CycleParameters | null | undefined): Promise
       const mainUpdate = await dcNotifyMain(dir, project, runId, effectiveStatus, params, runtimeEvent);
       return { ok: true, readOnly: false, project, runId, dir, status: effectiveStatus, files, runtime: earlyRuntime, heldForActiveProvider: true, failurePolicy: runtimeEvent, mainUpdate };
     }
+    if (effectiveStatus?.failureClass === "runtime_observation_blocker") {
+      // Clear a blocker the clean observation no longer supports before recovery can relaunch past it.
+      const earlyPolicy = await dcPersistFailure(dir, effectiveStatus, await dcClassify(dir, { ...effectiveStatus, project, runId }, earlyRuntime));
+      effectiveStatus = earlyPolicy.status || effectiveStatus;
+    }
     const automaticRecovery = await maybeAutoRecoverImplementationFailure(dir, { ...effectiveStatus, project, runId }, params);
     effectiveStatus = automaticRecovery.status || effectiveStatus;
     if (automaticRecovery.attempted && automaticRecovery.relaunch?.ok) {

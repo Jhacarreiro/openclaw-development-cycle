@@ -73,8 +73,8 @@ Repository delivery is opt-in and disabled by default. The core lifecycle writes
 | `DEVELOPMENT_CYCLE_REPOSITORY_DELIVERY_BASE_BRANCH` | `main` | Default base branch for delivery PRs. |
 | `DEVELOPMENT_CYCLE_FOLLOWUP_AUTO_START` | `true` | When review does not converge and the partial delivery opens follow-up issues, start a follow-up run on the delivery PR branch automatically. |
 | `DEVELOPMENT_CYCLE_FOLLOWUP_MAX_GENERATIONS` | `2` | Follow-up runs allowed after the first run before the open issues are left for an operator. |
-| `DEVELOPMENT_CYCLE_RUN_DRIVER_ENABLED` | `true` | Run a plugin service that reconciles each project's latest open run at gateway start and on an interval: recovery, stall handling, repository delivery reconciliation and follow-up runs. |
-| `DEVELOPMENT_CYCLE_RUN_DRIVER_AUTO_FINAL_STEPS` | `false` | Let the run driver also run final validation, council review and delivery of a council-validated run. Final validation executes the delivered checkout's test and check scripts on the host, so enable it only where implementation output is trusted to the same degree as the implementation orchestrator. |
+| `DEVELOPMENT_CYCLE_RUN_DRIVER_ENABLED` | `true` | Run a plugin service that reconciles each project's latest open run at gateway start and on an interval: recovery, repository delivery reconciliation and follow-up runs. |
+| `DEVELOPMENT_CYCLE_RUN_DRIVER_AUTO_FINAL_STEPS` | `false` | Let the run driver also stop stalled attempts, run final validation and council review, and deliver a council-validated run. Final validation executes the delivered checkout's test and check scripts on the host, so enable it only where implementation output is trusted to the same degree as the implementation orchestrator. |
 | `DEVELOPMENT_CYCLE_RUN_DRIVER_INTERVAL_SECONDS` | `120` | Seconds between run driver passes, at most 86400. |
 | `DEVELOPMENT_CYCLE_RUN_DRIVER_MAX_IDLE_HOURS` | `24` | A run whose status has not changed for longer than this is left for an operator. |
 

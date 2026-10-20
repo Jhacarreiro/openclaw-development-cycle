@@ -319,7 +319,7 @@ async function projectCycle(params: CycleParameters | null | undefined): Promise
 
   if (action === "reconcile") {
     // A newer run of the project can start while the run driver reconciles this one; the driver then validates,
-    // reviews, relaunches or delivers nothing here, since those steps would compete with the newer run.
+    // reviews, stops, relaunches or delivers nothing here, since those steps would compete with the newer run.
     const supersededForDriver = async () => params[drivenOnlyWhileLatest] === true && basename(await latestRunDir(rawProject).catch(() => "")) !== runId;
     const refreshedStatus = await refreshLaunchedImplementationStatus(dir, status);
     let effectiveStatus = refreshedStatus;
@@ -368,7 +368,7 @@ async function projectCycle(params: CycleParameters | null | undefined): Promise
       automaticFinalDelivery = await finalizeRepositoryDeliveryState(dir, { ...effectiveStatus, project, runId }, params);
       effectiveStatus = automaticFinalDelivery.status || effectiveStatus;
     }
-    const stall = await maybeHandleStalledRun(dir, effectiveStatus, params);
+    const stall = await supersededForDriver() ? null : await maybeHandleStalledRun(dir, effectiveStatus, params);
     effectiveStatus = stall?.status || effectiveStatus;
     const files = (await readdir(dir).catch(() => [])).sort();
     const runtime = await cycleRuntimeSummary(dir, effectiveStatus);
@@ -959,7 +959,7 @@ const runDriver = createRunDriver({
   maxIdleMs: runDriverConfig.maxIdleHours * 3600 * 1000,
   listProjects: () => projectsWithRuns(join(cycleRoot, "runs")),
   resolveRun: (project) => runToDrive(project, latestRunDir, runDriverConfig.maxIdleHours * 3600 * 1000),
-  drive: ({ project, runId }) => projectCycle({ action: "reconcile", project, runId, [drivenOnlyWhileLatest]: true, autoRunFinalValidation: runDriverConfig.autoFinalSteps, autoRunCouncilReview: runDriverConfig.autoFinalSteps, autoFinalizeDelivery: runDriverConfig.autoFinalSteps }),
+  drive: ({ project, runId }) => projectCycle({ action: "reconcile", project, runId, [drivenOnlyWhileLatest]: true, autoStopStalled: runDriverConfig.autoFinalSteps, autoRunFinalValidation: runDriverConfig.autoFinalSteps, autoRunCouncilReview: runDriverConfig.autoFinalSteps, autoFinalizeDelivery: runDriverConfig.autoFinalSteps }),
 });
 const registerTools = developmentCyclePlugin.register.bind(developmentCyclePlugin);
 developmentCyclePlugin.register = (api: any) => {

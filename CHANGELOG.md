@@ -18,7 +18,7 @@ The format is based on Keep a Changelog and the project follows Semantic Version
 
 ### Fixed
 
-- Codex bridge: without `DEVELOPMENT_CYCLE_OPENCLAW_PROFILE_ID`, it now takes the first usable OpenAI OAuth profile in OpenClaw's own profile order instead of always `openai:default`. Newer OpenClaw keeps the live login under an account-keyed profile and can leave a stale `openai:default` behind, which made every Codex seat fail. When no profile is usable, the error now says whether it was unavailable, incomplete or expired.
+- Codex bridge: without `DEVELOPMENT_CYCLE_OPENCLAW_PROFILE_ID`, it now takes the first usable OpenAI OAuth profile in the order OpenClaw's own resolver returns (authored order respected, profiles in cooldown last) instead of always `openai:default`. Newer OpenClaw keeps the live login under an account-keyed profile and can leave a stale `openai:default` behind, which made every Codex seat fail. When no profile is usable, the error now says whether it was unavailable, incomplete or expired.
 
 - An Octopus run that stops at its review/correction round ceiling is now classified `review_non_convergence` instead of whichever generic pattern its log happened to match (an `EACCES` in reviewed code text made it `local_runtime_fault`). The partial delivery opens one follow-up issue per blocking finding left in Octopus's last review, instead of an issue built from the failure's recommended action.
 - Octopus launches pass a 64000-token prompt budget (`DEVELOPMENT_CYCLE_OCTOPUS_CONTEXT_BUDGET`) for implementation and council reviews instead of inheriting Octopus's 12000-token default, which truncated the tail of planning, adequacy-review and council prompts after a slow summarizer attempt that always failed.

@@ -66,11 +66,12 @@ def resolve_openclaw_oauth():
  if not root: raise RuntimeError("openclaw package root not found")
  state_dir=os.getenv("OPENCLAW_STATE_DIR","").strip() or os.path.join(os.path.expanduser("~"),".openclaw")
  agent_dir=os.getenv("DEVELOPMENT_CYCLE_OPENCLAW_AGENT_DIR",os.path.join(state_dir,"agents","main","agent"))
- # Without an explicit profile id, take the openai profiles in the store's own
- # order: OpenClaw now keeps the live login under an account-keyed id and can
- # leave a stale openai:default behind.
+ # Without an explicit profile id, take the openai profiles in the order
+ # OpenClaw itself would use them (authored order, cooldowns last): OpenClaw
+ # now keeps the live login under an account-keyed id and can leave a stale
+ # openai:default behind.
  profile_id=os.getenv("DEVELOPMENT_CYCLE_OPENCLAW_PROFILE_ID","").strip()
- js="import {ensureAuthProfileStore} from 'openclaw/plugin-sdk/agent-runtime'; const store=ensureAuthProfileStore(process.env.DC_AGENT_DIR); const profiles=store.profiles||{}; const ids=process.env.DC_PROFILE_ID?[process.env.DC_PROFILE_ID]:[...new Set([...(store.order?.openai||[]),store.lastGood?.openai,...Object.keys(profiles)])].filter(Boolean); let reason='openai oauth profile unavailable'; let found=null; for(const id of ids){ const p=profiles[id]; if(!p||p.type!=='oauth'||p.provider!=='openai') continue; const token=typeof p.access==='string'?p.access.trim():''; const accountId=typeof p.accountId==='string'?p.accountId.trim():''; const planType=typeof p.chatgptPlanType==='string'?p.chatgptPlanType.trim():''; const expires=Number(p.expires||0); if(!token||!accountId){ reason='openai oauth profile incomplete'; continue; } if(!Number.isFinite(expires)||expires<=Date.now()+60000){ reason='openai oauth profile expired or near expiry'; continue; } found={token,accountId,planType,expires}; break; } if(!found) throw new Error(reason); console.log(JSON.stringify(found));"
+ js="import {ensureAuthProfileStore,resolveAuthProfileOrder} from 'openclaw/plugin-sdk/agent-runtime'; const store=ensureAuthProfileStore(process.env.DC_AGENT_DIR); const profiles=store.profiles||{}; const ids=process.env.DC_PROFILE_ID?[process.env.DC_PROFILE_ID]:resolveAuthProfileOrder({store,provider:'openai'}); let reason='openai oauth profile unavailable'; let found=null; for(const id of ids){ const p=profiles[id]; if(!p||p.type!=='oauth'||p.provider!=='openai') continue; const token=typeof p.access==='string'?p.access.trim():''; const accountId=typeof p.accountId==='string'?p.accountId.trim():''; const planType=typeof p.chatgptPlanType==='string'?p.chatgptPlanType.trim():''; const expires=Number(p.expires||0); if(!token||!accountId){ reason='openai oauth profile incomplete'; continue; } if(!Number.isFinite(expires)||expires<=Date.now()+60000){ reason='openai oauth profile expired or near expiry'; continue; } found={token,accountId,planType,expires}; break; } if(!found) throw new Error(reason); console.log(JSON.stringify(found));"
  e=os.environ.copy(); e["DC_AGENT_DIR"]=agent_dir; e["DC_PROFILE_ID"]=profile_id
  r=subprocess.run(["node","--input-type=module","-e",js],cwd=root,env=e,text=True,capture_output=True,timeout=60)
  if r.returncode!=0:

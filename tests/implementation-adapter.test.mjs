@@ -173,14 +173,19 @@ test("Codex bridge reads OpenClaw's auth store without credential files or local
   assert.doesNotMatch(bridge, /\/data\//);
 });
 
-// A fake OpenClaw package serving the given auth store, and a fake Codex
-// app-server that answers with the account id the bridge logged in with.
+// A fake OpenClaw package serving the given auth store and the profile order
+// its resolver would return, and a fake Codex app-server that answers with the
+// account id the bridge logged in with.
 function runCodexBridge(store) {
   const root = mkdtempSync(join(tmpdir(), "development-cycle-codex-bridge-oauth-"));
   const pkg = join(root, "openclaw");
   mkdirSync(pkg, { recursive: true });
   writeFileSync(join(pkg, "package.json"), JSON.stringify({ name: "openclaw", type: "module", exports: { "./plugin-sdk/agent-runtime": "./agent-runtime.js" } }));
-  writeFileSync(join(pkg, "agent-runtime.js"), "export function ensureAuthProfileStore() { return JSON.parse(process.env.FAKE_OPENCLAW_STORE); }\n");
+  writeFileSync(join(pkg, "agent-runtime.js"), [
+    "export function ensureAuthProfileStore() { return JSON.parse(process.env.FAKE_OPENCLAW_STORE); }",
+    "export function resolveAuthProfileOrder({ store, provider }) { return store.resolvedOrder?.[provider] || []; }",
+    "",
+  ].join("\n"));
   writeFileSync(join(pkg, "openclaw"), "#!/bin/sh\nexit 0\n");
   chmodSync(join(pkg, "openclaw"), 0o755);
   const fakeCodex = join(root, "codex-real");
@@ -227,15 +232,20 @@ test("Codex bridge logs in with the live OpenAI profile when openai:default is s
       "openai:default": { ...liveOpenAiProfile("stale-account"), expires: 0 },
       "openai:account": liveOpenAiProfile("live-account"),
     },
-    order: { openai: ["openai:account", "openai:default"] },
-    lastGood: { openai: "openai:default" },
+    resolvedOrder: { openai: ["openai:default", "openai:account"] },
   });
   assert.equal(result.status, 0, result.stderr);
   assert.equal(result.stdout, "live-account");
 });
 
-test("Codex bridge says why no OpenAI profile is usable", () => {
-  const result = runCodexBridge({ profiles: { "openai:default": { ...liveOpenAiProfile("stale-account"), expires: 0 } } });
+test("Codex bridge stays within the order OpenClaw resolves and says why no profile in it is usable", () => {
+  const result = runCodexBridge({
+    profiles: {
+      "openai:default": { ...liveOpenAiProfile("stale-account"), expires: 0 },
+      "openai:excluded": liveOpenAiProfile("excluded-account"),
+    },
+    resolvedOrder: { openai: ["openai:default"] },
+  });
   assert.equal(result.status, 78);
   assert.match(result.stderr, /OpenClaw OAuth profile read failed: openai oauth profile expired or near expiry/);
 });

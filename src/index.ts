@@ -315,6 +315,22 @@ async function projectCycle(params: CycleParameters | null | undefined): Promise
   if (action === "reconcile") {
     const refreshedStatus = await refreshLaunchedImplementationStatus(dir, status);
     let effectiveStatus = refreshedStatus;
+    // A provider still writing to the attempt outside the observed tree would change the output under
+    // recovery, validation, review or delivery: record the blocker and advance nothing until it is gone.
+    const earlyRuntime = await cycleRuntimeSummary(dir, effectiveStatus);
+    if ((earlyRuntime?.richObservation?.alerts || []).some((a: any) => a?.code === "provider_processes_outside_observed_tree")) {
+      const files = (await readdir(dir).catch(() => [])).sort();
+      const runtimeEvent = await dcClassify(dir, { ...effectiveStatus, project, runId }, earlyRuntime);
+      const failurePolicy = await dcPersistFailure(dir, effectiveStatus, runtimeEvent);
+      effectiveStatus = failurePolicy.status || effectiveStatus;
+      const mainUpdate = await dcNotifyMain(dir, project, runId, effectiveStatus, params, runtimeEvent);
+      return { ok: true, readOnly: false, project, runId, dir, status: effectiveStatus, files, runtime: earlyRuntime, heldForActiveProvider: true, failurePolicy: runtimeEvent, mainUpdate };
+    }
+    if (effectiveStatus?.failureClass === "runtime_observation_blocker") {
+      // Clear a blocker the clean observation no longer supports before recovery can relaunch past it.
+      const earlyPolicy = await dcPersistFailure(dir, effectiveStatus, await dcClassify(dir, { ...effectiveStatus, project, runId }, earlyRuntime));
+      effectiveStatus = earlyPolicy.status || effectiveStatus;
+    }
     const automaticRecovery = await maybeAutoRecoverImplementationFailure(dir, { ...effectiveStatus, project, runId }, params);
     effectiveStatus = automaticRecovery.status || effectiveStatus;
     if (automaticRecovery.attempted && automaticRecovery.relaunch?.ok) {

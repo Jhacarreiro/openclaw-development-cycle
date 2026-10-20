@@ -43,3 +43,13 @@ test("a provider still running in the attempt outranks a review that did not con
   const ev = await dcClassify("/nonexistent", { phase: "implementation_failed", reviewNonConvergence: { ok: true } }, runtimeWith("provider_processes_outside_observed_tree"));
   assert.equal(ev.classification?.failureClass, "runtime_observation_blocker");
 });
+
+test("a classification that persists across a later transition keeps that transition's next action", async () => {
+  let status = { phase: "closed_partial", reviewNonConvergence: { ok: true }, nextAction: "Deliver the partial output." };
+  const store = { runtimeHome: "/nonexistent", loadJson: async () => null, saveJson: async () => {}, appendJsonl: async () => {}, cycleStatus: async (_dir, patch) => (status = { ...status, ...patch }) };
+  const updates = createMainUpdates(store);
+  await updates.dcPersistFailure("/nonexistent", status, await updates.dcClassify("/nonexistent", status, runtimeWith()));
+  status = { ...status, nextAction: "Follow-up run x is working the open issues on the delivery PR." };
+  await updates.dcPersistFailure("/nonexistent", status, await updates.dcClassify("/nonexistent", status, runtimeWith()));
+  assert.equal(status.nextAction, "Follow-up run x is working the open issues on the delivery PR.");
+});

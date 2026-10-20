@@ -23,25 +23,26 @@ export function runNeedsDriving(status: any, maxIdleMs: number, now: number) {
   return Number.isFinite(updatedAt) && now - updatedAt <= maxIdleMs;
 }
 
-// The latest run of each project, if it still has something for reconcile to drive. Older runs of a project
-// are superseded by its latest one and are never driven.
-export async function runsToDrive(runsRoot: string, latestRunDir: (project: string) => Promise<string>, maxIdleMs: number, now = Date.now()) {
+export async function projectsWithRuns(runsRoot: string) {
   const root = await lstat(runsRoot).catch(() => null);
   if (!root?.isDirectory() || root.isSymbolicLink()) return [];
-  const runs: Array<{ project: string; runId: string }> = [];
-  for (const entry of await readdir(runsRoot, { withFileTypes: true }).catch(() => [])) {
-    if (!entry.isDirectory()) continue;
-    const dir = await latestRunDir(entry.name).catch(() => "");
-    if (!dir) continue;
-    const status = await readFile(join(dir, "status.json"), "utf8").then(JSON.parse).catch(() => null);
-    if (runNeedsDriving(status, maxIdleMs, now)) runs.push({ project: entry.name, runId: basename(dir) });
-  }
-  return runs;
+  return (await readdir(runsRoot, { withFileTypes: true }).catch(() => [])).filter((entry) => entry.isDirectory()).map((entry) => entry.name);
+}
+
+// The project's latest run, if it still has something for reconcile to drive. Older runs of a project are
+// superseded by its latest one and are never driven.
+export async function runToDrive(project: string, latestRunDir: (project: string) => Promise<string>, maxIdleMs: number, now = Date.now()) {
+  const dir = await latestRunDir(project).catch(() => "");
+  if (!dir) return null;
+  const status = await readFile(join(dir, "status.json"), "utf8").then(JSON.parse).catch(() => null);
+  return runNeedsDriving(status, maxIdleMs, now) ? { project, runId: basename(dir) } : null;
 }
 
 export function createRunDriver(options: {
   intervalMs: number;
-  listRuns: () => Promise<Array<{ project: string; runId: string }>>;
+  listProjects: () => Promise<string[]>;
+  // Resolved right before each reconcile, so a run superseded while an earlier project was being driven is skipped.
+  resolveRun: (project: string) => Promise<{ project: string; runId: string } | null>;
   drive: (run: { project: string; runId: string }) => Promise<unknown>;
 }) {
   let timer: ReturnType<typeof setInterval> | null = null;
@@ -49,9 +50,11 @@ export function createRunDriver(options: {
   let stopped = false;
   async function drainRuns() {
     try {
-      for (const run of await options.listRuns()) {
+      for (const project of await options.listProjects()) {
         // A stopped driver starts no further reconcile; the one in flight finishes before stop() returns.
         if (stopped) return;
+        const run = await options.resolveRun(project);
+        if (!run || stopped) continue;
         await options.drive(run).catch((error: any) => console.error("[development-cycle] run driver reconcile failed:", run.project, run.runId, String(error?.message || error)));
       }
     } catch (error: any) {

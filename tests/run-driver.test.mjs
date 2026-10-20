@@ -3,7 +3,7 @@ import { mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { createRunDriver, runsToDrive } from "../dist/cycle/run-driver.js";
+import { createRunDriver, projectsWithRuns, runToDrive } from "../dist/cycle/run-driver.js";
 
 const hour = 3600 * 1000;
 
@@ -29,8 +29,12 @@ test("the run driver reconciles only each project's latest run while it is open 
     const ids = Object.keys(runs).filter((path) => path.startsWith(`${project}/`)).sort();
     return ids.length ? join(runsRoot, ids.at(-1)) : "";
   };
-  const driven = await runsToDrive(runsRoot, latestRunDir, 24 * hour, now);
-  assert.deepEqual(driven.sort((a, b) => a.project.localeCompare(b.project)), [
+  const driven = [];
+  for (const project of (await projectsWithRuns(runsRoot)).sort()) {
+    const run = await runToDrive(project, latestRunDir, 24 * hour, now);
+    if (run) driven.push(run);
+  }
+  assert.deepEqual(driven, [
     { project: "partial", runId: "partial-20261020100000000-ffffff" },
     { project: "publisher", runId: "publisher-20261020135547455-bbbbbb" },
   ]);
@@ -42,7 +46,8 @@ test("stopping the run driver waits for the reconcile in flight and starts no fu
   const blocked = new Promise((resolve) => { release = resolve; });
   const driver = createRunDriver({
     intervalMs: 60_000,
-    listRuns: async () => [{ project: "a", runId: "a-1" }, { project: "b", runId: "b-1" }],
+    listProjects: async () => ["a", "b"],
+    resolveRun: async (project) => ({ project, runId: `${project}-1` }),
     drive: async (run) => { driven.push(run.runId); if (run.runId === "a-1") await blocked; },
   });
   driver.start();
@@ -54,4 +59,18 @@ test("stopping the run driver waits for the reconcile in flight and starts no fu
   release();
   await stopping;
   assert.deepEqual(driven, ["a-1"]);
+});
+
+test("the run driver picks each project's run only when its turn comes", async () => {
+  const latest = { a: "a-1", b: "b-1" };
+  const driven = [];
+  const driver = createRunDriver({
+    intervalMs: 60_000,
+    listProjects: async () => ["a", "b"],
+    resolveRun: async (project) => ({ project, runId: latest[project] }),
+    // A newer run of b starts while a is still being reconciled.
+    drive: async (run) => { driven.push(run.runId); if (run.project === "a") latest.b = "b-2"; },
+  });
+  await driver.tick();
+  assert.deepEqual(driven, ["a-1", "b-2"]);
 });

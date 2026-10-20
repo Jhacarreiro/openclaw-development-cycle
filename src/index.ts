@@ -28,7 +28,7 @@ import { createRuntimeObservation } from "./cycle/runtime-observation.js";
 import { createFinalValidation } from "./cycle/final-validation.js";
 import { createCouncil } from "./cycle/council.js";
 import { createStop } from "./cycle/stop.js";
-import { createRunDriver, runsToDrive } from "./cycle/run-driver.js";
+import { createRunDriver, projectsWithRuns, runToDrive } from "./cycle/run-driver.js";
 
 const lifecycleLockHeld = Symbol("developmentCycleLifecycleLockHeld");
 const resolvedCycleDir = Symbol("developmentCycleResolvedCycleDir");
@@ -939,7 +939,8 @@ const developmentCyclePlugin = defineToolPlugin({
 const runDriverConfig = developmentCycleConfig.runDriver;
 const runDriver = createRunDriver({
   intervalMs: runDriverConfig.intervalSeconds * 1000,
-  listRuns: () => runsToDrive(join(cycleRoot, "runs"), latestRunDir, runDriverConfig.maxIdleHours * 3600 * 1000),
+  listProjects: () => projectsWithRuns(join(cycleRoot, "runs")),
+  resolveRun: (project) => runToDrive(project, latestRunDir, runDriverConfig.maxIdleHours * 3600 * 1000),
   drive: ({ project, runId }) => projectCycle({ action: "reconcile", project, runId, autoRunFinalValidation: runDriverConfig.autoFinalSteps, autoRunCouncilReview: runDriverConfig.autoFinalSteps, autoFinalizeDelivery: runDriverConfig.autoFinalSteps }),
 });
 const registerTools = developmentCyclePlugin.register.bind(developmentCyclePlugin);

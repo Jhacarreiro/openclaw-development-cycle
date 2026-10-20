@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -164,22 +164,80 @@ test("Octopus adapter maps canonical role routes into Octopus review seat identi
   }
 });
 
-test("Codex bridge reads the OpenClaw OAuth profile directly without provider discovery", () => {
+test("Codex bridge reads OpenClaw's auth store without credential files or local paths", () => {
   const bridgePath = fileURLToPath(new URL("../bin/codex-openclaw-bridge.py", import.meta.url));
   const bridge = readFileSync(bridgePath, "utf8");
-  assert.match(bridge, /ensureAuthProfileStore/);
-  assert.match(bridge, /openai:default/);
-  assert.match(bridge, /p\.access/);
-  assert.match(bridge, /p\.accountId/);
-  assert.match(bridge, /p\.chatgptPlanType/);
-  assert.match(bridge, /expired or near expiry/);
-  assert.match(bridge, /chatgptAuthTokens/);
-  assert.match(bridge, /account\/login\/start/);
-  assert.match(bridge, /CODEX_HOME/);
   assert.doesNotMatch(bridge, /resolveApiKeyForProvider/);
   assert.doesNotMatch(bridge, /auth\.json/);
   assert.doesNotMatch(bridge, /auth-profiles\.json/);
   assert.doesNotMatch(bridge, /\/data\//);
+});
+
+// A fake OpenClaw package serving the given auth store, and a fake Codex
+// app-server that answers with the account id the bridge logged in with.
+function runCodexBridge(store) {
+  const root = mkdtempSync(join(tmpdir(), "development-cycle-codex-bridge-oauth-"));
+  const pkg = join(root, "openclaw");
+  mkdirSync(pkg, { recursive: true });
+  writeFileSync(join(pkg, "package.json"), JSON.stringify({ name: "openclaw", type: "module", exports: { "./plugin-sdk/agent-runtime": "./agent-runtime.js" } }));
+  writeFileSync(join(pkg, "agent-runtime.js"), "export function ensureAuthProfileStore() { return JSON.parse(process.env.FAKE_OPENCLAW_STORE); }\n");
+  writeFileSync(join(pkg, "openclaw"), "#!/bin/sh\nexit 0\n");
+  chmodSync(join(pkg, "openclaw"), 0o755);
+  const fakeCodex = join(root, "codex-real");
+  writeFileSync(fakeCodex, [
+    "#!/usr/bin/env python3",
+    "import json,sys",
+    "acc=''",
+    "def out(o): print(json.dumps(o),flush=True)",
+    "for line in sys.stdin:",
+    " z=json.loads(line); m=z.get('method'); q=z.get('params') or {}",
+    " if 'id' not in z: continue",
+    " if m=='account/login/start': acc=q.get('chatgptAccountId','')",
+    " r={'thread':{'id':'t1'}} if m=='thread/start' else {'turn':{'id':'u1'}} if m=='turn/start' else {}",
+    " out({'id':z['id'],'result':r})",
+    " if m=='turn/start':",
+    "  out({'method':'item/completed','params':{'item':{'type':'agentMessage','text':acc}}})",
+    "  out({'method':'turn/completed','params':{}})",
+    "",
+  ].join("\n"));
+  chmodSync(fakeCodex, 0o755);
+  try {
+    const bridgePath = fileURLToPath(new URL("../bin/codex-openclaw-bridge.py", import.meta.url));
+    const result = spawnSync("python3", [bridgePath, "exec", "--model", "gpt-test", "-"], {
+      encoding: "utf8",
+      input: "say hi",
+      env: {
+        PATH: `${pkg}:/usr/local/bin:/usr/bin:/bin`,
+        HOME: root,
+        DEVELOPMENT_CYCLE_CODEX_REAL_BIN: fakeCodex,
+        FAKE_OPENCLAW_STORE: JSON.stringify(store),
+      },
+    });
+    return { status: result.status, stdout: result.stdout.trim(), stderr: result.stderr.trim() };
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+const liveOpenAiProfile = (accountId) => ({ type: "oauth", provider: "openai", access: "access-token", accountId, expires: Date.now() + 3_600_000 });
+
+test("Codex bridge logs in with the live OpenAI profile when openai:default is stale", () => {
+  const result = runCodexBridge({
+    profiles: {
+      "openai:default": { ...liveOpenAiProfile("stale-account"), expires: 0 },
+      "openai:account": liveOpenAiProfile("live-account"),
+    },
+    order: { openai: ["openai:account", "openai:default"] },
+    lastGood: { openai: "openai:default" },
+  });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stdout, "live-account");
+});
+
+test("Codex bridge says why no OpenAI profile is usable", () => {
+  const result = runCodexBridge({ profiles: { "openai:default": { ...liveOpenAiProfile("stale-account"), expires: 0 } } });
+  assert.equal(result.status, 78);
+  assert.match(result.stderr, /OpenClaw OAuth profile read failed: openai oauth profile expired or near expiry/);
 });
 
 test("Codex bridge discovers and forwards to the real CLI for non-exec commands", () => {

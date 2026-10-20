@@ -14,3 +14,14 @@ test("a provider still running in the attempt outside the observed tree blocks a
   const ev = await dcClassify("/nonexistent", { phase: "implementation_delivered" }, runtimeWith("provider_processes_outside_observed_tree"));
   assert.equal(ev.classification?.failureClass, "runtime_observation_blocker");
 });
+
+test("once a provider outside the observed tree is gone, the run gets back the next action the blocker replaced", async () => {
+  let status = { phase: "external_validation_passed", nextAction: "Finalize the delivery." };
+  const store = { runtimeHome: "/nonexistent", loadJson: async () => null, saveJson: async () => {}, appendJsonl: async () => {}, cycleStatus: async (_dir, patch) => (status = { ...status, ...patch }) };
+  const updates = createMainUpdates(store);
+  await updates.dcPersistFailure("/nonexistent", status, await updates.dcClassify("/nonexistent", status, runtimeWith("provider_processes_outside_observed_tree")));
+  assert.equal(status.failureClass, "runtime_observation_blocker");
+  await updates.dcPersistFailure("/nonexistent", status, await updates.dcClassify("/nonexistent", status, runtimeWith()));
+  assert.equal(status.failureClass, null);
+  assert.equal(status.nextAction, "Finalize the delivery.");
+});

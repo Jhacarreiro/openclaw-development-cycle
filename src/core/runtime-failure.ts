@@ -3,15 +3,21 @@ export function transientRuntimeObservationRecoveryPatch(status: any, currentCla
   if (currentClassification?.failureClass) return null;
 
   const phase = String(status?.phase || "");
+  // The blocker replaced the phase's next action; give it back unless something else has set one since.
+  const blockerStillDirects = status?.nextAction === status?.failureRecommendedAction;
   const nextAction = phase === "implementation_launched"
     ? "Continue observing the supervised implementation; no current runtime observation blocker is detected."
     : phase === "corrections_launched"
       ? "Continue observing the supervised corrections; no current runtime observation blocker is detected."
-      : phase === "implementation_delivered" && status?.nextAction === status?.failureRecommendedAction
-        ? "Run mechanical final validation, then council code review."
-        : phase === "corrections_completed" && status?.nextAction === status?.failureRecommendedAction
-          ? "Run mechanical validation and council code review again for the corrected delivery."
-          : null;
+      : !blockerStillDirects
+        ? null
+        : status?.failureReplacedNextAction
+          ? status.failureReplacedNextAction
+          : phase === "implementation_delivered"
+            ? "Run mechanical final validation, then council code review."
+            : phase === "corrections_completed"
+              ? "Run mechanical validation and council code review again for the corrected delivery."
+              : null;
 
   return {
     failureClass: null,
@@ -22,6 +28,7 @@ export function transientRuntimeObservationRecoveryPatch(status: any, currentCla
     failureRecommendedAction: null,
     failureMatched: null,
     failureDetectedAt: null,
+    failureReplacedNextAction: null,
     failureClearedAt: new Date().toISOString(),
     ...(nextAction ? { nextAction } : {}),
   };

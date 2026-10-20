@@ -312,15 +312,20 @@ async function projectCycle(params: CycleParameters | null | undefined): Promise
     };
   }
 
+  // A newer run of the project can start while the run driver reconciles this one; the driver then validates,
+  // reviews, stops, launches, relaunches or delivers nothing here, since those steps would compete with the newer
+  // run. Checked on entry and again before each step that can run long or reach outside the run.
+  const supersededForDriver = async () => params[drivenOnlyWhileLatest] === true && basename(await latestRunDir(rawProject).catch(() => "")) !== runId;
+  if (action === "reconcile" && await supersededForDriver()) {
+    return { ok: true, readOnly: true, project, runId, dir, status, superseded: true, nextAction: "A newer run of this project exists; this run is left for an operator." };
+  }
+
   if (action === "reconcile" && status?.followUp && ["", "plan_ready_for_implementation"].includes(String(status?.phase || ""))) {
     const continued = await continueFollowUp(dir, rawProject);
     return { ...continued, project, runId, dir, resumedFollowUp: true };
   }
 
   if (action === "reconcile") {
-    // A newer run of the project can start while the run driver reconciles this one; the driver then validates,
-    // reviews, stops, relaunches or delivers nothing here, since those steps would compete with the newer run.
-    const supersededForDriver = async () => params[drivenOnlyWhileLatest] === true && basename(await latestRunDir(rawProject).catch(() => "")) !== runId;
     const refreshedStatus = await refreshLaunchedImplementationStatus(dir, status);
     let effectiveStatus = refreshedStatus;
     // A provider still writing to the attempt outside the observed tree would change the output under

@@ -21,7 +21,9 @@ function planText(projectRoot, wikiPath) {
   ].join("\n");
 }
 
-test("Octopus review that hits the correction ceiling delivers partial output with one follow-up per remaining blocking finding", async (t) => {
+// Runs a failed Octopus attempt that left a partial worktree and the given
+// stderr, then reconciles it; returns the run status and the delivery request.
+async function reconcileFailedOctopusRun(t, stderrLines) {
   const root = join(tmpdir(), `development-cycle-octopus-nonconvergence-${process.pid}-${Date.now()}`);
   t.after(() => rm(root, { recursive: true, force: true }));
   const home = join(root, "home");
@@ -93,12 +95,7 @@ test("Octopus review that hits the correction ceiling delivers partial output wi
     { file: "src/cli.ts", line: 5, severity: "nit", category: "usability", title: "Option values that begin with -- are rejected", detail: "" },
   ] }));
   const session = JSON.parse(await readFile(launched.directImplementationStatus, "utf8"));
-  // The reviewed code handles EACCES; that text in the log must not reclassify the run as a local runtime fault.
-  await writeFile(session.stderrPath, [
-    "\u001b[0;34m[2026-10-15 07:50:00]\u001b[0m INFO: review_run: finding mentions EACCES when chmod fails",
-    `\u001b[0;34m[2026-10-15 08:12:12]\u001b[0m \u001b[0;31mERROR\u001b[0m: Correction loop hit the absolute round ceiling (10) with 2 blocking finding(s) remaining: ${findingsPath} — raise or disable with OCTOPUS_TANGLE_CORRECTION_HARD_CAP (0 = no ceiling)`,
-    "",
-  ].join("\n"));
+  await writeFile(session.stderrPath, [...stderrLines(findingsPath), ""].join("\n"));
   await writeFile(session.exitCodePath, "8\n");
   await writeFile(session.exitedAtPath, "2026-08-30T06:30:00Z\n");
   await writeFile(launched.directImplementationStatus, JSON.stringify({ ...session, status: "failed", launchState: "exited", exitCode: 8, exitedAt: "2026-08-30T06:30:00Z" }, null, 2));
@@ -107,12 +104,47 @@ test("Octopus review that hits the correction ceiling delivers partial output wi
     action: "reconcile", ...params, notifyMain: false, autoStopStalled: false, autoRunFinalValidation: false, autoRunCouncilReview: false,
   }, undefined, undefined));
   assert.equal(reconciled.status.phase, "closed_partial", JSON.stringify(reconciled.status));
-  assert.equal(reconciled.status.failureClass, "review_non_convergence");
   assert.equal(reconciled.automaticRepositoryDelivery.delivery.classification, "partial");
   const request = JSON.parse(await readFile(deliveryMarker, "utf8"));
   assert.equal(request.projectRoot, await realpath(outputPath));
-  assert.deepEqual(request.findings, [
-    "Publish never checks the hash-bound approval (src/workflow.ts:370): Compare the approval hash before posting.",
-    "Database files are created without O_NOFOLLOW (src/db.ts:12)",
+  return { status: reconciled.status, request };
+}
+
+const remainingBlockingFindings = [
+  "Publish never checks the hash-bound approval (src/workflow.ts:370): Compare the approval hash before posting.",
+  "Database files are created without O_NOFOLLOW (src/db.ts:12)",
+];
+
+test("Octopus review that hits the correction ceiling delivers partial output with one follow-up per remaining blocking finding", async (t) => {
+  const { status, request } = await reconcileFailedOctopusRun(t, (findingsPath) => [
+    // The reviewed code handles EACCES; that text in the log must not reclassify the run as a local runtime fault.
+    "\u001b[0;34m[2026-10-15 07:50:00]\u001b[0m INFO: review_run: finding mentions EACCES when chmod fails",
+    `\u001b[0;34m[2026-10-15 08:12:12]\u001b[0m \u001b[0;31mERROR\u001b[0m: Correction loop hit the absolute round ceiling (10) with 2 blocking finding(s) remaining: ${findingsPath} — raise or disable with OCTOPUS_TANGLE_CORRECTION_HARD_CAP (0 = no ceiling)`,
   ]);
+  assert.equal(status.failureClass, "review_non_convergence");
+  assert.deepEqual(request.findings, remainingBlockingFindings);
+});
+
+test("Octopus that gives up on corrections after a review left blocking findings delivers those findings as follow-ups", async (t) => {
+  const { status, request } = await reconcileFailedOctopusRun(t, (findingsPath) => [
+    `\u001b[0;34m[2026-10-19 02:38:43]\u001b[0m \u001b[0;32mINFO\u001b[0m: Contextual code review findings: ${findingsPath} (normal=2)`,
+    "\u001b[0;34m[2026-10-19 02:38:43]\u001b[0m \u001b[0;32mINFO\u001b[0m: Step 5: Applying contextual review corrections (round=1, role=implementer, strategy=delta, stall_window=1800s)",
+    "\u001b[0;34m[2026-10-19 03:08:47]\u001b[0m \u001b[1;33mWARN\u001b[0m: Correction round 1 stalled; partial writes changed=0",
+    "\u001b[0;34m[2026-10-19 03:08:47]\u001b[0m \u001b[0;31mERROR\u001b[0m: Tangle retry supervision failed after correction; stopping before further review or delivery",
+    "\u001b[0;34m[2026-10-19 03:08:47]\u001b[0m \u001b[1;33mWARN\u001b[0m: Tangle run failed; preserving isolated branch and worktree for inspection: octopus/run/x/integration",
+  ]);
+  assert.equal(status.failureClass, "review_non_convergence");
+  assert.equal(status.reviewNonConvergence.roundCeiling, 1);
+  assert.deepEqual(request.findings, remainingBlockingFindings);
+});
+
+test("A run that fails for another reason after a review is classified by that failure and opens no issue from the cycle's own advice", async (t) => {
+  const { status, request } = await reconcileFailedOctopusRun(t, (findingsPath) => [
+    `\u001b[0;34m[2026-10-19 02:13:00]\u001b[0m \u001b[0;32mINFO\u001b[0m: Contextual code review findings: ${findingsPath} (normal=2)`,
+    "\u001b[0;34m[2026-10-19 02:14:30]\u001b[0m \u001b[0;31mERROR\u001b[0m: Permission denied writing the provider history",
+    "\u001b[0;34m[2026-10-19 02:14:33]\u001b[0m \u001b[0;31mERROR\u001b[0m: Quality gate FAILED with 66%. Aborting workflow.",
+    "\u001b[0;34m[2026-10-19 03:08:47]\u001b[0m \u001b[1;33mWARN\u001b[0m: Tangle run failed; preserving isolated branch and worktree for inspection: octopus/run/x/integration",
+  ]);
+  assert.equal(status.failureClass, "local_runtime_fault");
+  assert.deepEqual(request.findings, []);
 });

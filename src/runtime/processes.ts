@@ -3,7 +3,9 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { setTimeout as sleep } from "node:timers/promises";
 
-export interface ProcessIdentity { pid: number; pgid: number; sid?: number; startTime: string; bootId: string; }
+export interface ProcessIdentity { pid: number; pgid: number; sid?: number; startTime: string; bootId: string; runMarker?: string; }
+/** Environment variable a runner exports so its subtasks can be told apart from a later session that reused its id. */
+export const RUN_MARKER_ENV = "DEVELOPMENT_CYCLE_RUN_ATTEMPT";
 export async function readProcessIdentity(pid: number): Promise<ProcessIdentity | null> {
   if (!Number.isInteger(pid) || pid <= 1) return null;
   try {
@@ -35,18 +37,35 @@ export async function sessionMembers(sid: number): Promise<number[]> {
   }
   return members;
 }
-export async function stopVerifiedProcessGroup(expected: ProcessIdentity | null | undefined, readIdentity = readProcessIdentity, signal: (pid: number, signal: NodeJS.Signals) => boolean = process.kill.bind(process), graceMs = 5000, listSession = sessionMembers) {
+export async function carriesRunMarker(pid: number, marker: string): Promise<boolean> {
+  const environ = await readFile(`/proc/${pid}/environ`, "utf8").catch(() => "");
+  return environ.split("\0").includes(`${RUN_MARKER_ENV}=${marker}`);
+}
+async function currentBootId() { return (await readFile("/proc/sys/kernel/random/boot_id", "utf8").catch(() => "")).trim(); }
+export async function stopVerifiedProcessGroup(expected: ProcessIdentity | null | undefined, readIdentity = readProcessIdentity, signal: (pid: number, signal: NodeJS.Signals) => boolean = process.kill.bind(process), graceMs = 5000, listSession = sessionMembers, hasMarker = carriesRunMarker, bootId = currentBootId) {
   if (!expected) return { ok: false, reason: "runner_identity_missing" };
   const current = await readIdentity(expected.pid);
   if (current && (!sameProcess(expected, current) || expected.pid !== expected.pgid)) return { ok: false, reason: "runner_identity_changed" };
   // Only a runner recorded as its session's leader gets session-wide signals; older identities get the group alone.
-  // Linux keeps a pid allocated while any process still has it as session id, so the session's members stay the run's after the runner exits.
+  // While the runner lives it holds its pid, so the session is the run's. Once it is gone the id can be reused by an
+  // unrelated session, so only members on the same boot that carry this launch's marker are taken as the run's.
   const leadsSession = expected.sid === expected.pid;
-  const stragglers = async () => leadsSession ? (await listSession(expected.pid)).filter((pid) => pid !== expected.pid) : [];
+  const sameBoot = leadsSession && Boolean(expected.runMarker) && (await bootId()) === expected.bootId;
+  const seenWithRunner = new Set<number>();
+  const stragglers = async () => {
+    if (!leadsSession) return [];
+    const members = (await listSession(expected.pid)).filter((pid) => pid !== expected.pid);
+    if (sameProcess(expected, await readIdentity(expected.pid))) { for (const pid of members) seenWithRunner.add(pid); return members; }
+    const owned: number[] = [];
+    for (const pid of members) if (seenWithRunner.has(pid) || (sameBoot && await hasMarker(pid, String(expected.runMarker)))) owned.push(pid);
+    return owned;
+  };
   if (!current && !(await stragglers()).length) return { ok: true, skipped: true, reason: "runner_already_exited" };
   const signalRun = async (name: NodeJS.Signals, runnerAlive: boolean) => {
+    // List the session before signalling the group, while a live runner still vouches for its members.
+    const members = await stragglers();
     if (runnerAlive) signal(-expected.pgid, name);
-    for (const pid of await stragglers()) { try { signal(pid, name); } catch {} }
+    for (const pid of members) { try { signal(pid, name); } catch {} }
   };
   await signalRun("SIGTERM", Boolean(current));
   const deadline = Date.now() + graceMs;

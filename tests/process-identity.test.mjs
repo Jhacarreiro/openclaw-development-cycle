@@ -3,7 +3,7 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { execSupervisedCommand, readProcessIdentity, stopVerifiedProcessGroup } from "../dist/runtime/processes.js";
+import { execSupervisedCommand, readProcessIdentity, RUN_MARKER_ENV, stopVerifiedProcessGroup } from "../dist/runtime/processes.js";
 import { spawn } from "node:child_process";
 
 test("cancellation refuses a reused PID or unverified process group", async () => {
@@ -70,30 +70,40 @@ test("stopping a runner also stops subtasks that left its process group but not 
   assert.ok(!state || state === "Z", `subtask ${child} still alive (${state})`);
 });
 
-test("stopping a run whose runner already exited still stops the subtasks left in its session", { skip: process.platform !== "linux" }, async (t) => {
+test("stopping a run whose runner already exited still stops its own subtasks, and only those", { skip: process.platform !== "linux" }, async (t) => {
   const dir = await mkdtemp(join(tmpdir(), "development-cycle-stop-exited-"));
   t.after(() => rm(dir, { recursive: true, force: true }));
   const childPath = join(dir, "child.pid");
-  const runner = spawn("bash", ["-c", `(set -m; sleep 120 & echo $! > "${childPath}"); sleep 0.5`], { detached: true, stdio: "ignore" });
+  const strangerPath = join(dir, "stranger.pid");
+  // Once the runner is gone its session id proves nothing, so a member without this launch's marker is left alone.
+  const script = `(set -m; sleep 120 & echo $! > "${childPath}"; env -u ${RUN_MARKER_ENV} sleep 120 & echo $! > "${strangerPath}"); sleep 0.5`;
+  const runner = spawn("bash", ["-c", script], { detached: true, stdio: "ignore", env: { ...process.env, [RUN_MARKER_ENV]: "attempt-1" } });
   const exited = new Promise((resolve) => runner.on("exit", resolve));
   let identity = null;
   let child = 0;
-  for (let i = 0; i < 100 && !child; i++) {
+  let stranger = 0;
+  for (let i = 0; i < 100 && !(child && stranger); i++) {
     identity ??= await readProcessIdentity(runner.pid);
     child = Number((await readFile(childPath, "utf8").catch(() => "")).trim());
-    if (!child) await new Promise((resolve) => setTimeout(resolve, 20));
+    stranger = Number((await readFile(strangerPath, "utf8").catch(() => "")).trim());
+    if (!(child && stranger)) await new Promise((resolve) => setTimeout(resolve, 20));
   }
-  t.after(() => { try { process.kill(child, "SIGKILL"); } catch {} });
+  t.after(() => { for (const pid of [child, stranger]) { try { process.kill(pid, "SIGKILL"); } catch {} } });
   assert.equal(identity.sid, runner.pid);
   await exited;
-  const result = await stopVerifiedProcessGroup(identity, readProcessIdentity, process.kill.bind(process), 2000);
+  const result = await stopVerifiedProcessGroup({ ...identity, runMarker: "attempt-1" }, readProcessIdentity, process.kill.bind(process), 2000);
   assert.equal(result.ok, true, JSON.stringify(result));
   assert.notEqual(result.skipped, true);
-  let state;
+  assert.ok(!(await alive(child)), `subtask ${child} still alive`);
+  assert.ok(await alive(stranger), "a session member without the run's marker must not be signalled");
+});
+
+async function alive(pid) {
   for (let i = 0; i < 50; i++) {
-    try { state = (await readFile(`/proc/${child}/stat`, "utf8")).split(") ")[1].split(" ")[0]; } catch (error) { assert.equal(error.code, "ENOENT"); state = undefined; }
-    if (!state || state === "Z") break;
+    let state;
+    try { state = (await readFile(`/proc/${pid}/stat`, "utf8")).split(") ")[1].split(" ")[0]; } catch (error) { assert.equal(error.code, "ENOENT"); }
+    if (!state || state === "Z") return false;
     await new Promise((resolve) => setTimeout(resolve, 20));
   }
-  assert.ok(!state || state === "Z", `subtask ${child} still alive (${state})`);
-});
+  return true;
+}

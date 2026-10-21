@@ -143,6 +143,35 @@ function octopusRoutedSeatEnvironment(): Record<string, string> {
   return env;
 }
 
+// Council seats take each provider's model from the first review-type role routed to it.
+const COUNCIL_ROLE_PRIORITY = ["code-reviewer", "security-reviewer", "architect", "synthesizer", "researcher", "implementer-heavy", "strategist", "implementer"];
+
+/**
+ * The council's providers and per-provider models, derived from the same
+ * canonical routing roles implementation uses. Null when no routing config exists.
+ */
+export function octopusCouncilSeats(): { providers: string; env: Record<string, string> } | null {
+  const configPath = join(String(process.env.HOME || ""), ".claude-octopus", "config", "providers.json");
+  let roles: Record<string, any> | undefined;
+  try {
+    roles = JSON.parse(readFileSync(configPath, "utf8"))?.routing?.roles;
+  } catch {
+    return null;
+  }
+  if (!roles || typeof roles !== "object" || Array.isArray(roles)) return null;
+  const models = new Map<string, string>();
+  for (const role of COUNCIL_ROLE_PRIORITY) {
+    const provider = typeof roles[role]?.provider === "string" ? roles[role].provider.trim() : "";
+    const model = typeof roles[role]?.model === "string" ? roles[role].model.trim() : "";
+    if (provider && model && !models.has(provider)) models.set(provider, model);
+  }
+  if (!models.size) return null;
+  const env: Record<string, string> = {};
+  // Octopus reads each provider's model from OCTOPUS_<PROVIDER>_MODEL (cursor-agent -> OCTOPUS_CURSOR_AGENT_MODEL).
+  for (const [provider, model] of models) env[`OCTOPUS_${provider.toUpperCase().replace(/[^A-Z0-9]/g, "_")}_MODEL`] = model;
+  return { providers: [...models.keys()].join(","), env };
+}
+
 
 export function buildImplementationLaunchSpec(
   config: ImplementationAdapterConfig,

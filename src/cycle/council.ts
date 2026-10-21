@@ -13,7 +13,7 @@ import type { createPinnedFs } from "./pinned-fs.js";
 import type { createOctopusOutput } from "./octopus-output.js";
 import type { createExternalGate } from "./external-gate.js";
 import type { DevelopmentCycleConfig } from "../config.js";
-import { DEVELOPMENT_CYCLE_BIN_DIR } from "../adapters/implementation.js";
+import { DEVELOPMENT_CYCLE_BIN_DIR, octopusCouncilSeats } from "../adapters/implementation.js";
 
 export interface CouncilDeps {
   developmentCycleConfig: DevelopmentCycleConfig;
@@ -114,9 +114,12 @@ export function createCouncil(deps: CouncilDeps) {
     const stdoutPath = join(dir, "council-code-review.stdout");
     const stderrPath = join(dir, "council-code-review.stderr");
     const scriptPath = join(implementationConfig.octopusRoot, "scripts", "orchestrate.sh");
-    const defaultCouncilProviders = "claude,codex";
-    const councilProviders = String(params.councilProviders || params.councilAutoProviders || process.env.OCTOPUS_COUNCIL_AUTO_PROVIDERS || defaultCouncilProviders);
-    const councilCodexModel = String(params.councilCodexModel || process.env.DEVELOPMENT_CYCLE_COUNCIL_CODEX_MODEL || "gpt-5.6");
+    // Seats follow the configured Octopus routing; without one, Octopus's own provider mix applies.
+    const routedSeats = octopusCouncilSeats();
+    const councilProviders = String(params.councilProviders || params.councilAutoProviders || process.env.OCTOPUS_COUNCIL_AUTO_PROVIDERS || routedSeats?.providers || "auto");
+    const councilModelEnv: Record<string, string> = Object.fromEntries(Object.entries(routedSeats?.env || {}).filter(([name]) => !process.env[name]));
+    const councilCodexModel = String(params.councilCodexModel || process.env.DEVELOPMENT_CYCLE_COUNCIL_CODEX_MODEL || "");
+    if (councilCodexModel) councilModelEnv.OCTOPUS_CODEX_MODEL = councilCodexModel;
     const args = ["--dir", projectRoot, "council", "--goal", "review", "--domain", "security", "--style", "red-team", "--depth", String(params.councilDepth || "standard"), "--members", String(params.councilMembers || 5), "--providers", councilProviders, "--implement", "never", "--worktree", "off", "--max-cost", String(params.councilMaxCost || "2.00"), "--output-dir", outputRoot, "--json", input.task];
     const startedAt = new Date().toISOString();
     // Codex seats go through the cycle's OpenClaw-login shim, as in implementation. An inherited CODEX_HOME
@@ -124,7 +127,7 @@ export function createCouncil(deps: CouncilDeps) {
     const { CODEX_HOME: _codexHome, ...inheritedEnv } = process.env;
     let execResult: any;
     try {
-      execResult = await execSupervisedCommand(scriptPath, args, { cwd: projectRoot, env: { ...inheritedEnv, PATH: `${DEVELOPMENT_CYCLE_BIN_DIR}:${process.env.PATH || ""}`, OCTOPUS_PROJECT_DIR: projectRoot, OCTOPUS_CONTEXT_BUDGET: String(implementationConfig.octopusContextBudget), OCTOPUS_COUNCIL_AUTO_PROVIDERS: councilProviders, OCTOPUS_CODEX_MODEL: councilCodexModel }, timeout: Number(params.councilTimeoutMs || 900000), maxBuffer: 8 * 1024 * 1024 });
+      execResult = await execSupervisedCommand(scriptPath, args, { cwd: projectRoot, env: { ...inheritedEnv, PATH: `${DEVELOPMENT_CYCLE_BIN_DIR}:${process.env.PATH || ""}`, OCTOPUS_PROJECT_DIR: projectRoot, OCTOPUS_CONTEXT_BUDGET: String(implementationConfig.octopusContextBudget), OCTOPUS_COUNCIL_AUTO_PROVIDERS: councilProviders, ...councilModelEnv }, timeout: Number(params.councilTimeoutMs || 900000), maxBuffer: 8 * 1024 * 1024 });
     } catch (err: any) {
       execResult = { failed: true, code: err?.code ?? null, signal: err?.signal ?? null, stdout: err?.stdout || "", stderr: err?.stderr || "", error: String(err?.message || err) };
     }
@@ -136,10 +139,19 @@ export function createCouncil(deps: CouncilDeps) {
     const councilDir = summaryPath ? summaryPath.replace(/\/summary\.json$/, "") : outputRoot;
     const synthesisPath = summaryPath ? join(councilDir, "synthesis.md") : "";
     const synthesis = synthesisPath ? await readTextIfExists(synthesisPath) : "";
-    const councilDecision = parseCouncilDecision(synthesis, summary?.decision || summary?.verdict);
+    // Octopus reports a quorum that answered but approved nothing as partial, without a synthesis.
+    // Every answering seat asking for changes is still a verdict: revise.
+    const respondedSeats = (Array.isArray(summary?.seats) ? summary.seats : []).filter((seat: any) => seat?.status === "responded");
+    const unanimousObjection = summary?.status === "partial" && summary?.quorum
+      && Number(summary.quorum.received_non_chair) >= Number(summary.quorum.required_non_chair)
+      && respondedSeats.length > 0
+      && respondedSeats.every((seat: any) => ["REVISE", "BLOCK", "STOP", "REJECT"].includes(String(seat?.verdict || "").toUpperCase()));
+    const seatResponses = unanimousObjection ? (await Promise.all((await readdir(join(councilDir, "responses")).catch(() => [])).sort().map((name) => readTextIfExists(join(councilDir, "responses", name))))).join("\n") : "";
+    const hardVeto = respondedSeats.some((seat: any) => ["BLOCK", "STOP", "REJECT"].includes(String(seat?.verdict || "").toUpperCase()));
+    const councilDecision = unanimousObjection ? (hardVeto ? "stop" : "revise") : parseCouncilDecision(synthesis, summary?.decision || summary?.verdict);
     const needsCorrections = councilDecision === "revise" || councilDecision === "stop";
-    const findings = extractCouncilFindings(synthesis || JSON.stringify(summary || {}));
-    const ok = Boolean(summaryPath && summary?.status === "completed" && !execResult.failed && councilDecision !== "unknown");
+    const findings = extractCouncilFindings(synthesis || seatResponses || JSON.stringify(summary || {}));
+    const ok = Boolean(summaryPath && (unanimousObjection || (summary?.status === "completed" && !execResult.failed)) && councilDecision !== "unknown");
     const councilReviewAttempts = Number(status?.councilReviewAttempts ?? (status?.councilReviewSummary || status?.phase === "council_review_failed" ? 1 : 0)) + 1;
     const nextAction = !ok && councilReviewAttempts < 2 ? "Council review was inconclusive; the next reconcile with council review on runs it once more."
       : !ok ? "Resolve the failed or inconclusive council review before acceptance."
@@ -147,7 +159,7 @@ export function createCouncil(deps: CouncilDeps) {
       : needsCorrections ? "Launch Implementation corrections from council feedback."
       : "Council review passed; write/read one-pager and close or deploy.";
     const next = await cycleStatus(dir, { phase: ok ? (needsCorrections ? "council_review_needs_corrections" : "council_validated") : "council_review_failed", owner: "main", ok: ok && !needsCorrections, councilDecision, councilReviewAttempts, councilReviewStartedAt: startedAt, councilReviewCompletedAt: new Date().toISOString(), councilReviewSummary: summaryPath, councilReviewSynthesis: synthesisPath, councilReviewStdout: stdoutPath, councilReviewStderr: stderrPath, councilReviewInput: input.taskPath, councilReviewNeedsCorrections: needsCorrections, councilReviewFindings: findings, nextAction });
-    return { ok, decision: councilDecision, project, runId, summaryPath, synthesisPath, stdoutPath, stderrPath, inputPath: input.taskPath, needsCorrections, findings, synthesis: excerpt(synthesis, 12000), status: next, execFailed: Boolean(execResult.failed) };
+    return { ok, decision: councilDecision, project, runId, summaryPath, synthesisPath, stdoutPath, stderrPath, inputPath: input.taskPath, needsCorrections, findings, synthesis: excerpt(synthesis || seatResponses, 12000), status: next, execFailed: Boolean(execResult.failed) };
   }
 
   async function writeCouncilOnePager(dir: string, status: any, council: any, params: any = {}) {

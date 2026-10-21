@@ -2,8 +2,9 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import test from "node:test";
+import { writeCanonicalRoutingConfig } from "./helpers/octopus-routing.mjs";
 
 async function fixture(t, env = {}) {
   const root = await mkdtemp(join(tmpdir(), "development-cycle-gates-"));
@@ -101,6 +102,48 @@ test("a council review that answers on its second attempt validates the run", { 
   assert.equal((await reconcile()).status.phase, "council_review_failed");
   const retried = await reconcile();
   assert.equal(retried.status.phase, "council_validated", JSON.stringify(retried));
+});
+
+test("council seats follow the configured routing and Codex goes through the cycle's shim", { skip: process.platform !== "linux" }, async t => {
+  const octopusRoot = await mkdtemp(join(tmpdir(), "development-cycle-council-routing-"));
+  t.after(() => rm(octopusRoot, { recursive: true, force: true }));
+  const home = join(octopusRoot, "home");
+  writeCanonicalRoutingConfig(home);
+  const saved = { HOME: process.env.HOME, CODEX_HOME: process.env.CODEX_HOME, OCTOPUS_COUNCIL_AUTO_PROVIDERS: process.env.OCTOPUS_COUNCIL_AUTO_PROVIDERS };
+  t.after(() => { for (const [key, value] of Object.entries(saved)) { if (value === undefined) delete process.env[key]; else process.env[key] = value; } });
+  delete process.env.OCTOPUS_COUNCIL_AUTO_PROVIDERS;
+  const { checkout, call, seed } = await fixture(t, { DEVELOPMENT_CYCLE_OCTOPUS_ROOT: octopusRoot, HOME: home, CODEX_HOME: "/elsewhere/codex" });
+  await mkdir(join(octopusRoot, "scripts"), { recursive: true });
+  const seen = join(octopusRoot, "seen.json");
+  await writeFile(join(octopusRoot, "scripts", "orchestrate.sh"), `#!/bin/sh\nnode -e 'const a=process.argv.slice(1);require("fs").writeFileSync(process.env.SEEN,JSON.stringify({providers:a[a.indexOf("--providers")+1],claude:process.env.OCTOPUS_CLAUDE_MODEL,codex:process.env.OCTOPUS_CODEX_MODEL,commandcode:process.env.OCTOPUS_COMMANDCODE_MODEL,codexHome:process.env.CODEX_HOME||null,codexBin:require("child_process").execSync("command -v codex",{encoding:"utf8"}).trim()}))' -- "$@"\n`, { mode: 0o755 });
+  process.env.SEEN = seen;
+  t.after(() => { delete process.env.SEEN; });
+  await seed({ phase: "external_validation_passed", implementationAdapter: "octopus", outputPath: checkout });
+  await call("reconcile", { autoRunCouncilReview: true, notifyMain: false, autoStopStalled: false });
+  const launched = JSON.parse(await readFile(seen, "utf8"));
+  assert.equal(launched.providers, "claude,commandcode,codex");
+  assert.deepEqual([launched.claude, launched.commandcode, launched.codex], ["claude-sonnet-5-5", "xai/grok-4.7", "gpt-6.1-sol"]);
+  assert.equal(launched.codexHome, null);
+  assert.equal(launched.codexBin, resolve("bin/codex"));
+});
+
+for (const { name, verdicts, decision } of [
+  { name: "a council whose answering seats all ask for changes sends the run to corrections", verdicts: ["REVISE", "REVISE", "REVISE"], decision: "revise" },
+  { name: "a unanimous objection that includes a veto stops the run instead of correcting it", verdicts: ["REVISE", "BLOCK", "REVISE"], decision: "stop" },
+]) test(name, { skip: process.platform !== "linux" }, async t => {
+  const octopusRoot = await mkdtemp(join(tmpdir(), "development-cycle-council-objection-"));
+  t.after(() => rm(octopusRoot, { recursive: true, force: true }));
+  const { checkout, call, seed } = await fixture(t, { DEVELOPMENT_CYCLE_OCTOPUS_ROOT: octopusRoot });
+  await mkdir(join(octopusRoot, "scripts"), { recursive: true });
+  // What Octopus writes when its quorum answered but approved nothing: partial, no synthesis, exit 1.
+  const summary = JSON.stringify({ status: "partial", quorum: { required_non_chair: 2, received_non_chair: 2 }, seats: verdicts.map((verdict) => ({ status: "responded", verdict })) });
+  await writeFile(join(octopusRoot, "scripts", "orchestrate.sh"), `#!/bin/sh\nwhile [ "$#" -gt 0 ]; do if [ "$1" = --output-dir ]; then output="$2"; break; fi; shift; done\nmkdir -p "$output/result/responses"\nprintf '%s' '${summary}' > "$output/result/summary.json"\nprintf '%s' 'HIGH: add() subtracts instead of adding. VERDICT: REVISE' > "$output/result/responses/00-code-reviewer.md"\nexit 1\n`, { mode: 0o755 });
+  await seed({ phase: "external_validation_passed", implementationAdapter: "octopus", outputPath: checkout });
+  const result = await call("reconcile", { autoRunCouncilReview: true, autoCouncilCorrections: decision === "stop", notifyMain: false, autoStopStalled: false });
+  assert.equal(result.status.phase, "council_review_needs_corrections", JSON.stringify(result));
+  assert.equal(result.councilEndgate.council.decision, decision);
+  assert.ok(result.councilEndgate.council.findings.some((finding) => /subtracts/.test(finding)), JSON.stringify(result.councilEndgate.council.findings));
+  if (decision === "stop") assert.equal(result.councilEndgate.corrections ?? null, null);
 });
 
 test("revalidation clears the council cache and cannot consume an earlier review artifact", { skip: process.platform !== "linux" }, async t => {

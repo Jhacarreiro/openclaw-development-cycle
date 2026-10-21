@@ -143,12 +143,14 @@ function octopusRoutedSeatEnvironment(): Record<string, string> {
   return env;
 }
 
-// Council seats take each provider's model from the first review-type role routed to it.
+// Council seats come from the review-type roles first; each routed model gets one seat.
 const COUNCIL_ROLE_PRIORITY = ["code-reviewer", "security-reviewer", "architect", "synthesizer", "researcher", "implementer-heavy", "strategist", "implementer"];
 
 /**
- * The council's providers and per-provider models, derived from the same
- * canonical routing roles implementation uses. Null when no routing config exists.
+ * The council's seats, derived from the same canonical routing roles implementation uses:
+ * one seat per distinct provider/model pair. A provider routed to one model is seated by
+ * name with OCTOPUS_<PROVIDER>_MODEL; a provider routed to several gets a model-qualified
+ * seat (commandcode:xai/grok-4.7) for each. Null when no routing config exists.
  */
 export function octopusCouncilSeats(): { providers: string; env: Record<string, string> } | null {
   const configPath = join(String(process.env.HOME || ""), ".claude-octopus", "config", "providers.json");
@@ -159,17 +161,27 @@ export function octopusCouncilSeats(): { providers: string; env: Record<string, 
     return null;
   }
   if (!roles || typeof roles !== "object" || Array.isArray(roles)) return null;
-  const models = new Map<string, string>();
+  const models = new Map<string, string[]>();
   for (const role of COUNCIL_ROLE_PRIORITY) {
     const provider = typeof roles[role]?.provider === "string" ? roles[role].provider.trim() : "";
     const model = typeof roles[role]?.model === "string" ? roles[role].model.trim() : "";
-    if (provider && model && !models.has(provider)) models.set(provider, model);
+    if (!provider || !model) continue;
+    const routed = models.get(provider) || [];
+    if (!routed.includes(model)) models.set(provider, [...routed, model]);
   }
   if (!models.size) return null;
+  const seats: string[] = [];
   const env: Record<string, string> = {};
-  // Octopus reads each provider's model from OCTOPUS_<PROVIDER>_MODEL (cursor-agent -> OCTOPUS_CURSOR_AGENT_MODEL).
-  for (const [provider, model] of models) env[`OCTOPUS_${provider.toUpperCase().replace(/[^A-Z0-9]/g, "_")}_MODEL`] = model;
-  return { providers: [...models.keys()].join(","), env };
+  for (const [provider, routed] of models) {
+    // Octopus reads a provider's model from OCTOPUS_<PROVIDER>_MODEL (cursor-agent -> OCTOPUS_CURSOR_AGENT_MODEL).
+    if (routed.length === 1) {
+      seats.push(provider);
+      env[`OCTOPUS_${provider.toUpperCase().replace(/[^A-Z0-9]/g, "_")}_MODEL`] = routed[0];
+    } else {
+      seats.push(...routed.map((model) => `${provider}:${model}`));
+    }
+  }
+  return { providers: seats.join(","), env };
 }
 
 

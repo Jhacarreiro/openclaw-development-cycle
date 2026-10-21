@@ -114,13 +114,17 @@ export function createCouncil(deps: CouncilDeps) {
     const stdoutPath = join(dir, "council-code-review.stdout");
     const stderrPath = join(dir, "council-code-review.stderr");
     const scriptPath = join(implementationConfig.octopusRoot, "scripts", "orchestrate.sh");
-    // Seats follow the configured Octopus routing; without one, Octopus's own provider mix applies.
+    // Seats follow the configured Octopus routing, handed to Octopus as its default council policy
+    // (the policy accepts model-qualified seats); without routing, Octopus's own provider mix applies.
     const routedSeats = octopusCouncilSeats();
-    const councilProviders = String(params.councilProviders || params.councilAutoProviders || process.env.OCTOPUS_COUNCIL_AUTO_PROVIDERS || routedSeats?.providers || "auto");
+    const explicitProviders = String(params.councilProviders || params.councilAutoProviders || process.env.OCTOPUS_COUNCIL_AUTO_PROVIDERS || "");
+    const councilProviders = explicitProviders || routedSeats?.providers || "auto";
     const councilModelEnv: Record<string, string> = Object.fromEntries(Object.entries(routedSeats?.env || {}).filter(([name]) => !process.env[name]));
+    if (!explicitProviders && routedSeats && !process.env.OCTOPUS_COUNCIL_DEFAULT_PROVIDERS) councilModelEnv.OCTOPUS_COUNCIL_DEFAULT_PROVIDERS = routedSeats.providers;
+    const councilMembers = Number(params.councilMembers) || Math.max(5, routedSeats ? routedSeats.providers.split(",").length : 0);
     const councilCodexModel = String(params.councilCodexModel || process.env.DEVELOPMENT_CYCLE_COUNCIL_CODEX_MODEL || "");
     if (councilCodexModel) councilModelEnv.OCTOPUS_CODEX_MODEL = councilCodexModel;
-    const args = ["--dir", projectRoot, "council", "--goal", "review", "--domain", "security", "--style", "red-team", "--depth", String(params.councilDepth || "standard"), "--members", String(params.councilMembers || 5), "--providers", councilProviders, "--implement", "never", "--worktree", "off", "--max-cost", String(params.councilMaxCost || "2.00"), "--output-dir", outputRoot, "--json", input.task];
+    const args = ["--dir", projectRoot, "council", "--goal", "review", "--domain", "security", "--style", "red-team", "--depth", String(params.councilDepth || "standard"), "--members", String(councilMembers), "--providers", explicitProviders || "auto", "--implement", "never", "--worktree", "off", "--max-cost", String(params.councilMaxCost || "2.00"), "--output-dir", outputRoot, "--json", input.task];
     const startedAt = new Date().toISOString();
     // Codex seats go through the cycle's OpenClaw-login shim, as in implementation. An inherited CODEX_HOME
     // makes Octopus take Codex for the host runtime and leave the Codex seat without a vote.

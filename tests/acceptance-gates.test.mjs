@@ -115,14 +115,15 @@ test("council seats follow the configured routing and Codex goes through the cyc
   const { checkout, call, seed } = await fixture(t, { DEVELOPMENT_CYCLE_OCTOPUS_ROOT: octopusRoot, HOME: home, CODEX_HOME: "/elsewhere/codex" });
   await mkdir(join(octopusRoot, "scripts"), { recursive: true });
   const seen = join(octopusRoot, "seen.json");
-  await writeFile(join(octopusRoot, "scripts", "orchestrate.sh"), `#!/bin/sh\nnode -e 'const a=process.argv.slice(1);require("fs").writeFileSync(process.env.SEEN,JSON.stringify({providers:a[a.indexOf("--providers")+1],claude:process.env.OCTOPUS_CLAUDE_MODEL,codex:process.env.OCTOPUS_CODEX_MODEL,commandcode:process.env.OCTOPUS_COMMANDCODE_MODEL,codexHome:process.env.CODEX_HOME||null,codexBin:require("child_process").execSync("command -v codex",{encoding:"utf8"}).trim()}))' -- "$@"\n`, { mode: 0o755 });
+  await writeFile(join(octopusRoot, "scripts", "orchestrate.sh"), `#!/bin/sh\nnode -e 'const a=process.argv.slice(1);require("fs").writeFileSync(process.env.SEEN,JSON.stringify({providers:a[a.indexOf("--providers")+1],policy:process.env.OCTOPUS_COUNCIL_DEFAULT_PROVIDERS,claude:process.env.OCTOPUS_CLAUDE_MODEL,codex:process.env.OCTOPUS_CODEX_MODEL,commandcode:process.env.OCTOPUS_COMMANDCODE_MODEL,codexHome:process.env.CODEX_HOME||null,codexBin:require("child_process").execSync("command -v codex",{encoding:"utf8"}).trim()}))' -- "$@"\n`, { mode: 0o755 });
   process.env.SEEN = seen;
   t.after(() => { delete process.env.SEEN; });
   await seed({ phase: "external_validation_passed", implementationAdapter: "octopus", outputPath: checkout });
   await call("reconcile", { autoRunCouncilReview: true, notifyMain: false, autoStopStalled: false });
   const launched = JSON.parse(await readFile(seen, "utf8"));
-  assert.equal(launched.providers, "claude,commandcode,codex");
-  assert.deepEqual([launched.claude, launched.commandcode, launched.codex], ["claude-sonnet-5-5", "xai/grok-4.7", "gpt-6.1-sol"]);
+  assert.equal(launched.providers, "auto");
+  assert.equal(launched.policy, "claude,commandcode:xai/grok-4.7,commandcode:xiaomi/mimo-v2.6-pro,commandcode:qwen/qwen3.8-max-0902,codex");
+  assert.deepEqual([launched.claude, launched.commandcode, launched.codex], ["claude-sonnet-5-5", undefined, "gpt-6.1-sol"]);
   assert.equal(launched.codexHome, null);
   assert.equal(launched.codexBin, resolve("bin/codex"));
 });

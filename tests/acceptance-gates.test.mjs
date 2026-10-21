@@ -171,6 +171,21 @@ for (const { name, verdicts, decision } of [
   if (decision === "stop") assert.equal(result.councilEndgate.corrections ?? null, null);
 });
 
+test("council findings written as a table or bold list items read as plain findings", { skip: process.platform !== "linux" }, async t => {
+  const octopusRoot = await mkdtemp(join(tmpdir(), "development-cycle-council-findings-"));
+  t.after(() => rm(octopusRoot, { recursive: true, force: true }));
+  const { checkout, call, seed } = await fixture(t, { DEVELOPMENT_CYCLE_OCTOPUS_ROOT: octopusRoot });
+  await mkdir(join(octopusRoot, "scripts"), { recursive: true });
+  const summary = JSON.stringify({ status: "partial", quorum: { required_non_chair: 2, received_non_chair: 2 }, seats: ["REVISE", "REVISE", "REVISE"].map((verdict) => ({ status: "responded", verdict })) });
+  const response = ["| # | Severity | Location | Finding |", "|---|---|---|---|", "| 1 | Medium | `src/add.js:3` | add() subtracts instead of adding. |", "", "1. **High — Approval can be forged.** `docs/OPS.md:12` shows the operator id.", "", "VERDICT: REVISE"].join("\\n");
+  await writeFile(join(octopusRoot, "scripts", "orchestrate.sh"), `#!/bin/sh\nwhile [ "$#" -gt 0 ]; do if [ "$1" = --output-dir ]; then output="$2"; break; fi; shift; done\nmkdir -p "$output/result/responses"\nprintf '%s' '${summary}' > "$output/result/summary.json"\nprintf '${response}' > "$output/result/responses/00-code-reviewer.md"\nexit 1\n`, { mode: 0o755 });
+  await seed({ phase: "external_validation_passed", implementationAdapter: "octopus", outputPath: checkout });
+  const result = await call("reconcile", { autoRunCouncilReview: true, autoCouncilCorrections: false, notifyMain: false, autoStopStalled: false });
+  const findings = result.councilEndgate.council.findings;
+  assert.ok(findings.includes("Medium: add() subtracts instead of adding. (`src/add.js:3`)"), JSON.stringify(findings));
+  assert.ok(findings.includes("High — Approval can be forged. `docs/OPS.md:12` shows the operator id."), JSON.stringify(findings));
+});
+
 test("revalidation clears the council cache and cannot consume an earlier review artifact", { skip: process.platform !== "linux" }, async t => {
   const octopusRoot = await mkdtemp(join(tmpdir(), "development-cycle-council-cache-"));
   t.after(() => rm(octopusRoot, { recursive: true, force: true }));

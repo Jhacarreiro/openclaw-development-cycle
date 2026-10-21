@@ -13,6 +13,7 @@ import type { createPinnedFs } from "./pinned-fs.js";
 import type { createOctopusOutput } from "./octopus-output.js";
 import type { createExternalGate } from "./external-gate.js";
 import type { DevelopmentCycleConfig } from "../config.js";
+import { DEVELOPMENT_CYCLE_BIN_DIR } from "../adapters/implementation.js";
 
 export interface CouncilDeps {
   developmentCycleConfig: DevelopmentCycleConfig;
@@ -32,6 +33,9 @@ export interface CouncilDeps {
   clearActiveCorrectionsAttempt: ReturnType<typeof createCycleStore>["clearActiveCorrectionsAttempt"];
   sendCycleNotice: ReturnType<typeof createExternalGate>["sendCycleNotice"];
 }
+
+// Lets the council endgate re-run a review whose first attempt was inconclusive.
+const retryInconclusiveCouncil = Symbol("retryInconclusiveCouncil");
 
 export function createCouncil(deps: CouncilDeps) {
   const { developmentCycleConfig, projectsWikiRoot, implementationConfig, defaultCodexSandbox, cycleStatus, createImplementationRunnerSession, createImplementationObserverSession, updateImplementationObserverSession, resolveTrustedProjectWikiPath, writePinnedFile, resolveContainedWikiDir, effectiveImplementationRoot, finalizeObserverSessions, sendCycleMessage, clearActiveCorrectionsAttempt, sendCycleNotice } = deps;
@@ -103,21 +107,24 @@ export function createCouncil(deps: CouncilDeps) {
     const runId = cleanId(params.runId || status?.runId || "run");
     const projectRoot = effectiveImplementationRoot(status, params);
     if (!projectRoot) return { ok: false, skipped: true, reason: "implementation_root_missing" };
-    if (status?.councilReviewSummary && await stat(String(status.councilReviewSummary)).catch(() => null)) return { ok: true, skipped: true, reason: "council_review_already_done", summaryPath: status.councilReviewSummary, status };
+    if (!params[retryInconclusiveCouncil] && status?.councilReviewSummary && await stat(String(status.councilReviewSummary)).catch(() => null)) return { ok: true, skipped: true, reason: "council_review_already_done", summaryPath: status.councilReviewSummary, status };
     const input = await buildCouncilCodeReviewTask(dir, project, runId, { ...status, projectRoot });
     const outputRoot = join(dir, "council-code-review", randomUUID());
     await mkdir(outputRoot, { recursive: true });
     const stdoutPath = join(dir, "council-code-review.stdout");
     const stderrPath = join(dir, "council-code-review.stderr");
     const scriptPath = join(implementationConfig.octopusRoot, "scripts", "orchestrate.sh");
-    const defaultCouncilProviders = "claude,codex,opencode,openrouter";
+    const defaultCouncilProviders = "claude,codex";
     const councilProviders = String(params.councilProviders || params.councilAutoProviders || process.env.OCTOPUS_COUNCIL_AUTO_PROVIDERS || defaultCouncilProviders);
     const councilCodexModel = String(params.councilCodexModel || process.env.DEVELOPMENT_CYCLE_COUNCIL_CODEX_MODEL || "gpt-5.6");
     const args = ["--dir", projectRoot, "council", "--goal", "review", "--domain", "security", "--style", "red-team", "--depth", String(params.councilDepth || "standard"), "--members", String(params.councilMembers || 5), "--providers", councilProviders, "--implement", "never", "--worktree", "off", "--max-cost", String(params.councilMaxCost || "2.00"), "--output-dir", outputRoot, "--json", input.task];
     const startedAt = new Date().toISOString();
+    // Codex seats go through the cycle's OpenClaw-login shim, as in implementation. An inherited CODEX_HOME
+    // makes Octopus take Codex for the host runtime and leave the Codex seat without a vote.
+    const { CODEX_HOME: _codexHome, ...inheritedEnv } = process.env;
     let execResult: any;
     try {
-      execResult = await execSupervisedCommand(scriptPath, args, { cwd: projectRoot, env: { ...process.env, OCTOPUS_PROJECT_DIR: projectRoot, OCTOPUS_CONTEXT_BUDGET: String(implementationConfig.octopusContextBudget), OCTOPUS_COUNCIL_AUTO_PROVIDERS: councilProviders, OCTOPUS_CODEX_MODEL: councilCodexModel }, timeout: Number(params.councilTimeoutMs || 900000), maxBuffer: 8 * 1024 * 1024 });
+      execResult = await execSupervisedCommand(scriptPath, args, { cwd: projectRoot, env: { ...inheritedEnv, PATH: `${DEVELOPMENT_CYCLE_BIN_DIR}:${process.env.PATH || ""}`, OCTOPUS_PROJECT_DIR: projectRoot, OCTOPUS_CONTEXT_BUDGET: String(implementationConfig.octopusContextBudget), OCTOPUS_COUNCIL_AUTO_PROVIDERS: councilProviders, OCTOPUS_CODEX_MODEL: councilCodexModel }, timeout: Number(params.councilTimeoutMs || 900000), maxBuffer: 8 * 1024 * 1024 });
     } catch (err: any) {
       execResult = { failed: true, code: err?.code ?? null, signal: err?.signal ?? null, stdout: err?.stdout || "", stderr: err?.stderr || "", error: String(err?.message || err) };
     }
@@ -137,7 +144,7 @@ export function createCouncil(deps: CouncilDeps) {
       : councilDecision === "stop" ? "Council rejected delivery; inspect findings before requesting corrections."
       : needsCorrections ? "Launch Implementation corrections from council feedback."
       : "Council review passed; write/read one-pager and close or deploy.";
-    const next = await cycleStatus(dir, { phase: ok ? (needsCorrections ? "council_review_needs_corrections" : "council_validated") : "council_review_failed", owner: "main", ok: ok && !needsCorrections, councilDecision, councilReviewStartedAt: startedAt, councilReviewCompletedAt: new Date().toISOString(), councilReviewSummary: summaryPath, councilReviewSynthesis: synthesisPath, councilReviewStdout: stdoutPath, councilReviewStderr: stderrPath, councilReviewInput: input.taskPath, councilReviewNeedsCorrections: needsCorrections, councilReviewFindings: findings, nextAction });
+    const next = await cycleStatus(dir, { phase: ok ? (needsCorrections ? "council_review_needs_corrections" : "council_validated") : "council_review_failed", owner: "main", ok: ok && !needsCorrections, councilDecision, councilReviewAttempts: Number(status?.councilReviewAttempts || (status?.councilReviewSummary ? 1 : 0)) + 1, councilReviewStartedAt: startedAt, councilReviewCompletedAt: new Date().toISOString(), councilReviewSummary: summaryPath, councilReviewSynthesis: synthesisPath, councilReviewStdout: stdoutPath, councilReviewStderr: stderrPath, councilReviewInput: input.taskPath, councilReviewNeedsCorrections: needsCorrections, councilReviewFindings: findings, nextAction });
     return { ok, decision: councilDecision, project, runId, summaryPath, synthesisPath, stdoutPath, stderrPath, inputPath: input.taskPath, needsCorrections, findings, synthesis: excerpt(synthesis, 12000), status: next, execFailed: Boolean(execResult.failed) };
   }
 
@@ -232,9 +239,11 @@ export function createCouncil(deps: CouncilDeps) {
     const adapter = String(params.implementationAdapter || status?.implementationAdapter || implementationConfig.adapter);
     if (adapter !== "octopus" || params.autoRunCouncilReview === false) return null;
     const phase = String(status?.phase || "");
-    if (phase !== "external_validation_passed") return null;
-    if (status?.councilReviewSummary) return null;
-    const council = await runCouncilCodeReview(dir, status, params);
+    // An inconclusive review (no summary, a failed run or no verdict) gets one more attempt.
+    const retry = phase === "council_review_failed" && Number(status?.councilReviewAttempts || 1) < 2;
+    if (phase !== "external_validation_passed" && !retry) return null;
+    if (status?.councilReviewSummary && !retry) return null;
+    const council = await runCouncilCodeReview(dir, status, { ...params, [retryInconclusiveCouncil]: retry });
     const onePager = await writeCouncilOnePager(dir, council.status || status, council, params);
     const verdict = !council.ok ? "failed or inconclusive" : council.decision === "stop" ? "rejected" : council.needsCorrections ? "corrections needed" : "validated";
     const title = `${cleanId(params.project || status?.project || "project")} council review: ${verdict}`;

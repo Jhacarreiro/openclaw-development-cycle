@@ -53,6 +53,36 @@ for (const [synthesis, expected] of [["NO-GO: unresolved security vulnerability"
   });
 }
 
+test("an inconclusive council review is run once more, then left for a person", { skip: process.platform !== "linux" }, async t => {
+  const octopusRoot = await mkdtemp(join(tmpdir(), "development-cycle-council-retry-"));
+  t.after(() => rm(octopusRoot, { recursive: true, force: true }));
+  const { checkout, call, seed } = await fixture(t, { DEVELOPMENT_CYCLE_OCTOPUS_ROOT: octopusRoot });
+  await mkdir(join(octopusRoot, "scripts"), { recursive: true });
+  const orchestrate = join(octopusRoot, "scripts", "orchestrate.sh");
+  // Seats that answer nothing leave a partial summary without a verdict.
+  await writeFile(orchestrate, `#!/bin/sh\nwhile [ "$#" -gt 0 ]; do if [ "$1" = --output-dir ]; then output="$2"; break; fi; shift; done\nmkdir -p "$output/result"\nprintf '%s' '{"status":"partial"}' > "$output/result/summary.json"\n`, { mode: 0o755 });
+  await seed({ phase: "external_validation_passed", implementationAdapter: "octopus", outputPath: checkout });
+  const reconcile = () => call("reconcile", { autoRunCouncilReview: true, notifyMain: false, autoStopStalled: false });
+  assert.equal((await reconcile()).status.phase, "council_review_failed");
+  const retried = await reconcile();
+  assert.equal(retried.status.phase, "council_review_failed", JSON.stringify(retried));
+  assert.equal(retried.status.councilReviewAttempts, 2);
+  assert.equal((await reconcile()).councilEndgate, null);
+});
+
+test("a council review that answers on its second attempt validates the run", { skip: process.platform !== "linux" }, async t => {
+  const octopusRoot = await mkdtemp(join(tmpdir(), "development-cycle-council-retry-ok-"));
+  t.after(() => rm(octopusRoot, { recursive: true, force: true }));
+  const { checkout, call, seed } = await fixture(t, { DEVELOPMENT_CYCLE_OCTOPUS_ROOT: octopusRoot });
+  await mkdir(join(octopusRoot, "scripts"), { recursive: true });
+  await writeFile(join(octopusRoot, "scripts", "orchestrate.sh"), `#!/bin/sh\nwhile [ "$#" -gt 0 ]; do if [ "$1" = --output-dir ]; then output="$2"; break; fi; shift; done\nmkdir -p "$output/result"\nif [ -f "${octopusRoot}/answered-once" ]; then printf '%s' '{"status":"completed"}' > "$output/result/summary.json"; printf '%s' 'GO: no blockers' > "$output/result/synthesis.md"; else touch "${octopusRoot}/answered-once"; printf '%s' '{"status":"partial"}' > "$output/result/summary.json"; fi\n`, { mode: 0o755 });
+  await seed({ phase: "external_validation_passed", implementationAdapter: "octopus", outputPath: checkout });
+  const reconcile = () => call("reconcile", { autoRunCouncilReview: true, notifyMain: false, autoStopStalled: false });
+  assert.equal((await reconcile()).status.phase, "council_review_failed");
+  const retried = await reconcile();
+  assert.equal(retried.status.phase, "council_validated", JSON.stringify(retried));
+});
+
 test("revalidation clears the council cache and cannot consume an earlier review artifact", { skip: process.platform !== "linux" }, async t => {
   const octopusRoot = await mkdtemp(join(tmpdir(), "development-cycle-council-cache-"));
   t.after(() => rm(octopusRoot, { recursive: true, force: true }));

@@ -44,14 +44,18 @@ export function createStop(deps: StopDeps) {
     if (!processGroupId && !runnerPid) return { ok: false, skipped: true, reason: "runner_pid_missing", statusPath, session };
 
     const signals: any[] = [];
-    if (["completed", "failed", "stopped"].includes(String(session.status)) && session.launchState === "exited") return { ok: true, skipped: true, reason: "runner_already_exited", statusPath };
+    const exited = ["completed", "failed", "stopped"].includes(String(session.status)) && session.launchState === "exited";
+    if (exited && !session.runnerIdentity) return { ok: true, skipped: true, reason: "runner_already_exited", statusPath };
     const verified = await stopVerifiedProcessGroup(session.runnerIdentity, readProcessIdentity, (target, signal) => {
       const result = signalPid(target, signal);
       signals.push(result);
       if (!result.ok && result.error !== "ESRCH") throw new Error(result.error);
       return true;
     });
-    if (!verified.ok) return { ...verified, statusPath };
+    if (exited && !verified.ok) return { ok: true, skipped: true, reason: "runner_already_exited", statusPath };
+    if (!verified.ok || verified.skipped) return { ...verified, statusPath };
+    // The runner already finished; only its leftover subtasks were stopped, so its own outcome stands.
+    if (exited) return { ok: true, skipped: true, reason: "runner_already_exited", sessionDrained: true, statusPath, signals };
 
     const stoppedAt = new Date().toISOString();
     if (session.exitCodePath) await writeFile(String(session.exitCodePath), "143\n").catch(() => null);
@@ -69,7 +73,7 @@ export function createStop(deps: StopDeps) {
       runnerPid: runnerPid || session.runnerPid || null,
       stopSignals: signals,
       updatedAt: stoppedAt,
-      message: "Implementation direct runner stopped by development_cycle using process-group termination.",
+      message: "Implementation direct runner stopped by development_cycle terminating its whole session.",
     };
     await saveJson(statusPath, next);
     return { ok: true, statusPath, runnerPid, processGroupId, stoppedAt, signals };

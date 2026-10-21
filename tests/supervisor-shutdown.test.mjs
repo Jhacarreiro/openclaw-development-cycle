@@ -224,6 +224,32 @@ for (const shutdownSignal of ["SIGTERM", "SIGINT"]) {
   });
 }
 
+test("supervisor shutdown also stops subtasks that left the runner's group but not its session", { timeout: 20_000 }, async (t) => {
+  const ctx = await startSupervisor(t);
+  const leaderPath = join(ctx.dir, "leader.pid");
+  const childPath = join(ctx.dir, "child.pid");
+  const runnerPath = join(ctx.dir, "runner.sh");
+  // The subshell starts the job in a group of its own (job control) and exits, as Octopus subtasks do.
+  await writeFile(runnerPath, ["#!/bin/sh", `bash -c '(set -m; sleep 120 & echo $! > "${childPath}")'`, `echo $$ > "${leaderPath}"`, "sleep 120 &", "wait", ""].join("\n"));
+  const launched = await readJsonLine(ctx.socketPath, `${JSON.stringify({ action: "launch", runnerPath, cwd: ctx.dir })}\n`);
+  assert.equal(launched.ok, true, `launch failed: ${JSON.stringify(launched)}`);
+  const leaderPid = await waitForPidFile(leaderPath);
+  const detachedPid = await waitForPidFile(childPath);
+  ctx.trackedPids.add(leaderPid);
+  ctx.trackedPids.add(detachedPid);
+  const stat = readFileSync(`/proc/${detachedPid}/stat`, "utf8").split(") ")[1].split(" ");
+  assert.notEqual(Number(stat[2]), leaderPid, "the subtask must have left the runner's process group");
+  assert.equal(Number(stat[3]), leaderPid, "the subtask must still be in the runner's session");
+
+  ctx.markStopping();
+  assert.equal(ctx.child.kill("SIGTERM"), true);
+  const exited = await waitForExit(ctx.child, SHUTDOWN_WAIT_MS);
+  assert.ok(exited, `supervisor did not exit; log: ${ctx.supervisorLog}`);
+  const goneDeadline = Date.now() + 2_000;
+  while (Date.now() < goneDeadline && pidAlive(detachedPid)) await sleep(25);
+  assert.equal(pidAlive(detachedPid), false, `detached subtask ${detachedPid} still alive after supervisor shutdown`);
+});
+
 test("launch_runner publishes process-group readiness before returning", () => {
   const launch = SUPERVISOR_SOURCE.slice(SUPERVISOR_SOURCE.indexOf("def launch_runner"), SUPERVISOR_SOURCE.indexOf("def serve"));
   const pipe = launch.indexOf("os.pipe()");

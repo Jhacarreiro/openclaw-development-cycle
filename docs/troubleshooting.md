@@ -109,9 +109,9 @@ The observer is disabled by default and is not required by the command adapter. 
 
 ## A supervised process does not stop
 
-Use `stop_implementation` rather than killing only the root PID. The plugin stops the process group with a TERM/KILL policy.
+Use `stop_implementation` rather than killing only the root PID. The plugin stops the runner's whole session, including subtasks that left its process group, with a TERM/KILL policy.
 
-New sessions record the Linux boot ID, PID, process group and process start time. Cancellation refuses a missing or changed identity rather than signalling a reused PID. Sessions created before this identity was recorded require operator verification before manual cancellation.
+New sessions record the Linux boot ID, PID, process group, session ID, process start time and a per-launch marker. Cancellation refuses a missing or changed identity rather than signalling a reused PID. Sessions created before this identity was recorded require operator verification before manual cancellation.
 
 Runner stdout and stderr each retain a current file and one `.previous` file, capped at 16 MiB per file. Very old runner output is rotated away. Audit JSONL files rotate at 8 MiB into compressed files under `event-archives/<event-file>/`; all archives are retained by default. Use the [event history configuration](configuration.md#event-history) to opt into a finite archive count. Run directories and attempt artifacts still require an operator backup and retention policy.
 

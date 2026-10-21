@@ -1,6 +1,6 @@
 import { readdir, readlink, stat } from "node:fs/promises";
 import { join } from "node:path";
-import { findProviderProcessesOutsideObservedTree } from "../core/process-observation.js";
+import { findProviderProcessesOutsideObservedTree, observedRunTree } from "../core/process-observation.js";
 import { execFileAsync } from "./exec.js";
 import { readJsonIfExists, execSummary, fileInfo, textTail } from "./files.js";
 import type { createCycleStore } from "./cycle-store.js";
@@ -42,27 +42,13 @@ export function createRuntimeObservation(deps: RuntimeObservationDeps) {
   async function runtimeProcessSnapshot(status: any, sessions: any[]) {
     const pids = await runtimeObservedPids(status, sessions);
     let table = "";
-    try { table = (await execFileAsync("ps", ["-eo", "pid,ppid,etime,stat,comm"], { timeout: 5000, maxBuffer: 1024 * 1024 })).stdout || ""; } catch {}
+    try { table = (await execFileAsync("ps", ["-eo", "pid,ppid,sid,etime,stat,comm"], { timeout: 5000, maxBuffer: 1024 * 1024 })).stdout || ""; } catch {}
     const rows = table.split(/\r?\n/).slice(1).map((line) => {
-      const m = line.trim().match(/^(\d+)\s+(\d+)\s+(\S+)\s+(\S+)\s+(.+)$/);
-      return m ? { pid: Number(m[1]), ppid: Number(m[2]), elapsed: m[3], stat: m[4], comm: m[5] } : null;
+      const m = line.trim().match(/^(\d+)\s+(\d+)\s+(\d+)\s+(\S+)\s+(\S+)\s+(.+)$/);
+      return m ? { pid: Number(m[1]), ppid: Number(m[2]), sid: Number(m[3]), elapsed: m[4], stat: m[5], comm: m[6] } : null;
     }).filter(Boolean) as any[];
     const rootSet = new Set(pids);
-    const children = new Map<number, any[]>();
-    for (const r of rows) {
-      if (!children.has(r.ppid)) children.set(r.ppid, []);
-      children.get(r.ppid)!.push(r);
-    }
-    const seen = new Set<number>();
-    const tree: any[] = [];
-    const stack = [...pids];
-    while (stack.length) {
-      const pid = stack.pop()!;
-      for (const r of children.get(pid) || []) {
-        if (seen.has(r.pid)) continue;
-        seen.add(r.pid); tree.push(r); stack.push(r.pid);
-      }
-    }
+    const tree = observedRunTree(rows, pids);
     const roots = rows.filter((r) => rootSet.has(r.pid));
     const providers = rows.filter((r) => /^(codex|claude|gemini|agy|command-code|node)$/.test(String(r.comm || "")));
     return { roots, descendants: tree, providers, zombies: rows.filter((r) => String(r.stat || "").includes("Z")), observedPids: pids };

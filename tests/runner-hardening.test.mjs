@@ -17,7 +17,7 @@ test("runner finalization reaps heartbeat and cleans live process-group members"
   assert.match(source, /trap - EXIT TERM INT HUP/);
   assert.match(source, /wait \"\$heartbeat_pid\"/);
   assert.match(source, /cleanup_process_group/);
-  assert.match(source, /\$1 != self && \$3 !~ \/\^Z\//);
+  assert.match(source, /\$1 != self && \$4 !~ \/\^Z\//);
   assert.match(source, /kill -TERM \$cleanup_pids/);
   assert.match(source, /kill -KILL \$cleanup_pids/);
 });

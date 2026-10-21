@@ -89,6 +89,7 @@ def persist_terminal_state_if_missing(cwd: str, wait_status: int) -> None:
     atomic_write_text(exit_code_path, f"{exit_code}\n")
 
 def group_members(pgid: int) -> list[int]:
+    # Live members of the runner's process group or of its session.
     members = []
     for entry in Path('/proc').iterdir():
         if not entry.name.isdigit():
@@ -98,27 +99,37 @@ def group_members(pgid: int) -> list[int]:
             right = stat.rsplit(')', 1)[1].strip().split()
             state = right[0]
             proc_pgid = int(right[2])
-            if proc_pgid == pgid and state != 'Z':
+            proc_session = int(right[3])
+            if (proc_pgid == pgid or proc_session == pgid) and state != 'Z':
                 members.append(int(entry.name))
         except (FileNotFoundError, PermissionError, ValueError, IndexError):
             continue
     return members
 
 
-def terminate_group(pgid: int, runners: dict[int, int]) -> None:
+def signal_members(pgid: int, sig: int) -> None:
+    # The runner is setsid()'d, so its pid is both its group and its session.
+    # Octopus starts some subtasks in groups of their own; when their parent
+    # exits they are reparented here but stay in the runner's session.
     try:
-        os.killpg(pgid, signal.SIGTERM)
+        os.killpg(pgid, sig)
     except ProcessLookupError:
         pass
+    for pid in group_members(pgid):
+        try:
+            os.kill(pid, sig)
+        except ProcessLookupError:
+            pass
+
+
+def terminate_group(pgid: int, runners: dict[int, int]) -> None:
+    signal_members(pgid, signal.SIGTERM)
     deadline = time.monotonic() + 2.0
     while time.monotonic() < deadline:
         if not group_members(pgid):
             return
         time.sleep(0.1)
-    try:
-        os.killpg(pgid, signal.SIGKILL)
-    except ProcessLookupError:
-        pass
+    signal_members(pgid, signal.SIGKILL)
     deadline = time.monotonic() + 2.0
     while time.monotonic() < deadline:
         if not group_members(pgid):

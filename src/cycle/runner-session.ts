@@ -3,7 +3,7 @@ import { join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
 import { cleanId } from "../core/ids.js";
-import { readProcessIdentity } from "../runtime/processes.js";
+import { readProcessIdentity, RUN_MARKER_ENV } from "../runtime/processes.js";
 import { buildImplementationLaunchSpec, jsonShellQuote, renderShellCommand, renderShellEnvironment, shellQuote } from "../adapters/implementation.js";
 import { ensureOctopusCodexAuthLink } from "../adapters/octopus-codex-auth.js";
 import { execFileAsync } from "./exec.js";
@@ -142,7 +142,7 @@ export function createRunnerSession(deps: RunnerSessionDeps) {
       }
     }
 
-    const environment = renderShellEnvironment({ ...launchSpec.env, HOME: runtimeHome });
+    const environment = renderShellEnvironment({ ...launchSpec.env, HOME: runtimeHome, [RUN_MARKER_ENV]: attemptId });
     const commandLine = renderShellCommand(launchSpec);
     const boundedLogPath = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", "bin", "bounded-log.py");
     const runnerScript = `#!/bin/sh
@@ -156,13 +156,13 @@ cleanup_process_group() {
   runner_pgid=$(ps -o pgid= -p "$runner_pid" | tr -d ' ')
   [ -n "$runner_pgid" ] || return 0
 
-  cleanup_pids=$(ps -eo pid=,pgid=,stat= | awk -v pgid="$runner_pgid" -v self="$runner_pid" '$2 == pgid && $1 != self && $3 !~ /^Z/ { print $1 }')
+  cleanup_pids=$(ps -eo pid=,pgid=,sid=,stat= | awk -v pgid="$runner_pgid" -v self="$runner_pid" '($2 == pgid || $3 == self) && $1 != self && $4 !~ /^Z/ { print $1 }')
   if [ -n "$cleanup_pids" ]; then
     kill -TERM $cleanup_pids 2>/dev/null || true
     sleep 1
   fi
 
-  cleanup_pids=$(ps -eo pid=,pgid=,stat= | awk -v pgid="$runner_pgid" -v self="$runner_pid" '$2 == pgid && $1 != self && $3 !~ /^Z/ { print $1 }')
+  cleanup_pids=$(ps -eo pid=,pgid=,sid=,stat= | awk -v pgid="$runner_pgid" -v self="$runner_pid" '($2 == pgid || $3 == self) && $1 != self && $4 !~ /^Z/ { print $1 }')
   [ -z "$cleanup_pids" ] || kill -KILL $cleanup_pids 2>/dev/null || true
 }
 finalize() {
@@ -269,12 +269,12 @@ python3 ${shellQuote(boundedLogPath)} --stdout ${shellQuote(stdoutPath)} --stder
         status: "running",
         launchState: "running",
         runnerPid,
-        runnerIdentity: await readProcessIdentity(runnerPid),
+        runnerIdentity: await readProcessIdentity(runnerPid).then((identity) => identity && { ...identity, runMarker: attemptId }),
         processGroupId: Number(launchInfo?.pgid || runnerPid),
         runnerSupervisorPid: Number(launchInfo?.supervisorPid || supervisor?.pid || 0) || null,
         runnerSupervisorSocket,
         useProcessGroup: true,
-        stopSignalPolicy: "process-group-term-kill",
+        stopSignalPolicy: "session-term-kill",
         updatedAt: new Date().toISOString(),
         message: `Implementation launched through the ${launchSpec.displayName} adapter.`,
       };

@@ -63,10 +63,13 @@ test("an inconclusive council review is run once more, then left for a person", 
   await writeFile(orchestrate, `#!/bin/sh\nwhile [ "$#" -gt 0 ]; do if [ "$1" = --output-dir ]; then output="$2"; break; fi; shift; done\nmkdir -p "$output/result"\nprintf '%s' '{"status":"partial"}' > "$output/result/summary.json"\n`, { mode: 0o755 });
   await seed({ phase: "external_validation_passed", implementationAdapter: "octopus", outputPath: checkout });
   const reconcile = () => call("reconcile", { autoRunCouncilReview: true, notifyMain: false, autoStopStalled: false });
-  assert.equal((await reconcile()).status.phase, "council_review_failed");
+  const first = await reconcile();
+  assert.equal(first.status.phase, "council_review_failed");
+  assert.match(first.status.nextAction, /runs it once more/);
   const retried = await reconcile();
   assert.equal(retried.status.phase, "council_review_failed", JSON.stringify(retried));
   assert.equal(retried.status.councilReviewAttempts, 2);
+  assert.match(retried.status.nextAction, /^Resolve the failed/);
   assert.equal((await reconcile()).councilEndgate, null);
   // Corrections and revalidation start a new review, which gets its own retry.
   await seed({ phase: "corrections_completed" });

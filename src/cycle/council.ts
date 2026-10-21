@@ -140,11 +140,13 @@ export function createCouncil(deps: CouncilDeps) {
     const needsCorrections = councilDecision === "revise" || councilDecision === "stop";
     const findings = extractCouncilFindings(synthesis || JSON.stringify(summary || {}));
     const ok = Boolean(summaryPath && summary?.status === "completed" && !execResult.failed && councilDecision !== "unknown");
-    const nextAction = !ok ? "Resolve the failed or inconclusive council review before acceptance."
+    const councilReviewAttempts = Number(status?.councilReviewAttempts ?? (status?.councilReviewSummary || status?.phase === "council_review_failed" ? 1 : 0)) + 1;
+    const nextAction = !ok && councilReviewAttempts < 2 ? "Council review was inconclusive; the next reconcile with council review on runs it once more."
+      : !ok ? "Resolve the failed or inconclusive council review before acceptance."
       : councilDecision === "stop" ? "Council rejected delivery; inspect findings before requesting corrections."
       : needsCorrections ? "Launch Implementation corrections from council feedback."
       : "Council review passed; write/read one-pager and close or deploy.";
-    const next = await cycleStatus(dir, { phase: ok ? (needsCorrections ? "council_review_needs_corrections" : "council_validated") : "council_review_failed", owner: "main", ok: ok && !needsCorrections, councilDecision, councilReviewAttempts: Number(status?.councilReviewAttempts ?? (status?.councilReviewSummary || status?.phase === "council_review_failed" ? 1 : 0)) + 1, councilReviewStartedAt: startedAt, councilReviewCompletedAt: new Date().toISOString(), councilReviewSummary: summaryPath, councilReviewSynthesis: synthesisPath, councilReviewStdout: stdoutPath, councilReviewStderr: stderrPath, councilReviewInput: input.taskPath, councilReviewNeedsCorrections: needsCorrections, councilReviewFindings: findings, nextAction });
+    const next = await cycleStatus(dir, { phase: ok ? (needsCorrections ? "council_review_needs_corrections" : "council_validated") : "council_review_failed", owner: "main", ok: ok && !needsCorrections, councilDecision, councilReviewAttempts, councilReviewStartedAt: startedAt, councilReviewCompletedAt: new Date().toISOString(), councilReviewSummary: summaryPath, councilReviewSynthesis: synthesisPath, councilReviewStdout: stdoutPath, councilReviewStderr: stderrPath, councilReviewInput: input.taskPath, councilReviewNeedsCorrections: needsCorrections, councilReviewFindings: findings, nextAction });
     return { ok, decision: councilDecision, project, runId, summaryPath, synthesisPath, stdoutPath, stderrPath, inputPath: input.taskPath, needsCorrections, findings, synthesis: excerpt(synthesis, 12000), status: next, execFailed: Boolean(execResult.failed) };
   }
 

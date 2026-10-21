@@ -274,7 +274,7 @@ python3 ${shellQuote(boundedLogPath)} --stdout ${shellQuote(stdoutPath)} --stder
         runnerSupervisorPid: Number(launchInfo?.supervisorPid || supervisor?.pid || 0) || null,
         runnerSupervisorSocket,
         useProcessGroup: true,
-        stopSignalPolicy: "process-group-term-kill",
+        stopSignalPolicy: "session-term-kill",
         updatedAt: new Date().toISOString(),
         message: `Implementation launched through the ${launchSpec.displayName} adapter.`,
       };

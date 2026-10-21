@@ -16,7 +16,8 @@ test("cancellation refuses a reused PID or unverified process group", async () =
   assert.equal((await stopVerifiedProcessGroup(null, async () => identity, signal)).ok, false);
   assert.deepEqual(signals, []);
   let reads = 0;
-  const result = await stopVerifiedProcessGroup(identity, async () => ++reads === 1 ? identity : null, signal);
+  // Without a recorded session id the runner is not proven to lead its session, so other session members are left alone.
+  const result = await stopVerifiedProcessGroup(identity, async () => ++reads === 1 ? identity : null, signal, 5000, async () => [1234, 5678]);
   assert.equal(result.ok, true);
   assert.deepEqual(signals, [[-1234, "SIGTERM"]]);
 });
@@ -60,6 +61,34 @@ test("stopping a runner also stops subtasks that left its process group but not 
   assert.equal(Number(childStat[3]), runner.pid, "the subtask must still be in the runner's session");
   const result = await stopVerifiedProcessGroup(await readProcessIdentity(runner.pid), readProcessIdentity, process.kill.bind(process), 2000);
   assert.equal(result.ok, true, JSON.stringify(result));
+  let state;
+  for (let i = 0; i < 50; i++) {
+    try { state = (await readFile(`/proc/${child}/stat`, "utf8")).split(") ")[1].split(" ")[0]; } catch (error) { assert.equal(error.code, "ENOENT"); state = undefined; }
+    if (!state || state === "Z") break;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  assert.ok(!state || state === "Z", `subtask ${child} still alive (${state})`);
+});
+
+test("stopping a run whose runner already exited still stops the subtasks left in its session", { skip: process.platform !== "linux" }, async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), "development-cycle-stop-exited-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const childPath = join(dir, "child.pid");
+  const runner = spawn("bash", ["-c", `(set -m; sleep 120 & echo $! > "${childPath}"); sleep 0.5`], { detached: true, stdio: "ignore" });
+  const exited = new Promise((resolve) => runner.on("exit", resolve));
+  let identity = null;
+  let child = 0;
+  for (let i = 0; i < 100 && !child; i++) {
+    identity ??= await readProcessIdentity(runner.pid);
+    child = Number((await readFile(childPath, "utf8").catch(() => "")).trim());
+    if (!child) await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  t.after(() => { try { process.kill(child, "SIGKILL"); } catch {} });
+  assert.equal(identity.sid, runner.pid);
+  await exited;
+  const result = await stopVerifiedProcessGroup(identity, readProcessIdentity, process.kill.bind(process), 2000);
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.notEqual(result.skipped, true);
   let state;
   for (let i = 0; i < 50; i++) {
     try { state = (await readFile(`/proc/${child}/stat`, "utf8")).split(") ")[1].split(" ")[0]; } catch (error) { assert.equal(error.code, "ENOENT"); state = undefined; }

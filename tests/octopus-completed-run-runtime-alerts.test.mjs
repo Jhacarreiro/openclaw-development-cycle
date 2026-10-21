@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { promisify } from "node:util";
 import test from "node:test";
 import { writeCanonicalRoutingConfig } from "./helpers/octopus-routing.mjs";
@@ -23,7 +23,7 @@ function planText(projectRoot, wikiPath) {
 
 // Octopus finishes a run cleanly (exit 0) after its own review converged; the
 // cycle then reconciles it with the given stderr.
-async function reconcileCompletedOctopusRun(t, stderrLines) {
+async function reconcileCompletedOctopusRun(t, stderrLines, { intervention } = {}) {
   const root = join(tmpdir(), `development-cycle-octopus-completed-${process.pid}-${Date.now()}`);
   t.after(() => rm(root, { recursive: true, force: true }));
   const home = join(root, "home");
@@ -88,6 +88,7 @@ async function reconcileCompletedOctopusRun(t, stderrLines) {
   await writeFile(session.exitCodePath, "0\n");
   await writeFile(session.exitedAtPath, "2026-10-20T16:17:18Z\n");
   await writeFile(launched.directImplementationStatus, JSON.stringify({ ...session, status: "completed", launchState: "exited", exitCode: 0, exitedAt: "2026-10-20T16:17:18Z" }, null, 2));
+  if (intervention) await writeFile(join(dirname(launched.directImplementationStatus), "intervention.json"), JSON.stringify(intervention, null, 2));
 
   const reconcile = async (extra = {}) => detailsOf(await tool.execute("reconcile", {
     action: "reconcile", ...params, notifyMain: false, autoStopStalled: false, autoRunFinalValidation: false, autoRunCouncilReview: false, ...extra,
@@ -98,7 +99,7 @@ async function reconcileCompletedOctopusRun(t, stderrLines) {
 
 test("A run Octopus completed after its review converged goes on to final validation despite review warnings about timed-out providers", async (t) => {
   const status = await reconcileCompletedOctopusRun(t, [
-    // Lines from run 8kv859: Octopus reports how many reviewers were missing,
+    // Octopus reports how many reviewers were missing,
     // failed or timed out, including when that count is zero.
     "\u001b[0;34m[2026-10-20 16:47:29]\u001b[0m \u001b[1;33mWARN\u001b[0m: Contextual code review warning: Round 1 was partial: 0 provider(s) missing/failed/timed out, 1 provider output(s) had possible unparsed findings.",
     "\u001b[0;34m[2026-10-20 17:17:18]\u001b[0m \u001b[0;32mINFO\u001b[0m: Contextual code review findings: /tmp/review-findings.json (normal=0)",
@@ -130,4 +131,23 @@ test("A council-validated run is not delivered once a newer run of the project h
   await mkdir(newer, { recursive: true });
   await writeFile(join(newer, "status.json"), JSON.stringify({ phase: "waiting_external_plan" }));
   assert.equal((await validated.reconcile({ autoFinalizeDelivery: true })).status.phase, "council_validated");
+});
+
+test("A decision the implementation left on a clean exit is recorded and keeps the delivery PR from merging itself", async (t) => {
+  const delivered = await reconcileCompletedOctopusRun(t, [
+    "\u001b[0;34m[2026-10-20 17:17:18]\u001b[0m \u001b[0;32mINFO\u001b[0m: Tangle run completed; preserving isolated branch and worktree for review: octopus/run/x/integration",
+  ], { intervention: {
+    schemaVersion: 1, id: "stronger-operator-authentication", kind: "human_decision",
+    question: "Which stronger operator-approval authentication should replace the interim relay check?",
+    options: ["operator_one_time_tokens", "gateway_verified_sender_evidence", "none"],
+  } });
+  assert.equal(delivered.phase, "implementation_delivered", JSON.stringify(delivered));
+  assert.equal(delivered.pendingDecision?.id, "stronger-operator-authentication");
+  assert.equal(delivered.pendingDecision?.status, "pending");
+  const status = JSON.parse(await readFile(delivered.statusPath, "utf8"));
+  await writeFile(delivered.statusPath, JSON.stringify({ ...status, phase: "council_validated", councilDecision: "go" }, null, 2));
+  await delivered.reconcile({ autoFinalizeDelivery: true });
+  const request = JSON.parse(await readFile(join(dirname(delivered.statusPath), "repository_delivery_request.json"), "utf8"));
+  assert.equal(request.autoMerge, false);
+  assert.deepEqual(request.pendingDecisions.map((decision) => decision.id), ["stronger-operator-authentication"]);
 });

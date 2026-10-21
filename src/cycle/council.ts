@@ -121,9 +121,12 @@ export function createCouncil(deps: CouncilDeps) {
     const councilProviders = explicitProviders || routedSeats?.providers || "auto";
     const councilModelEnv: Record<string, string> = Object.fromEntries(Object.entries(routedSeats?.env || {}).filter(([name]) => !process.env[name]));
     if (!explicitProviders && routedSeats && !process.env.OCTOPUS_COUNCIL_DEFAULT_PROVIDERS) councilModelEnv.OCTOPUS_COUNCIL_DEFAULT_PROVIDERS = routedSeats.providers;
-    // Octopus seats 3, 5 or 7 members; take the smallest that holds every routed seat.
-    const routedSeatCount = routedSeats ? routedSeats.providers.split(",").length : 0;
-    const councilMembers = params.councilMembers || (routedSeatCount > 5 ? 7 : 5);
+    // Octopus seats 3, 5 or 7 members; take the smallest that holds every seat of the effective policy,
+    // and refuse a policy no supported size can hold rather than silently leave a model out.
+    const effectivePolicy = explicitProviders && explicitProviders !== "auto" ? explicitProviders : process.env.OCTOPUS_COUNCIL_DEFAULT_PROVIDERS || routedSeats?.providers || "";
+    const seatCount = effectivePolicy.split(/[\s,]+/).filter(Boolean).length;
+    if (!params.councilMembers && seatCount > 7) return { ok: false, skipped: true, reason: "council_seats_exceed_octopus_limit", seatCount, policy: effectivePolicy, nextAction: "Octopus seats at most 7 council members; route fewer distinct models or set councilMembers." };
+    const councilMembers = params.councilMembers || (seatCount > 5 ? 7 : 5);
     const councilCodexModel = String(params.councilCodexModel || process.env.DEVELOPMENT_CYCLE_COUNCIL_CODEX_MODEL || "");
     if (councilCodexModel) councilModelEnv.OCTOPUS_CODEX_MODEL = councilCodexModel;
     const args = ["--dir", projectRoot, "council", "--goal", "review", "--domain", "security", "--style", "red-team", "--depth", String(params.councilDepth || "standard"), "--members", String(councilMembers), "--providers", explicitProviders || "auto", "--implement", "never", "--worktree", "off", "--max-cost", String(params.councilMaxCost || "2.00"), "--output-dir", outputRoot, "--json", input.task];

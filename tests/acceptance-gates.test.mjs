@@ -132,6 +132,23 @@ for (const { name, roles, policy, members } of [
   assert.equal(launched.codexBin, resolve("bin/codex"));
 });
 
+test("a routing with more models than Octopus can seat refuses the council instead of dropping one", { skip: process.platform !== "linux" }, async t => {
+  const octopusRoot = await mkdtemp(join(tmpdir(), "development-cycle-council-oversized-"));
+  t.after(() => rm(octopusRoot, { recursive: true, force: true }));
+  const home = join(octopusRoot, "home");
+  const roles = Object.fromEntries(Object.keys(canonicalRouting).map((role, index) => [role, { provider: "commandcode", model: `vendor/model-${index}` }]));
+  writeCanonicalRoutingConfig(home, roles);
+  const { checkout, call, seed } = await fixture(t, { DEVELOPMENT_CYCLE_OCTOPUS_ROOT: octopusRoot, HOME: home });
+  await mkdir(join(octopusRoot, "scripts"), { recursive: true });
+  const launched = join(octopusRoot, "launched");
+  await writeFile(join(octopusRoot, "scripts", "orchestrate.sh"), `#!/bin/sh\ntouch "${launched}"\n`, { mode: 0o755 });
+  await seed({ phase: "external_validation_passed", implementationAdapter: "octopus", outputPath: checkout });
+  const result = await call("reconcile", { autoRunCouncilReview: true, notifyMain: false, autoStopStalled: false });
+  assert.equal(result.councilEndgate.council.reason, "council_seats_exceed_octopus_limit", JSON.stringify(result));
+  assert.equal(result.councilEndgate.council.seatCount, Object.keys(canonicalRouting).length);
+  await assert.rejects(readFile(launched));
+});
+
 for (const { name, verdicts, decision } of [
   { name: "a council whose answering seats all ask for changes sends the run to corrections", verdicts: ["REVISE", "REVISE", "REVISE"], decision: "revise" },
   { name: "a unanimous objection that includes a veto stops the run instead of correcting it", verdicts: ["REVISE", "BLOCK", "REVISE"], decision: "stop" },

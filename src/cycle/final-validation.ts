@@ -241,7 +241,7 @@ export function createFinalValidation(deps: FinalValidationDeps) {
       const validationCommands = await inferValidationCommands(validationRoot, config);
       config.resolvedCommands = validationCommands;
       for (const command of validationCommands) {
-        const result = await execValidationCommand(String(command), validationRoot, Number(config.commandTimeoutMs || 120000));
+        const result = await execValidationCommand(String(command), validationRoot, Number(config.commandTimeoutMs || 900000));
         commandResults.push({ ...result, stdout: excerpt(result.stdout || "", 20000), stderr: excerpt(result.stderr || "", 20000) });
         if (!result.ok) failures.push({ check: "command", command, severity: "revise", reason: result.error || `command exited ${result.exitCode}`, exitCode: result.exitCode, timedOut: result.timedOut || false });
       }

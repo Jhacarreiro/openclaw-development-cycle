@@ -14,7 +14,7 @@ export interface ValidationConfig {
 
 export function defaultValidationConfig(): ValidationConfig {
   return {
-    commands: "auto", commandTimeoutMs: 120000, preserveDiff: true, strictDirty: false,
+    commands: "auto", commandTimeoutMs: 900000, preserveDiff: true, strictDirty: false,
     allowedDirty: [], ignoredDirty: [".claude-implementation/", "node_modules/", "dist/", "build/", "coverage/"],
     forbiddenPaths: [".env", ".env.local", "config.json.test-backup"], protectedDirty: [".env", ".env.local"],
     portsMustBeFree: [], requiredOpenApiPaths: [], stall: { enabled: true, autoStop: true, quietSeconds: 900 },

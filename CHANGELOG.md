@@ -19,6 +19,7 @@ The format is based on Keep a Changelog and the project follows Semantic Version
 
 ### Fixed
 
+- Final validation gives each check command 15 minutes by default instead of 2. A real project's full test suite (social-publisher's takes about 2 minutes on the host) no longer fails validation by timing out.
 - A decision the implementation leaves in `intervention.json` when it exits cleanly is no longer dropped: the run records it as `pendingDecision`, notifies, and the delivery PR stays open with a comment listing the question and its options instead of merging itself.
 - A run that Octopus completed cleanly no longer stops before final validation on a runtime alert. Octopus review summaries such as "0 provider(s) missing/failed/timed out" no longer count as a timeout, alerts about the run's root process only block while a supervised run is still active (a provider still working in the attempt outside the observed tree blocks in any phase), and clearing a stale blocker on a delivered run restores the delivery next action.
 - An Octopus run that gives up on corrections after a review left blocking findings (a stalled correction round, retries it cannot supervise) is now classified `review_non_convergence` like one that hits the round ceiling, so its partial delivery opens one issue per finding left in that review and the follow-up run works them. Before, a stale runtime alert classified it as `runtime_observation_blocker` and no follow-up started.

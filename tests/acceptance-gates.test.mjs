@@ -68,6 +68,23 @@ test("an inconclusive council review is run once more, then left for a person", 
   assert.equal(retried.status.phase, "council_review_failed", JSON.stringify(retried));
   assert.equal(retried.status.councilReviewAttempts, 2);
   assert.equal((await reconcile()).councilEndgate, null);
+  // Corrections and revalidation start a new review, which gets its own retry.
+  await seed({ phase: "corrections_completed" });
+  assert.equal((await call("run_final_validation")).ok, true);
+  assert.equal((await reconcile()).status.phase, "council_review_failed");
+  assert.equal((await reconcile()).status.councilReviewAttempts, 2);
+});
+
+test("a run left in a failed council review before attempts were counted is retried only once", { skip: process.platform !== "linux" }, async t => {
+  const octopusRoot = await mkdtemp(join(tmpdir(), "development-cycle-council-legacy-"));
+  t.after(() => rm(octopusRoot, { recursive: true, force: true }));
+  const { checkout, call, seed } = await fixture(t, { DEVELOPMENT_CYCLE_OCTOPUS_ROOT: octopusRoot });
+  await mkdir(join(octopusRoot, "scripts"), { recursive: true });
+  await writeFile(join(octopusRoot, "scripts", "orchestrate.sh"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+  await seed({ phase: "council_review_failed", implementationAdapter: "octopus", outputPath: checkout, councilReviewSummary: "" });
+  const reconcile = () => call("reconcile", { autoRunCouncilReview: true, notifyMain: false, autoStopStalled: false });
+  assert.equal((await reconcile()).status.councilReviewAttempts, 2);
+  assert.equal((await reconcile()).councilEndgate, null);
 });
 
 test("a council review that answers on its second attempt validates the run", { skip: process.platform !== "linux" }, async t => {

@@ -33,7 +33,7 @@ else if(a[0]==="api"&&a[1]==="user") process.stdout.write(JSON.stringify({login:
 else if(a[0]==="pr"&&a[1]==="view") {
   if(!fs.existsSync(d+"/pr")) process.exit(1);
   const merged=process.env.TEST_PR_MERGED==="1";
-  process.stdout.write(JSON.stringify({number:42,url:"https://github.test/acme/demo/pull/42",state:merged?"MERGED":"OPEN",mergedAt:merged?"2026-08-20T17:00:00Z":null}));
+  process.stdout.write(JSON.stringify({number:42,url:"https://github.test/acme/demo/pull/42",state:merged?"MERGED":"OPEN",mergedAt:merged?"2026-08-20T17:00:00Z":null,autoMergeRequest:process.env.TEST_PR_AUTO_MERGE==="1"?{mergeMethod:"SQUASH"}:null}));
 } else if(a[0]==="pr"&&a[1]==="create") {
   fs.writeFileSync(d+"/pr","1");
   process.stdout.write("https://github.test/acme/demo/pull/42\\n");
@@ -80,6 +80,17 @@ test("successful delivery queues GitHub auto-merge without local branch deletion
   assert.match(gh, /"pr","merge"/);
   assert.match(gh, /"--auto"/);
   assert.doesNotMatch(gh, /"--delete-branch"/);
+});
+
+test("a pending decision is listed on the open PR and stops an auto-merge an earlier delivery queued", async () => {
+  const f = await fixture();
+  await writeFile(join(f.state, "pr"), "1");
+  const out = await runFixture(f, { classification:"success", autoMerge:false, findings:[], pendingDecisions:[{ id:"operator-auth", question:"Which operator authentication?", options:["tokens","none"] }] }, { TEST_PR_AUTO_MERGE:"1" });
+  assert.equal(out.ok, true);
+  assert.equal(out.mergeQueued, false);
+  const calls = (await readFile(join(f.state, "gh.log"), "utf8")).trim().split("\n").map((line) => JSON.parse(line));
+  assert.ok(calls.some((a) => a[0] === "pr" && a[1] === "comment"), JSON.stringify(calls));
+  assert.deepEqual(calls.filter((a) => a[0] === "pr" && a[1] === "merge"), [["pr", "merge", "42", "--disable-auto"]]);
 });
 
 test("retry recognizes an already merged PR without invoking merge again", async () => {

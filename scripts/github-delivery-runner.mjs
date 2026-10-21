@@ -253,6 +253,9 @@ if (pendingDecisions.length && pullRequest?.state === "OPEN") {
       ].join("\n")),
     ].join("\n"));
     run("gh", ["pr", "comment", String(pullRequest.number), "--body-file", commentPath]);
+    // An earlier delivery may have queued auto-merge on this PR.
+    const { autoMergeRequest } = JSON.parse(run("gh", ["pr", "view", String(pullRequest.number), "--json", "autoMergeRequest"]));
+    if (autoMergeRequest) run("gh", ["pr", "merge", String(pullRequest.number), "--disable-auto"]);
   } finally {
     await rm(commentDir, { recursive: true, force: true });
   }

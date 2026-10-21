@@ -15,10 +15,10 @@ export const canonicalRouting = {
   researcher: { provider: "codex", model: "gpt-6.1-sol" },
 };
 
-export function writeCanonicalRoutingConfig(home) {
+export function writeCanonicalRoutingConfig(home, roles = canonicalRouting) {
   const configDir = join(home, ".claude-octopus", "config");
   mkdirSync(configDir, { recursive: true });
-  writeFileSync(join(configDir, "providers.json"), JSON.stringify({ routing: { roles: canonicalRouting } }));
+  writeFileSync(join(configDir, "providers.json"), JSON.stringify({ routing: { roles } }));
 }
 
 export function withCanonicalRoutingHome(callback) {

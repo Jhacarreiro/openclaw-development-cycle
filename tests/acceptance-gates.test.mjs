@@ -4,7 +4,7 @@ import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test from "node:test";
-import { writeCanonicalRoutingConfig } from "./helpers/octopus-routing.mjs";
+import { canonicalRouting, writeCanonicalRoutingConfig } from "./helpers/octopus-routing.mjs";
 
 async function fixture(t, env = {}) {
   const root = await mkdtemp(join(tmpdir(), "development-cycle-gates-"));
@@ -104,27 +104,52 @@ test("a council review that answers on its second attempt validates the run", { 
   assert.equal(retried.status.phase, "council_validated", JSON.stringify(retried));
 });
 
-test("council seats follow the configured routing and Codex goes through the cycle's shim", { skip: process.platform !== "linux" }, async t => {
+for (const { name, roles, policy, members } of [
+  { name: "council seats follow the configured routing and Codex goes through the cycle's shim", roles: undefined, policy: "claude,commandcode:xai/grok-4.7,commandcode:xiaomi/mimo-v2.6-pro,commandcode:qwen/qwen3.8-max-0902,codex", members: "5" },
+  { name: "a routing with more than five models seats them all on a seven-member council", roles: { ...canonicalRouting, implementer: { provider: "commandcode", model: "deepseek/deepseek-v4-flash" } }, policy: "claude,commandcode:xai/grok-4.7,commandcode:xiaomi/mimo-v2.6-pro,commandcode:qwen/qwen3.8-max-0902,commandcode:deepseek/deepseek-v4-flash,codex", members: "7" },
+]) test(name, { skip: process.platform !== "linux" }, async t => {
   const octopusRoot = await mkdtemp(join(tmpdir(), "development-cycle-council-routing-"));
   t.after(() => rm(octopusRoot, { recursive: true, force: true }));
   const home = join(octopusRoot, "home");
-  writeCanonicalRoutingConfig(home);
+  writeCanonicalRoutingConfig(home, roles);
   const saved = { HOME: process.env.HOME, CODEX_HOME: process.env.CODEX_HOME, OCTOPUS_COUNCIL_AUTO_PROVIDERS: process.env.OCTOPUS_COUNCIL_AUTO_PROVIDERS };
   t.after(() => { for (const [key, value] of Object.entries(saved)) { if (value === undefined) delete process.env[key]; else process.env[key] = value; } });
   delete process.env.OCTOPUS_COUNCIL_AUTO_PROVIDERS;
   const { checkout, call, seed } = await fixture(t, { DEVELOPMENT_CYCLE_OCTOPUS_ROOT: octopusRoot, HOME: home, CODEX_HOME: "/elsewhere/codex" });
   await mkdir(join(octopusRoot, "scripts"), { recursive: true });
   const seen = join(octopusRoot, "seen.json");
-  await writeFile(join(octopusRoot, "scripts", "orchestrate.sh"), `#!/bin/sh\nnode -e 'const a=process.argv.slice(1);require("fs").writeFileSync(process.env.SEEN,JSON.stringify({providers:a[a.indexOf("--providers")+1],claude:process.env.OCTOPUS_CLAUDE_MODEL,codex:process.env.OCTOPUS_CODEX_MODEL,commandcode:process.env.OCTOPUS_COMMANDCODE_MODEL,codexHome:process.env.CODEX_HOME||null,codexBin:require("child_process").execSync("command -v codex",{encoding:"utf8"}).trim()}))' -- "$@"\n`, { mode: 0o755 });
+  await writeFile(join(octopusRoot, "scripts", "orchestrate.sh"), `#!/bin/sh\nnode -e 'const a=process.argv.slice(1);require("fs").writeFileSync(process.env.SEEN,JSON.stringify({providers:a[a.indexOf("--providers")+1],members:a[a.indexOf("--members")+1],policy:process.env.OCTOPUS_COUNCIL_DEFAULT_PROVIDERS,claude:process.env.OCTOPUS_CLAUDE_MODEL,codex:process.env.OCTOPUS_CODEX_MODEL,commandcode:process.env.OCTOPUS_COMMANDCODE_MODEL,codexHome:process.env.CODEX_HOME||null,codexBin:require("child_process").execSync("command -v codex",{encoding:"utf8"}).trim()}))' -- "$@"\n`, { mode: 0o755 });
   process.env.SEEN = seen;
   t.after(() => { delete process.env.SEEN; });
   await seed({ phase: "external_validation_passed", implementationAdapter: "octopus", outputPath: checkout });
   await call("reconcile", { autoRunCouncilReview: true, notifyMain: false, autoStopStalled: false });
   const launched = JSON.parse(await readFile(seen, "utf8"));
-  assert.equal(launched.providers, "claude,commandcode,codex");
-  assert.deepEqual([launched.claude, launched.commandcode, launched.codex], ["claude-sonnet-5-5", "xai/grok-4.7", "gpt-6.1-sol"]);
+  assert.equal(launched.providers, "auto");
+  assert.equal(launched.policy, policy);
+  assert.equal(launched.members, members);
+  assert.deepEqual([launched.claude, launched.commandcode, launched.codex], ["claude-sonnet-5-5", undefined, "gpt-6.1-sol"]);
   assert.equal(launched.codexHome, null);
   assert.equal(launched.codexBin, resolve("bin/codex"));
+});
+
+test("a routing with more models than Octopus can seat refuses the council instead of dropping one", { skip: process.platform !== "linux" }, async t => {
+  const octopusRoot = await mkdtemp(join(tmpdir(), "development-cycle-council-oversized-"));
+  t.after(() => rm(octopusRoot, { recursive: true, force: true }));
+  const home = join(octopusRoot, "home");
+  const roles = Object.fromEntries(Object.keys(canonicalRouting).map((role, index) => [role, { provider: "commandcode", model: `vendor/model-${index}` }]));
+  writeCanonicalRoutingConfig(home, roles);
+  const { checkout, call, seed } = await fixture(t, { DEVELOPMENT_CYCLE_OCTOPUS_ROOT: octopusRoot, HOME: home });
+  await mkdir(join(octopusRoot, "scripts"), { recursive: true });
+  const launched = join(octopusRoot, "launched");
+  await writeFile(join(octopusRoot, "scripts", "orchestrate.sh"), `#!/bin/sh\ntouch "${launched}"\n`, { mode: 0o755 });
+  await seed({ phase: "external_validation_passed", implementationAdapter: "octopus", outputPath: checkout });
+  const result = await call("reconcile", { autoRunCouncilReview: true, notifyMain: false, autoStopStalled: false });
+  assert.equal(result.councilEndgate.council.reason, "council_seats_exceed_octopus_limit", JSON.stringify(result));
+  assert.equal(result.councilEndgate.council.seatCount, Object.keys(canonicalRouting).length);
+  await assert.rejects(readFile(launched));
+  const again = await call("reconcile", { autoRunCouncilReview: true, notifyMain: false, autoStopStalled: false });
+  assert.equal(again.status.phase, "council_review_waiting_human", JSON.stringify(again));
+  assert.match(again.status.nextAction, /at most 7/);
 });
 
 for (const { name, verdicts, decision } of [

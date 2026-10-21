@@ -3,7 +3,7 @@ import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { DEFAULT_OCTOPUS_CONTEXT_BUDGET, DEFAULT_OCTOPUS_CORRECTION_ROUND_CAP } from "../config.js";
 
-const DEVELOPMENT_CYCLE_BIN_DIR = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", "bin");
+export const DEVELOPMENT_CYCLE_BIN_DIR = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", "bin");
 
 export type ImplementationAdapterKind = "command" | "octopus";
 export type ImplementationMode = "delivery" | "corrections";

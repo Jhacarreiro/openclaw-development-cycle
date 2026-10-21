@@ -88,6 +88,23 @@ export function createImplementationStatus(deps: ImplementationStatusDeps) {
           message: exitCode === 0 ? "Implementation direct runner exited successfully." : "Implementation direct runner exited non-zero: " + exitCode,
         });
       }
+      const interventionPath = String(session?.interventionPath || (statusPath ? join(dirname(String(statusPath)), "intervention.json") : ""));
+      const rawIntervention = !isCorrectionsRun && interventionPath ? await readJsonIfExists(interventionPath) : null;
+      const interventionQuestion = String(rawIntervention?.question || "").trim();
+      const normalizedIntervention = !isCorrectionsRun && rawIntervention && interventionQuestion ? {
+        schemaVersion: 1,
+        id: cleanId(rawIntervention.id || `intervention-${observedAttemptId || activeAttemptId || Date.now()}`, "intervention"),
+        status: "pending",
+        kind: String(rawIntervention.kind || "human_decision"),
+        question: interventionQuestion,
+        context: String(rawIntervention.context || ""),
+        options: Array.isArray(rawIntervention.options) ? rawIntervention.options.map(String).slice(0, 12) : [],
+        recommendedOption: rawIntervention.recommendedOption == null ? null : String(rawIntervention.recommendedOption),
+        sourceAttemptId: observedAttemptId || activeAttemptId || null,
+        sourcePath: interventionPath,
+        createdAt: String(rawIntervention.createdAt || new Date().toISOString()),
+      } : null;
+      const durableInterventionPath = join(dir, "implementation_intervention.json");
       if (exitCode === 0) {
         let outputHandoff: any = null;
         if (!isCorrectionsRun && String(session?.adapter || status?.implementationAdapter || "") === "octopus") {
@@ -118,27 +135,25 @@ export function createImplementationStatus(deps: ImplementationStatusDeps) {
                 ...(outputHandoff?.ok ? { outputPath: outputHandoff.outputPath, implementationOutputHandoff: outputHandoff } : {}),
               };
         const observerFinalization = await finalizeObserverSessions(dir, status, "completed");
-        return await cycleStatus(dir, { ...patch, observerFinalization });
+        // A seat that finished its work can still leave a decision it was not allowed to make. The delivery goes
+        // ahead, but the question is recorded and asked, and the delivery PR waits for it instead of merging.
+        const pendingDecision = patch.phase === "implementation_delivered" && normalizedIntervention && status?.pendingDecision?.id !== normalizedIntervention.id
+          ? normalizedIntervention : null;
+        if (pendingDecision) await saveJson(durableInterventionPath, pendingDecision);
+        const delivered = await cycleStatus(dir, { ...patch, observerFinalization, ...(pendingDecision ? { pendingDecision, pendingDecisionPath: durableInterventionPath } : {}) });
+        if (!pendingDecision) return delivered;
+        const optionText = pendingDecision.options.length ? `
+Options: ${pendingDecision.options.join(" | ")}` : "";
+        const notification = await sendCycleMessage({}, `🧑‍💻 Development Cycle delivered with a decision pending — ${status?.project || "project"}`, `Run: ${status?.runId || ""}
+Decision: ${pendingDecision.id}
+
+${pendingDecision.question}${optionText}
+
+The delivery PR stays open until this is answered.`);
+        return await cycleStatus(dir, { pendingDecisionNotification: notification });
       }
-      const interventionPath = String(session?.interventionPath || (statusPath ? join(dirname(String(statusPath)), "intervention.json") : ""));
-      const rawIntervention = !isCorrectionsRun && interventionPath ? await readJsonIfExists(interventionPath) : null;
-      const interventionQuestion = String(rawIntervention?.question || "").trim();
-      if (!isCorrectionsRun && rawIntervention && interventionQuestion) {
-        const interventionId = cleanId(rawIntervention.id || `intervention-${observedAttemptId || activeAttemptId || Date.now()}`, "intervention");
-        const normalizedIntervention = {
-          schemaVersion: 1,
-          id: interventionId,
-          status: "pending",
-          kind: String(rawIntervention.kind || "human_decision"),
-          question: interventionQuestion,
-          context: String(rawIntervention.context || ""),
-          options: Array.isArray(rawIntervention.options) ? rawIntervention.options.map(String).slice(0, 12) : [],
-          recommendedOption: rawIntervention.recommendedOption == null ? null : String(rawIntervention.recommendedOption),
-          sourceAttemptId: observedAttemptId || activeAttemptId || null,
-          sourcePath: interventionPath,
-          createdAt: String(rawIntervention.createdAt || new Date().toISOString()),
-        };
-        const durableInterventionPath = join(dir, "implementation_intervention.json");
+      if (normalizedIntervention) {
+        const interventionId = normalizedIntervention.id;
         await saveJson(durableInterventionPath, normalizedIntervention);
         const observerFinalization = await finalizeObserverSessions(dir, status, "waiting_human");
         const waiting = await cycleStatus(dir, {

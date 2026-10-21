@@ -239,6 +239,25 @@ if (targetBranch && req.classification === "success") {
   }
 }
 
+const pendingDecisions = Array.isArray(req.pendingDecisions) ? req.pendingDecisions : [];
+if (pendingDecisions.length && pullRequest?.state === "OPEN") {
+  const commentDir = await mkdtemp(join(tmpdir(), "development-cycle-pr-decision-"));
+  const commentPath = join(commentDir, "decision.md");
+  try {
+    await writeFile(commentPath, [
+      "Decision pending before merge. The implementation left a question it was not allowed to decide:",
+      ...pendingDecisions.map((decision) => [
+        "",
+        `**${safe(decision.id)}**: ${String(decision.question || "")}`,
+        ...(decision.options || []).map((option) => `- ${String(option)}`),
+      ].join("\n")),
+    ].join("\n"));
+    run("gh", ["pr", "comment", String(pullRequest.number), "--body-file", commentPath]);
+  } finally {
+    await rm(commentDir, { recursive: true, force: true });
+  }
+}
+
 let merged = pullRequest?.state === "MERGED";
 let mergeQueued = false;
 if (req.classification === "success" && req.autoMerge && !merged) {

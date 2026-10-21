@@ -157,7 +157,10 @@ export function createRepositoryDelivery(deps: RepositoryDeliveryDeps) {
       acceptedSourcePhase: classificationPhase,
       classification,
       baseBranch: String(params.repositoryBaseBranch || repositoryDeliveryConfig.baseBranch || "main"),
-      autoMerge: operation !== "status" && classification === "success" && repositoryDeliveryConfig.autoMergeSuccessful,
+      // A decision the implementation left for a person keeps the PR open for them to merge after answering.
+      autoMerge: operation !== "status" && classification === "success" && repositoryDeliveryConfig.autoMergeSuccessful && status?.pendingDecision?.status !== "pending",
+      pendingDecisions: status?.pendingDecision?.status === "pending"
+        ? [{ id: String(status.pendingDecision.id), question: String(status.pendingDecision.question), options: status.pendingDecision.options || [] }] : [],
       findings: repositoryFindings(status),
       ...(status?.followUp?.branch ? {
         targetBranch: String(status.followUp.branch),

@@ -116,7 +116,7 @@ export function createCouncil(deps: CouncilDeps) {
     const scriptPath = join(implementationConfig.octopusRoot, "scripts", "orchestrate.sh");
     // Seats follow the configured Octopus routing; without one, Octopus's own provider mix applies.
     const routedSeats = octopusCouncilSeats();
-    const councilProviders = String(params.councilProviders || params.councilAutoProviders || process.env.OCTOPUS_COUNCIL_AUTO_PROVIDERS || routedSeats?.providers || "claude,codex,opencode,openrouter");
+    const councilProviders = String(params.councilProviders || params.councilAutoProviders || process.env.OCTOPUS_COUNCIL_AUTO_PROVIDERS || routedSeats?.providers || "auto");
     const councilModelEnv: Record<string, string> = Object.fromEntries(Object.entries(routedSeats?.env || {}).filter(([name]) => !process.env[name]));
     const councilCodexModel = String(params.councilCodexModel || process.env.DEVELOPMENT_CYCLE_COUNCIL_CODEX_MODEL || "");
     if (councilCodexModel) councilModelEnv.OCTOPUS_CODEX_MODEL = councilCodexModel;
@@ -147,7 +147,8 @@ export function createCouncil(deps: CouncilDeps) {
       && respondedSeats.length > 0
       && respondedSeats.every((seat: any) => ["REVISE", "BLOCK", "STOP", "REJECT"].includes(String(seat?.verdict || "").toUpperCase()));
     const seatResponses = unanimousObjection ? (await Promise.all((await readdir(join(councilDir, "responses")).catch(() => [])).sort().map((name) => readTextIfExists(join(councilDir, "responses", name))))).join("\n") : "";
-    const councilDecision = unanimousObjection ? "revise" : parseCouncilDecision(synthesis, summary?.decision || summary?.verdict);
+    const hardVeto = respondedSeats.some((seat: any) => ["BLOCK", "STOP", "REJECT"].includes(String(seat?.verdict || "").toUpperCase()));
+    const councilDecision = unanimousObjection ? (hardVeto ? "stop" : "revise") : parseCouncilDecision(synthesis, summary?.decision || summary?.verdict);
     const needsCorrections = councilDecision === "revise" || councilDecision === "stop";
     const findings = extractCouncilFindings(synthesis || seatResponses || JSON.stringify(summary || {}));
     const ok = Boolean(summaryPath && (unanimousObjection || (summary?.status === "completed" && !execResult.failed)) && councilDecision !== "unknown");

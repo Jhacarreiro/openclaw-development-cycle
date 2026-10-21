@@ -145,7 +145,6 @@ function octopusRoutedSeatEnvironment(): Record<string, string> {
 
 // Council seats take each provider's model from the first review-type role routed to it.
 const COUNCIL_ROLE_PRIORITY = ["code-reviewer", "security-reviewer", "architect", "synthesizer", "researcher", "implementer-heavy", "strategist", "implementer"];
-const COUNCIL_MODEL_ENV: Record<string, string> = { claude: "OCTOPUS_CLAUDE_MODEL", codex: "OCTOPUS_CODEX_MODEL", commandcode: "OCTOPUS_COMMANDCODE_MODEL" };
 
 /**
  * The council's providers and per-provider models, derived from the same
@@ -168,7 +167,8 @@ export function octopusCouncilSeats(): { providers: string; env: Record<string, 
   }
   if (!models.size) return null;
   const env: Record<string, string> = {};
-  for (const [provider, model] of models) if (COUNCIL_MODEL_ENV[provider]) env[COUNCIL_MODEL_ENV[provider]] = model;
+  // Octopus reads each provider's model from OCTOPUS_<PROVIDER>_MODEL (cursor-agent -> OCTOPUS_CURSOR_AGENT_MODEL).
+  for (const [provider, model] of models) env[`OCTOPUS_${provider.toUpperCase().replace(/[^A-Z0-9]/g, "_")}_MODEL`] = model;
   return { providers: [...models.keys()].join(","), env };
 }
 

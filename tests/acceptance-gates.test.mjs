@@ -127,19 +127,23 @@ test("council seats follow the configured routing and Codex goes through the cyc
   assert.equal(launched.codexBin, resolve("bin/codex"));
 });
 
-test("a council whose answering seats all ask for changes sends the run to corrections", { skip: process.platform !== "linux" }, async t => {
+for (const { name, verdicts, decision } of [
+  { name: "a council whose answering seats all ask for changes sends the run to corrections", verdicts: ["REVISE", "REVISE", "REVISE"], decision: "revise" },
+  { name: "a unanimous objection that includes a veto stops the run instead of correcting it", verdicts: ["REVISE", "BLOCK", "REVISE"], decision: "stop" },
+]) test(name, { skip: process.platform !== "linux" }, async t => {
   const octopusRoot = await mkdtemp(join(tmpdir(), "development-cycle-council-objection-"));
   t.after(() => rm(octopusRoot, { recursive: true, force: true }));
   const { checkout, call, seed } = await fixture(t, { DEVELOPMENT_CYCLE_OCTOPUS_ROOT: octopusRoot });
   await mkdir(join(octopusRoot, "scripts"), { recursive: true });
   // What Octopus writes when its quorum answered but approved nothing: partial, no synthesis, exit 1.
-  const summary = JSON.stringify({ status: "partial", quorum: { required_non_chair: 2, received_non_chair: 2 }, seats: [{ status: "responded", verdict: "REVISE" }, { status: "responded", verdict: "REVISE" }, { status: "responded", verdict: "REVISE" }] });
+  const summary = JSON.stringify({ status: "partial", quorum: { required_non_chair: 2, received_non_chair: 2 }, seats: verdicts.map((verdict) => ({ status: "responded", verdict })) });
   await writeFile(join(octopusRoot, "scripts", "orchestrate.sh"), `#!/bin/sh\nwhile [ "$#" -gt 0 ]; do if [ "$1" = --output-dir ]; then output="$2"; break; fi; shift; done\nmkdir -p "$output/result/responses"\nprintf '%s' '${summary}' > "$output/result/summary.json"\nprintf '%s' 'HIGH: add() subtracts instead of adding. VERDICT: REVISE' > "$output/result/responses/00-code-reviewer.md"\nexit 1\n`, { mode: 0o755 });
   await seed({ phase: "external_validation_passed", implementationAdapter: "octopus", outputPath: checkout });
-  const result = await call("reconcile", { autoRunCouncilReview: true, autoCouncilCorrections: false, notifyMain: false, autoStopStalled: false });
+  const result = await call("reconcile", { autoRunCouncilReview: true, autoCouncilCorrections: decision === "stop", notifyMain: false, autoStopStalled: false });
   assert.equal(result.status.phase, "council_review_needs_corrections", JSON.stringify(result));
-  assert.equal(result.councilEndgate.council.decision, "revise");
+  assert.equal(result.councilEndgate.council.decision, decision);
   assert.ok(result.councilEndgate.council.findings.some((finding) => /subtracts/.test(finding)), JSON.stringify(result.councilEndgate.council.findings));
+  if (decision === "stop") assert.equal(result.councilEndgate.corrections ?? null, null);
 });
 
 test("revalidation clears the council cache and cannot consume an earlier review artifact", { skip: process.platform !== "linux" }, async t => {

@@ -171,8 +171,9 @@ export function loadDevelopmentCycleConfig(env: NodeJS.ProcessEnv = process.env)
     },
     runDriver: {
       enabled: boolean(env, "DEVELOPMENT_CYCLE_RUN_DRIVER_ENABLED", true),
-      // Final validation runs the delivered checkout's own scripts on the host, so running it without an explicit request is opt-in.
-      autoFinalSteps: boolean(env, "DEVELOPMENT_CYCLE_RUN_DRIVER_AUTO_FINAL_STEPS", false),
+      // Final validation runs the delivered checkout's own scripts on the host; operators who do not trust implementation
+      // output to that degree turn this off and validate explicitly.
+      autoFinalSteps: boolean(env, "DEVELOPMENT_CYCLE_RUN_DRIVER_AUTO_FINAL_STEPS", true),
       // Capped at a day: longer intervals overflow Node's timer and fire every millisecond.
       intervalSeconds: Math.min(positiveInteger(env, "DEVELOPMENT_CYCLE_RUN_DRIVER_INTERVAL_SECONDS", 120), 86400),
       maxIdleHours: positiveInteger(env, "DEVELOPMENT_CYCLE_RUN_DRIVER_MAX_IDLE_HOURS", 24),

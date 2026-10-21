@@ -66,10 +66,23 @@ export function createCouncil(deps: CouncilDeps) {
     return rows[0] || null;
   }
 
+  // A finding becomes an issue title, so markdown table rows and list emphasis are read as plain text,
+  // severity and finding first, location last.
+  function councilFindingText(line: string) {
+    const trimmed = line.trim();
+    if (trimmed.startsWith("|")) {
+      const cells = trimmed.replace(/^\|/, "").replace(/\|$/, "").split("|").map((cell) => cell.trim()).filter(Boolean);
+      if (/^\d+$/.test(cells[0] || "")) cells.shift();
+      if (cells.length >= 3 && !/^severity$/i.test(cells[0])) return `${cells[0]}: ${cells.slice(2).join(" | ")} (${cells[1]})`;
+      return cells.join(" | ");
+    }
+    return trimmed.replace(/^(?:[-*#>]+\s*|\d+[.)]\s+)+/, "").replace(/\*\*/g, "").trim();
+  }
+
   function extractCouncilFindings(text: string, max = 10) {
     const lines = String(text || "").split(/\r?\n/);
     const hits = lines.filter((line) => /\b(HIGH|MEDIUM|LOW|CRITICAL|Must fix|Fix before|Blocker|SAFE_MODE|OpenAPI|exitCode|403)\b/i.test(line.trim()))
-      .map((line) => line.trim().replace(/^[-*#\s]+/, ""))
+      .map(councilFindingText)
       .filter(Boolean);
     return [...new Set(hits)].slice(0, max);
   }

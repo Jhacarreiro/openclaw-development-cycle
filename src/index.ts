@@ -28,10 +28,13 @@ import { createRuntimeObservation } from "./cycle/runtime-observation.js";
 import { createFinalValidation } from "./cycle/final-validation.js";
 import { createCouncil } from "./cycle/council.js";
 import { createStop } from "./cycle/stop.js";
+import { createRunDriver, projectsWithRuns, runToDrive } from "./cycle/run-driver.js";
 
 const lifecycleLockHeld = Symbol("developmentCycleLifecycleLockHeld");
 const resolvedCycleDir = Symbol("developmentCycleResolvedCycleDir");
 const interventionResume = Symbol("developmentCycleInterventionResume");
+const followUpOnlyIfSourceIsLatest = Symbol("developmentCycleFollowUpOnlyIfSourceIsLatest");
+const drivenOnlyWhileLatest = Symbol("developmentCycleDrivenOnlyWhileLatest");
 const lifecycleLockTimeoutMs = 30000;
 
 type CycleParameters = Partial<Static<typeof cycleParameters>> & {
@@ -39,6 +42,8 @@ type CycleParameters = Partial<Static<typeof cycleParameters>> & {
   [resolvedCycleDir]?: string;
   [interventionResume]?: { id: string; response: string; responsePath: string; answeredAt: string; sourceAttemptId: string | null };
   automaticRecovery?: boolean;
+  [followUpOnlyIfSourceIsLatest]?: boolean;
+  [drivenOnlyWhileLatest]?: boolean;
 };
 
 interface CycleResult {
@@ -307,6 +312,14 @@ async function projectCycle(params: CycleParameters | null | undefined): Promise
     };
   }
 
+  // A newer run of the project can start while the run driver reconciles this one; the driver then validates,
+  // reviews, stops, launches, relaunches or delivers nothing here, since those steps would compete with the newer
+  // run. Checked on entry and again before each step that can run long or reach outside the run.
+  const supersededForDriver = async () => params[drivenOnlyWhileLatest] === true && basename(await latestRunDir(rawProject).catch(() => "")) !== runId;
+  if (action === "reconcile" && await supersededForDriver()) {
+    return { ok: true, readOnly: true, project, runId, dir, status, superseded: true, nextAction: "A newer run of this project exists; this run is left for an operator." };
+  }
+
   if (action === "reconcile" && status?.followUp && ["", "plan_ready_for_implementation"].includes(String(status?.phase || ""))) {
     const continued = await continueFollowUp(dir, rawProject);
     return { ...continued, project, runId, dir, resumedFollowUp: true };
@@ -331,7 +344,9 @@ async function projectCycle(params: CycleParameters | null | undefined): Promise
       const earlyPolicy = await dcPersistFailure(dir, effectiveStatus, await dcClassify(dir, { ...effectiveStatus, project, runId }, earlyRuntime));
       effectiveStatus = earlyPolicy.status || effectiveStatus;
     }
-    const automaticRecovery = await maybeAutoRecoverImplementationFailure(dir, { ...effectiveStatus, project, runId }, params);
+    const automaticRecovery = await supersededForDriver()
+      ? { attempted: false, status: null, relaunch: null }
+      : await maybeAutoRecoverImplementationFailure(dir, { ...effectiveStatus, project, runId }, params);
     effectiveStatus = automaticRecovery.status || effectiveStatus;
     if (automaticRecovery.attempted && automaticRecovery.relaunch?.ok) {
       const files = (await readdir(dir).catch(() => [])).sort();
@@ -341,16 +356,24 @@ async function projectCycle(params: CycleParameters | null | undefined): Promise
     const repositoryDeliveryReconcile = await reconcileRepositoryDeliveryState(dir, { ...effectiveStatus, project, runId }, params);
     effectiveStatus = repositoryDeliveryReconcile?.status || effectiveStatus;
     let automaticValidation: any = null;
-    if (params.autoRunFinalValidation === true && ["implementation_delivered", "corrections_completed"].includes(String(effectiveStatus?.phase || "")) && !effectiveStatus?.externalValidation) {
+    if (params.autoRunFinalValidation === true && ["implementation_delivered", "corrections_completed"].includes(String(effectiveStatus?.phase || "")) && !effectiveStatus?.externalValidation && !(await supersededForDriver())) {
       automaticValidation = await runExternalFinalValidation(dir, { ...effectiveStatus, project, runId }, params, "implementation_delivered");
       effectiveStatus = automaticValidation.status || effectiveStatus;
     }
     let councilEndgate: any = null;
-    if (params.autoRunCouncilReview === true) {
+    if (params.autoRunCouncilReview === true && !(await supersededForDriver())) {
       councilEndgate = await maybeRunCouncilEndgate(dir, { ...effectiveStatus, project, runId }, params);
       effectiveStatus = councilEndgate?.status || effectiveStatus;
     }
-    const stall = await maybeHandleStalledRun(dir, effectiveStatus, params);
+    let automaticFinalDelivery: any = null;
+    // Validation and council review can take long enough for a newer run of the project to start; a superseded
+    // run is left for an operator instead of publishing its output.
+    if (params.autoFinalizeDelivery === true && effectiveStatus?.phase === "council_validated"
+      && basename(await latestRunDir(rawProject).catch(() => "")) === runId) {
+      automaticFinalDelivery = await finalizeRepositoryDeliveryState(dir, { ...effectiveStatus, project, runId }, params);
+      effectiveStatus = automaticFinalDelivery.status || effectiveStatus;
+    }
+    const stall = await supersededForDriver() ? null : await maybeHandleStalledRun(dir, effectiveStatus, params);
     effectiveStatus = stall?.status || effectiveStatus;
     const files = (await readdir(dir).catch(() => [])).sort();
     const runtime = await cycleRuntimeSummary(dir, effectiveStatus);
@@ -368,7 +391,7 @@ async function projectCycle(params: CycleParameters | null | undefined): Promise
         },
         nextAction: "No deliverable Octopus output exists for this attempt. Start a new clean plan/implementation handoff after fixing the blocker.",
       });
-    } else if (repositoryDeliveryConfig.enabled && failureDeliveryPhase) {
+    } else if (repositoryDeliveryConfig.enabled && failureDeliveryPhase && !(await supersededForDriver())) {
       automaticRepositoryDelivery = await finalizeRepositoryDeliveryState(dir, { ...effectiveStatus, project, runId }, params);
       effectiveStatus = automaticRepositoryDelivery.status || effectiveStatus;
     }
@@ -381,7 +404,7 @@ async function projectCycle(params: CycleParameters | null | undefined): Promise
       // The residue of a review that did not converge is the next run's work:
       // continue on the same PR branch until the issues close or the
       // follow-up limit leaves them to an operator.
-      automaticFollowUp = await projectCycle({ action: "start_followup", project: rawProject, fromRunId: runId, implementationAdapter: effectiveStatus?.implementationAdapter });
+      automaticFollowUp = await projectCycle({ action: "start_followup", project: rawProject, fromRunId: runId, implementationAdapter: effectiveStatus?.implementationAdapter, [followUpOnlyIfSourceIsLatest]: true });
       const error = String(automaticFollowUp?.error || "followup_start_failed");
       const retryable = ["followup_issue_lookup_failed", "followup_delivered_checkout_unreadable", "lifecycle_action_busy", "lifecycle_action_lock_lost"].includes(error);
       // Once linked, the follow-up exists even if its launch failed; that run's
@@ -395,7 +418,7 @@ async function projectCycle(params: CycleParameters | null | undefined): Promise
             : `Follow-up run could not start (${error}); the issues stay open on the delivery PR.` });
     }
     const mainUpdate = await dcNotifyMain(dir, project, runId, effectiveStatus, params, runtimeEvent);
-    return { ok: true, readOnly: false, project, runId, dir, status: effectiveStatus, files, runtime, stall, automaticValidation, councilEndgate, repositoryDeliveryReconcile, automaticRepositoryDelivery, automaticFollowUp, failurePolicy: runtimeEvent, mainUpdate };
+    return { ok: true, readOnly: false, project, runId, dir, status: effectiveStatus, files, runtime, stall, automaticValidation, councilEndgate, automaticFinalDelivery, repositoryDeliveryReconcile, automaticRepositoryDelivery, automaticFollowUp, failurePolicy: runtimeEvent, mainUpdate };
   }
 
   const transition = checkActionTransition(action, status?.phase);
@@ -814,6 +837,11 @@ Create or validate the implementation plan only. Do not implement. The plan must
     // A refused follow-up leaves no status.json, so the directory is never
     // taken for a run.
     if (!prepared.ok) return { project, runId: null, ...prepared };
+    // Checking the delivery PR and its issues takes a while; an automatic follow-up whose source was superseded by a
+    // newer run meanwhile is not started, so the project never ends up with two active runs.
+    if (params[followUpOnlyIfSourceIsLatest] === true && basename(await latestRunDir(rawProject).catch(() => "")) !== String(params.fromRunId || "")) {
+      return { ok: false, project, runId: null, error: "followup_source_superseded" };
+    }
     // Link both runs before anything launches: after a restart the source
     // sees its follow-up instead of creating a second one, and the follow-up's
     // own reconcile finishes recording and launching it.
@@ -875,6 +903,7 @@ const cycleParameters = Type.Object({
   autoStopStalled: Type.Optional(Type.Boolean()),
   autoRunFinalValidation: Type.Optional(Type.Boolean()),
   autoRunCouncilReview: Type.Optional(Type.Boolean()),
+  autoFinalizeDelivery: Type.Optional(Type.Boolean()),
   autoCouncilCorrections: Type.Optional(Type.Boolean()),
   autoCouncilCorrectionsMax: Type.Optional(Type.Number()),
   councilDepth: Type.Optional(Type.String()),
@@ -902,7 +931,7 @@ const cycleParameters = Type.Object({
   repositoryDeliveryTimeoutMs: Type.Optional(Type.Number()),
 });
 
-export default defineToolPlugin({
+const developmentCyclePlugin = defineToolPlugin({
   id: "development-cycle",
   name: "Development Cycle",
   description: "Adapter-agnostic supervised development cycles for OpenClaw with durable state, process supervision, validation gates, and correction loops.",
@@ -926,3 +955,21 @@ export default defineToolPlugin({
     }),
   ],
 });
+
+// The cycle drives its own open runs: after a restart or a missed event nothing else may call reconcile. When the
+// operator opts in, the steps after delivery (validation, council review, repository delivery) no longer wait on an agent.
+const runDriverConfig = developmentCycleConfig.runDriver;
+const runDriver = createRunDriver({
+  intervalMs: runDriverConfig.intervalSeconds * 1000,
+  maxIdleMs: runDriverConfig.maxIdleHours * 3600 * 1000,
+  listProjects: () => projectsWithRuns(join(cycleRoot, "runs")),
+  resolveRun: (project) => runToDrive(project, latestRunDir, runDriverConfig.maxIdleHours * 3600 * 1000),
+  drive: ({ project, runId }) => projectCycle({ action: "reconcile", project, runId, [drivenOnlyWhileLatest]: true, autoStopStalled: runDriverConfig.autoFinalSteps, autoRunFinalValidation: runDriverConfig.autoFinalSteps, autoRunCouncilReview: runDriverConfig.autoFinalSteps, autoFinalizeDelivery: runDriverConfig.autoFinalSteps }),
+});
+const registerTools = developmentCyclePlugin.register.bind(developmentCyclePlugin);
+developmentCyclePlugin.register = (api: any) => {
+  if (runDriverConfig.enabled) api.registerService?.({ id: "development-cycle-run-driver", start: async () => runDriver.start(), stop: async () => runDriver.stop() });
+  return registerTools(api);
+};
+
+export default developmentCyclePlugin;

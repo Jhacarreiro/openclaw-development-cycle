@@ -28,6 +28,12 @@ export interface DevelopmentCycleConfig {
     followUpAutoStart: boolean;
     followUpMaxGenerations: number;
   };
+  runDriver: {
+    enabled: boolean;
+    autoFinalSteps: boolean;
+    intervalSeconds: number;
+    maxIdleHours: number;
+  };
   notifications: {
     enabled: boolean;
     channel: string;
@@ -162,6 +168,15 @@ export function loadDevelopmentCycleConfig(env: NodeJS.ProcessEnv = process.env)
       baseBranch: text(env, "DEVELOPMENT_CYCLE_REPOSITORY_DELIVERY_BASE_BRANCH", "main"),
       followUpAutoStart: boolean(env, "DEVELOPMENT_CYCLE_FOLLOWUP_AUTO_START", true),
       followUpMaxGenerations: positiveInteger(env, "DEVELOPMENT_CYCLE_FOLLOWUP_MAX_GENERATIONS", 2),
+    },
+    runDriver: {
+      enabled: boolean(env, "DEVELOPMENT_CYCLE_RUN_DRIVER_ENABLED", true),
+      // Final validation runs the delivered checkout's own scripts on the host; operators who do not trust implementation
+      // output to that degree turn this off and validate explicitly.
+      autoFinalSteps: boolean(env, "DEVELOPMENT_CYCLE_RUN_DRIVER_AUTO_FINAL_STEPS", true),
+      // Capped at a day: longer intervals overflow Node's timer and fire every millisecond.
+      intervalSeconds: Math.min(positiveInteger(env, "DEVELOPMENT_CYCLE_RUN_DRIVER_INTERVAL_SECONDS", 120), 86400),
+      maxIdleHours: positiveInteger(env, "DEVELOPMENT_CYCLE_RUN_DRIVER_MAX_IDLE_HOURS", 24),
     },
     notifications: {
       enabled: boolean(env, "DEVELOPMENT_CYCLE_NOTIFICATIONS_ENABLED", false),

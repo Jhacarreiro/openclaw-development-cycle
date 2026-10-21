@@ -121,7 +121,9 @@ export function createCouncil(deps: CouncilDeps) {
     const councilProviders = explicitProviders || routedSeats?.providers || "auto";
     const councilModelEnv: Record<string, string> = Object.fromEntries(Object.entries(routedSeats?.env || {}).filter(([name]) => !process.env[name]));
     if (!explicitProviders && routedSeats && !process.env.OCTOPUS_COUNCIL_DEFAULT_PROVIDERS) councilModelEnv.OCTOPUS_COUNCIL_DEFAULT_PROVIDERS = routedSeats.providers;
-    const councilMembers = Number(params.councilMembers) || Math.max(5, routedSeats ? routedSeats.providers.split(",").length : 0);
+    // Octopus seats 3, 5 or 7 members; take the smallest that holds every routed seat.
+    const routedSeatCount = routedSeats ? routedSeats.providers.split(",").length : 0;
+    const councilMembers = params.councilMembers || (routedSeatCount > 5 ? 7 : 5);
     const councilCodexModel = String(params.councilCodexModel || process.env.DEVELOPMENT_CYCLE_COUNCIL_CODEX_MODEL || "");
     if (councilCodexModel) councilModelEnv.OCTOPUS_CODEX_MODEL = councilCodexModel;
     const args = ["--dir", projectRoot, "council", "--goal", "review", "--domain", "security", "--style", "red-team", "--depth", String(params.councilDepth || "standard"), "--members", String(councilMembers), "--providers", explicitProviders || "auto", "--implement", "never", "--worktree", "off", "--max-cost", String(params.councilMaxCost || "2.00"), "--output-dir", outputRoot, "--json", input.task];

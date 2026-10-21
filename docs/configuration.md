@@ -123,7 +123,7 @@ Gateway connection settings are read when each queued notification is delivered:
 
 Messages are persisted under `<state-root>/notification-outbox/`, queued while Development Cycle actions are active, and drained after the active-action count reaches zero. Startup and a 30-second scan recover pending jobs. Delivery retries up to five times with exponential backoff (capped at five minutes); exhausted jobs are retained with `failed: true` and `lastResult`. Gateway delivery failures are recorded without failing the lifecycle action; phase notification results are appended to `phase_notification_events.jsonl`. Recovery provides at least once delivery, so a crash between sending and acknowledgement may cause a duplicate. Gateway tokens are read at delivery time and are not stored in jobs.
 
-The runner supervisor uses the same Gateway URL precedence for its best-effort exit callback. It receives the current connection settings when each runner is launched and sends the callback after cleaning that runner's process group.
+The runner supervisor uses the same Gateway URL precedence for its best-effort exit callback. It receives the current connection settings when each runner is launched and sends the callback after cleaning that runner's session.
 
 Per-call values take precedence:
 

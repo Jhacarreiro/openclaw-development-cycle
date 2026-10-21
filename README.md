@@ -149,7 +149,7 @@ stop
 | `start_implementation` | Launch the configured adapter. |
 | `status` | Read persisted state without mutation. |
 | `reconcile` | Refresh runtime state and apply enabled follow-up behavior. |
-| `stop_implementation` | Stop the supervised process group. |
+| `stop_implementation` | Stop the supervised runner session (its process group and any subtasks in their own groups). |
 | `answer_intervention` | Answer a pending implementation intervention and relaunch the same approved plan with the response. |
 | `resume_finalization` | Revalidate a preserved Octopus output after a narrowly classified review-infrastructure-only failure; never relaunches implementation. |
 | `record_delivery` | Record externally supplied delivery evidence. |
@@ -239,7 +239,7 @@ Notification delivery uses `OPENCLAW_GATEWAY_TOKEN` for bearer authentication wh
 
 Gateway message delivery is deferred until the current `development_cycle` tool execution has returned. Notifications are saved under `<state-root>/notification-outbox/` before they are queued, then drained when the active-action count reaches zero. Pending jobs are recovered when the plugin starts and checked every 30 seconds. Failed delivery retries up to five times with backoff; exhausted jobs remain on disk for inspection. Delivery is at least once: a crash after the Gateway sends a message but before acknowledgement is saved can cause a duplicate. Phase delivery results are appended asynchronously to `phase_notification_events.jsonl`.
 
-The supervisor performs one best-effort `reconcile` callback through the configured Gateway after runner exit and process-group cleanup. This lets the control plane observe terminal runner state without polling. For one narrowly classified Octopus planner-reconsideration contract failure, `reconcile` may automatically relaunch the same approved plan exactly once, but only when the attempt worktree is pristine, its HEAD still matches the source checkout, and there is no pending human intervention. Unknown failures, dirty/committed worktrees, interventions, or a second occurrence fail closed and require normal operator handling. Recovery events are appended to `automatic_recovery_events.jsonl`.
+The supervisor performs one best-effort `reconcile` callback through the configured Gateway after runner exit and cleanup of the runner's session. This lets the control plane observe terminal runner state without polling. For one narrowly classified Octopus planner-reconsideration contract failure, `reconcile` may automatically relaunch the same approved plan exactly once, but only when the attempt worktree is pristine, its HEAD still matches the source checkout, and there is no pending human intervention. Unknown failures, dirty/committed worktrees, interventions, or a second occurrence fail closed and require normal operator handling. Recovery events are appended to `automatic_recovery_events.jsonl`.
 
 ## Safety model
 
@@ -248,7 +248,7 @@ The supervisor performs one best-effort `reconcile` callback through the configu
 - project documentation and source checkout paths are separate;
 - JSON state writes are atomic;
 - adapter arguments and environment values are shell-quoted;
-- child work is supervised as a process group;
+- child work is supervised as the runner's session, including subtasks that start process groups of their own;
 - final validation remains explicit in durable state even when the decision is produced automatically;
 - no credentials, private addresses, or operator-specific paths are embedded.
 

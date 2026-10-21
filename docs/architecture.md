@@ -8,7 +8,7 @@ OpenClaw agent
      -> core state machine
      -> filesystem store
      -> implementation adapter
-     -> process-group supervisor
+     -> runner-session supervisor
      -> optional observer
      -> optional external gate
      -> optional OpenClaw channel notification
@@ -75,7 +75,7 @@ Typed services for durable notification delivery, Linux process identities and s
 
 ### `runner-supervisor.py`
 
-A persistent Python subreaper that launches process groups, records PID and heartbeat state, and cleans residual descendants.
+A persistent Python subreaper that launches each runner as the leader of its own session, records PID and heartbeat state, and cleans residual session members.
 
 ## Adapter request
 
@@ -161,14 +161,14 @@ Revalidation clears the earlier council verdict. Each council invocation searche
 
 The packaged supervisor:
 
-- creates a process group;
+- starts each runner in a new session, so its pid is both its process group and its session;
 - persists runner identity and heartbeat state;
 - captures stdout and stderr;
 - records terminal exit state;
-- stops the process group with `SIGTERM`, then `SIGKILL` when necessary;
+- stops the runner's process group and every other member of its session with `SIGTERM`, then `SIGKILL` when necessary;
 - acts as a subreaper to avoid orphaned descendants.
 
-Cancellation checks the boot ID and process start time before signalling a persisted PID/process group. GNU `timeout` bounds validation, council and delivery process groups, including their descendants. `bin/bounded-log.py` retains two files of at most 16 MiB per runner stream, and tail reads allocate a bounded buffer. The supervisor sends exit callbacks after residual cleanup, outside the runner group.
+Cancellation checks the boot ID and process start time before signalling a persisted PID/process group, and signals the rest of the session only when the persisted identity shows the runner leads it. After the runner has exited, a stop signals only session members on the same boot that carry the launch's `DEVELOPMENT_CYCLE_RUN_ATTEMPT` marker, since the session id alone no longer proves ownership. Observation counts the same session as the run. GNU `timeout` bounds validation, council and delivery process groups, including their descendants. `bin/bounded-log.py` retains two files of at most 16 MiB per runner stream, and tail reads allocate a bounded buffer. The supervisor sends exit callbacks after residual cleanup, outside the runner session.
 
 ## Trust boundaries
 

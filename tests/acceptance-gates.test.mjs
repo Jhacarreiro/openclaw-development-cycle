@@ -147,6 +147,9 @@ test("a routing with more models than Octopus can seat refuses the council inste
   assert.equal(result.councilEndgate.council.reason, "council_seats_exceed_octopus_limit", JSON.stringify(result));
   assert.equal(result.councilEndgate.council.seatCount, Object.keys(canonicalRouting).length);
   await assert.rejects(readFile(launched));
+  const again = await call("reconcile", { autoRunCouncilReview: true, notifyMain: false, autoStopStalled: false });
+  assert.equal(again.status.phase, "council_review_waiting_human", JSON.stringify(again));
+  assert.match(again.status.nextAction, /at most 7/);
 });
 
 for (const { name, verdicts, decision } of [

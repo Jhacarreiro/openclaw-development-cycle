@@ -125,7 +125,11 @@ export function createCouncil(deps: CouncilDeps) {
     // and refuse a policy no supported size can hold rather than silently leave a model out.
     const effectivePolicy = explicitProviders && explicitProviders !== "auto" ? explicitProviders : process.env.OCTOPUS_COUNCIL_DEFAULT_PROVIDERS || routedSeats?.providers || "";
     const seatCount = effectivePolicy.split(/[\s,]+/).filter(Boolean).length;
-    if (!params.councilMembers && seatCount > 7) return { ok: false, skipped: true, reason: "council_seats_exceed_octopus_limit", seatCount, policy: effectivePolicy, nextAction: "Octopus seats at most 7 council members; route fewer distinct models or set councilMembers." };
+    if (!params.councilMembers && seatCount > 7) {
+      const nextAction = `Octopus seats at most 7 council members and the council policy has ${seatCount}; route fewer distinct models or set councilMembers.`;
+      const next = await cycleStatus(dir, { phase: "council_review_waiting_human", owner: "main", ok: false, councilReviewBlocked: "council_seats_exceed_octopus_limit", nextAction });
+      return { ok: false, skipped: true, reason: "council_seats_exceed_octopus_limit", seatCount, policy: effectivePolicy, nextAction, status: next };
+    }
     const councilMembers = params.councilMembers || (seatCount > 5 ? 7 : 5);
     const councilCodexModel = String(params.councilCodexModel || process.env.DEVELOPMENT_CYCLE_COUNCIL_CODEX_MODEL || "");
     if (councilCodexModel) councilModelEnv.OCTOPUS_CODEX_MODEL = councilCodexModel;

@@ -11,7 +11,8 @@ export async function readProcessIdentity(pid: number): Promise<ProcessIdentity 
   try {
     const text = await readFile(`/proc/${pid}/stat`, "utf8");
     const fields = text.slice(text.lastIndexOf(")") + 2).trim().split(/\s+/);
-    if (fields[0] === "Z" || !fields[19]) return null;
+    // An exiting task reports group and session 0 before it turns zombie; it is gone, not a different process.
+    if (["Z", "X", "x"].includes(fields[0]) || !fields[19] || Number(fields[2]) === 0 || Number(fields[3]) === 0) return null;
     return { pid, pgid: Number(fields[2]), sid: Number(fields[3]), startTime: fields[19], bootId: (await readFile("/proc/sys/kernel/random/boot_id", "utf8")).trim() };
   } catch (error) {
     if (["ENOENT", "ESRCH"].includes(String((error as NodeJS.ErrnoException)?.code))) return null;

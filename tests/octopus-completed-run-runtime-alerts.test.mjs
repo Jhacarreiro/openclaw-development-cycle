@@ -99,7 +99,7 @@ async function reconcileCompletedOctopusRun(t, stderrLines, { intervention } = {
 
 test("A run Octopus completed after its review converged goes on to final validation despite review warnings about timed-out providers", async (t) => {
   const status = await reconcileCompletedOctopusRun(t, [
-    // Lines from run 8kv859: Octopus reports how many reviewers were missing,
+    // Octopus reports how many reviewers were missing,
     // failed or timed out, including when that count is zero.
     "\u001b[0;34m[2026-10-20 16:47:29]\u001b[0m \u001b[1;33mWARN\u001b[0m: Contextual code review warning: Round 1 was partial: 0 provider(s) missing/failed/timed out, 1 provider output(s) had possible unparsed findings.",
     "\u001b[0;34m[2026-10-20 17:17:18]\u001b[0m \u001b[0;32mINFO\u001b[0m: Contextual code review findings: /tmp/review-findings.json (normal=0)",

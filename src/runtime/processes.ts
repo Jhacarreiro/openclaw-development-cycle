@@ -1,4 +1,4 @@
-import { readFile } from "node:fs/promises";
+import { readdir, readFile } from "node:fs/promises";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -19,22 +19,43 @@ export async function readProcessIdentity(pid: number): Promise<ProcessIdentity 
 export function sameProcess(left: ProcessIdentity | null | undefined, right: ProcessIdentity | null | undefined): boolean {
   return Boolean(left && right && left.pid === right.pid && left.pgid === right.pgid && left.startTime === right.startTime && left.bootId === right.bootId);
 }
-export async function stopVerifiedProcessGroup(expected: ProcessIdentity | null | undefined, readIdentity = readProcessIdentity, signal: (pid: number, signal: NodeJS.Signals) => boolean = process.kill.bind(process), graceMs = 5000) {
+/**
+ * Live processes in a session. Runners lead their own session, and Octopus starts some subtasks in
+ * process groups of their own that outlive their parent there, so the group alone does not hold the run.
+ */
+export async function sessionMembers(sid: number): Promise<number[]> {
+  const members: number[] = [];
+  for (const name of await readdir("/proc").catch(() => [] as string[])) {
+    if (!/^\d+$/.test(name)) continue;
+    try {
+      const text = await readFile(`/proc/${name}/stat`, "utf8");
+      const fields = text.slice(text.lastIndexOf(")") + 2).trim().split(/\s+/);
+      if (fields[0] !== "Z" && Number(fields[3]) === sid) members.push(Number(name));
+    } catch {}
+  }
+  return members;
+}
+export async function stopVerifiedProcessGroup(expected: ProcessIdentity | null | undefined, readIdentity = readProcessIdentity, signal: (pid: number, signal: NodeJS.Signals) => boolean = process.kill.bind(process), graceMs = 5000, listSession = sessionMembers) {
   if (!expected) return { ok: false, reason: "runner_identity_missing" };
   const current = await readIdentity(expected.pid);
   if (!current) return { ok: true, skipped: true, reason: "runner_already_exited" };
   if (!sameProcess(expected, current) || expected.pid !== expected.pgid) return { ok: false, reason: "runner_identity_changed" };
-  signal(-expected.pgid, "SIGTERM");
+  const signalRun = async (name: NodeJS.Signals) => {
+    signal(-expected.pgid, name);
+    for (const pid of await listSession(expected.pid)) if (pid !== expected.pid) { try { signal(pid, name); } catch {} }
+  };
+  await signalRun("SIGTERM");
   const deadline = Date.now() + graceMs;
   while (Date.now() < deadline) {
     const remaining = await readIdentity(expected.pid);
-    if (!remaining) return { ok: true };
-    if (!sameProcess(expected, remaining)) return { ok: false, reason: "runner_identity_changed" };
+    if (remaining && !sameProcess(expected, remaining)) return { ok: false, reason: "runner_identity_changed" };
+    if (!remaining && !(await listSession(expected.pid)).length) return { ok: true };
     await sleep(50);
   }
   const finalIdentity = await readIdentity(expected.pid);
   if (finalIdentity && !sameProcess(expected, finalIdentity)) return { ok: false, reason: "runner_identity_changed" };
-  if (finalIdentity) signal(-expected.pgid, "SIGKILL");
+  if (finalIdentity) await signalRun("SIGKILL");
+  else for (const pid of await listSession(expected.pid)) { try { signal(pid, "SIGKILL"); } catch {} }
   return { ok: true };
 }
 

@@ -88,8 +88,10 @@ export function createRepositoryDelivery(deps: RepositoryDeliveryDeps) {
   }
 
   function repositoryFindings(status: any, max = 12) {
-    const raw = [...(status?.councilReviewFindings || [])];
     const residue = status?.reviewNonConvergence?.ok && Array.isArray(status.reviewNonConvergence.remaining) ? status.reviewNonConvergence.remaining : null;
+    // When corrections did not converge, the council findings were their input and the review's residue is what is
+    // left of them, so only the residue becomes issues.
+    const raw = residue ? [] : [...(status?.councilReviewFindings || [])];
     if (residue) {
       // One issue per finding the review left blocking.
       for (const f of residue) raw.push(`${f.title}${f.file ? ` (${f.file}${f.line ? `:${f.line}` : ""})` : ""}${f.detail ? `: ${f.detail}` : ""}`);

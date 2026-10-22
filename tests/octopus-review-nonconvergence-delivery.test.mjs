@@ -23,7 +23,8 @@ function planText(projectRoot, wikiPath) {
 
 // Runs a failed Octopus attempt that left a partial worktree and the given
 // stderr, then reconciles it; returns the run status and the delivery request.
-async function reconcileFailedOctopusRun(t, stderrLines) {
+// With `corrections`, the attempt is a council corrections run instead.
+async function reconcileFailedOctopusRun(t, stderrLines, { corrections = false } = {}) {
   const root = join(tmpdir(), `development-cycle-octopus-nonconvergence-${process.pid}-${Date.now()}`);
   t.after(() => rm(root, { recursive: true, force: true }));
   const home = join(root, "home");
@@ -71,7 +72,7 @@ async function reconcileFailedOctopusRun(t, stderrLines) {
   let tool;
   plugin.register({ pluginConfig: {}, registerTool(v) { tool = v; } });
   const params = { project, runId, projectRoot: checkout, projectWikiPath };
-  detailsOf(await tool.execute("request", { action: "request_plan", ...params }, undefined, undefined));
+  const requested = detailsOf(await tool.execute("request", { action: "request_plan", ...params }, undefined, undefined));
   detailsOf(await tool.execute("record", { action: "record_plan", ...params, planText: planText(checkout, projectWikiPath) }, undefined, undefined));
   const launched = detailsOf(await tool.execute("launch", { action: "start_implementation", ...params, implementationAdapter: "octopus" }, undefined, undefined));
   const attemptId = launched.implementationAttemptId;
@@ -99,6 +100,18 @@ async function reconcileFailedOctopusRun(t, stderrLines) {
   await writeFile(session.exitCodePath, "8\n");
   await writeFile(session.exitedAtPath, "2026-08-30T06:30:00Z\n");
   await writeFile(launched.directImplementationStatus, JSON.stringify({ ...session, status: "failed", launchState: "exited", exitCode: 8, exitedAt: "2026-08-30T06:30:00Z" }, null, 2));
+  if (corrections) {
+    const statusPath = join(requested.dir, "status.json");
+    const current = JSON.parse(await readFile(statusPath, "utf8"));
+    await writeFile(statusPath, JSON.stringify({
+      ...current,
+      phase: "corrections_launched",
+      owner: "implementation",
+      correctionsAttemptId: attemptId,
+      directCorrectionsStatus: launched.directImplementationStatus,
+      councilReviewFindings: ["Medium: The council finding these corrections were asked to fix. (`src/old.ts`)"],
+    }, null, 2));
+  }
 
   const reconciled = detailsOf(await tool.execute("reconcile", {
     action: "reconcile", ...params, notifyMain: false, autoStopStalled: false, autoRunFinalValidation: false, autoRunCouncilReview: false,
@@ -147,4 +160,12 @@ test("A run that fails for another reason after a review is classified by that f
   ]);
   assert.equal(status.failureClass, "local_runtime_fault");
   assert.deepEqual(request.findings, []);
+});
+
+test("Council corrections whose review does not converge deliver the corrected branch and open issues only for what is left", async (t) => {
+  const { status, request } = await reconcileFailedOctopusRun(t, (findingsPath) => [
+    `\u001b[0;34m[2026-10-21 18:24:49]\u001b[0m \u001b[0;31mERROR\u001b[0m: Correction loop hit the absolute round ceiling (3) with 2 blocking finding(s) remaining: ${findingsPath} — raise or disable with OCTOPUS_TANGLE_CORRECTION_HARD_CAP (0 = no ceiling)`,
+  ], { corrections: true });
+  assert.equal(status.failureClass, "review_non_convergence");
+  assert.deepEqual(request.findings, remainingBlockingFindings);
 });

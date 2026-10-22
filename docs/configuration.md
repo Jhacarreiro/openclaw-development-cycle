@@ -92,6 +92,23 @@ export DEVELOPMENT_CYCLE_REPOSITORY_DELIVERY_AUTO_MERGE_SUCCESSFUL=true
 export DEVELOPMENT_CYCLE_REPOSITORY_DELIVERY_BASE_BRANCH=main
 ```
 
+## Run-end command
+
+An optional command the cycle runs once when a run closes (`merged`, `closed_success`, `closed_partial` or `closed_invalid`). It receives the run directory as its last argument and runs with that directory as its working directory, in the background, so closing a run never waits on it. Its outcome (exit code and output excerpts) is written to `run_end_command.json` in the run directory; a failure is recorded there and does not change the run's state. A run that closes while the gateway restarts may miss it.
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `DEVELOPMENT_CYCLE_RUN_END_COMMAND` | empty | Executable to run when a run closes. Empty turns it off. |
+| `DEVELOPMENT_CYCLE_RUN_END_ARGS_JSON` | `[]` | Fixed arguments placed before the run directory. |
+| `DEVELOPMENT_CYCLE_RUN_END_TIMEOUT_SECONDS` | `300` | Time limit for one call. |
+
+For example, to keep a decision map with every run, using the `map-run.mjs` script from a separate decision-map tool:
+
+```bash
+export DEVELOPMENT_CYCLE_RUN_END_COMMAND=node
+export DEVELOPMENT_CYCLE_RUN_END_ARGS_JSON='["/opt/decision-map/map-run.mjs","--adapter","/home/user/.claude-octopus"]'
+```
+
 ## Runner
 
 | Variable | Default | Description |

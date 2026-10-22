@@ -28,6 +28,11 @@ export interface DevelopmentCycleConfig {
     followUpAutoStart: boolean;
     followUpMaxGenerations: number;
   };
+  runEnd: {
+    command: string;
+    args: string[];
+    timeoutSeconds: number;
+  };
   runDriver: {
     enabled: boolean;
     autoFinalSteps: boolean;
@@ -168,6 +173,11 @@ export function loadDevelopmentCycleConfig(env: NodeJS.ProcessEnv = process.env)
       baseBranch: text(env, "DEVELOPMENT_CYCLE_REPOSITORY_DELIVERY_BASE_BRANCH", "main"),
       followUpAutoStart: boolean(env, "DEVELOPMENT_CYCLE_FOLLOWUP_AUTO_START", true),
       followUpMaxGenerations: positiveInteger(env, "DEVELOPMENT_CYCLE_FOLLOWUP_MAX_GENERATIONS", 2),
+    },
+    runEnd: {
+      command: text(env, "DEVELOPMENT_CYCLE_RUN_END_COMMAND"),
+      args: stringArray(env, "DEVELOPMENT_CYCLE_RUN_END_ARGS_JSON"),
+      timeoutSeconds: positiveInteger(env, "DEVELOPMENT_CYCLE_RUN_END_TIMEOUT_SECONDS", 300),
     },
     runDriver: {
       enabled: boolean(env, "DEVELOPMENT_CYCLE_RUN_DRIVER_ENABLED", true),

@@ -1,15 +1,53 @@
 import { join } from "node:path";
 import { phaseNotificationForTransition } from "../core/phase-notifications.js";
+import { execSupervisedCommand } from "../runtime/processes.js";
+import { excerpt } from "./files.js";
 import type { createNotificationService } from "../runtime/notifications.js";
 import type { FilesystemStore } from "../storage/filesystem.js";
 
 export interface CycleStoreDeps {
   filesystemStore: FilesystemStore;
   cycleMessageDeliveryQueue: ReturnType<typeof createNotificationService>;
+  developmentCycleConfig?: { runEnd?: { command: string; args: string[]; timeoutSeconds: number } };
 }
+
+// Phases a run does not leave; the run-end command runs once when a run enters one.
+const CLOSED_PHASES = new Set(["merged", "closed_success", "closed_partial", "closed_invalid"]);
 
 export function createCycleStore(deps: CycleStoreDeps) {
   const { filesystemStore, cycleMessageDeliveryQueue } = deps;
+  const runEnd = deps.developmentCycleConfig?.runEnd;
+  const runEndCommands = new Set<Promise<void>>();
+
+  // An optional operator command (for example a decision-map generator) that gets the closed run's directory as its
+  // last argument. It runs in the background so closing a run never waits on it; its outcome is kept in the run.
+  function startRunEndCommand(dir: string, status: any) {
+    if (!runEnd?.command) return;
+    const resultPath = join(dir, "run_end_command.json");
+    const startedAt = new Date().toISOString();
+    const base = { schemaVersion: 1, phase: status?.phase || "", command: runEnd.command, startedAt };
+    const job = (async () => {
+      let result: any;
+      try {
+        const out = await execSupervisedCommand(runEnd.command, [...runEnd.args, dir], {
+          cwd: dir, timeout: runEnd.timeoutSeconds * 1000, maxBuffer: 1024 * 1024,
+        });
+        result = { ...base, ok: true, exitCode: 0, stdout: excerpt(String(out.stdout || ""), 2000) };
+      } catch (err: any) {
+        result = {
+          ...base, ok: false, exitCode: typeof err?.code === "number" ? err.code : null,
+          error: excerpt(String(err?.message || err), 1000),
+          stdout: excerpt(String(err?.stdout || ""), 2000), stderr: excerpt(String(err?.stderr || ""), 2000),
+        };
+      }
+      await filesystemStore.saveJson(resultPath, { ...result, finishedAt: new Date().toISOString() });
+    })().catch(() => undefined);
+    runEndCommands.add(job);
+    job.finally(() => runEndCommands.delete(job));
+  }
+  async function settleRunEndCommands() {
+    await Promise.all([...runEndCommands]);
+  }
 
   const cycleDir = filesystemStore.runDir;
   const loadJson = filesystemStore.loadJson;
@@ -21,6 +59,9 @@ export function createCycleStore(deps: CycleStoreDeps) {
       ? { createdAt: new Date().toISOString(), interventionAnswerCount: 0, correctionRoundCount: 0 }
       : {};
     const next = await filesystemStore.updateStatus(dir, { ...created, ...patch });
+    if (CLOSED_PHASES.has(String(next?.phase || "")) && !CLOSED_PHASES.has(String(previous?.phase || ""))) {
+      startRunEndCommand(dir, next);
+    }
     const notice = phaseNotificationForTransition(previous, next);
     if (!notice) return next;
 
@@ -96,5 +137,5 @@ export function createCycleStore(deps: CycleStoreDeps) {
     });
   }
 
-  return { cycleDir, loadJson, saveJson, cycleStatus, appendJsonl, sendCycleMessage, clearActiveImplementationAttempt, clearActiveCorrectionsAttempt };
+  return { cycleDir, loadJson, saveJson, cycleStatus, settleRunEndCommands, appendJsonl, sendCycleMessage, clearActiveImplementationAttempt, clearActiveCorrectionsAttempt };
 }

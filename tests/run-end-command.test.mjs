@@ -118,3 +118,16 @@ test("a run-end request whose run never closed is not run on resume", async (t) 
   await cycle.settleRunEndCommands();
   assert.deepEqual(await calls(dir), [dir]);
 });
+
+test("a pending run-end command still runs on resume after the run was moved on to closed", async (t) => {
+  const { root, dir, cycle } = await fixture(t, recorder(0));
+  await cycle.saveJson(join(dir, "status.json"), { phase: "closed_partial", project: "demo", runId: "run-1" });
+  await cycle.cycleStatus(dir, { phase: "closed" });
+  await cycle.settleRunEndCommands();
+  assert.deepEqual(await calls(dir), [], "moving from a closed phase to closed does not start it");
+
+  await cycle.saveJson(join(dir, "run_end_command.json"), { schemaVersion: 1, state: "pending", phase: "closed_partial" });
+  assert.equal(await cycle.resumeRunEndCommands(join(root, "runs")), 1);
+  await cycle.settleRunEndCommands();
+  assert.deepEqual(await calls(dir), [dir]);
+});

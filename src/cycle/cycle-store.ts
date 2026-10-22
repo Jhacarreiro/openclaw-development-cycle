@@ -12,8 +12,9 @@ export interface CycleStoreDeps {
   developmentCycleConfig?: { runEnd?: { command: string; args: string[]; timeoutSeconds: number } };
 }
 
-// Phases a run does not leave; the run-end command runs once when a run enters one.
-const CLOSED_PHASES = new Set(["merged", "closed_success", "closed_partial", "closed_invalid"]);
+// Phases a run does not leave; the run-end command runs once when a run enters one. The close action then moves a run
+// from one of them to "closed", which is still closed and does not run it again.
+const CLOSED_PHASES = new Set(["merged", "closed_success", "closed_partial", "closed_invalid", "closed"]);
 
 export function createCycleStore(deps: CycleStoreDeps) {
   const { filesystemStore, cycleMessageDeliveryQueue } = deps;

@@ -1,3 +1,4 @@
+import { readdir } from "node:fs/promises";
 import { join } from "node:path";
 import { phaseNotificationForTransition } from "../core/phase-notifications.js";
 import { execSupervisedCommand } from "../runtime/processes.js";
@@ -21,11 +22,17 @@ export function createCycleStore(deps: CycleStoreDeps) {
 
   // An optional operator command (for example a decision-map generator) that gets the closed run's directory as its
   // last argument. It runs in the background so closing a run never waits on it; its outcome is kept in the run.
-  function startRunEndCommand(dir: string, status: any) {
+  // The request is recorded as pending before it starts, so a gateway restart that interrupts it can run it again.
+  const RUN_END_FILE = "run_end_command.json";
+  async function queueRunEndCommand(dir: string, status: any) {
     if (!runEnd?.command) return;
-    const resultPath = join(dir, "run_end_command.json");
-    const startedAt = new Date().toISOString();
-    const base = { schemaVersion: 1, phase: status?.phase || "", command: runEnd.command, startedAt };
+    const request = { schemaVersion: 1, state: "pending", phase: status?.phase || "", command: runEnd.command, queuedAt: new Date().toISOString() };
+    await filesystemStore.saveJson(join(dir, RUN_END_FILE), request);
+    startRunEndCommand(dir, request);
+  }
+  function startRunEndCommand(dir: string, request: any) {
+    if (!runEnd?.command) return;
+    const base = { ...request, command: runEnd.command, startedAt: new Date().toISOString() };
     const job = (async () => {
       let result: any;
       try {
@@ -40,10 +47,27 @@ export function createCycleStore(deps: CycleStoreDeps) {
           stdout: excerpt(String(err?.stdout || ""), 2000), stderr: excerpt(String(err?.stderr || ""), 2000),
         };
       }
-      await filesystemStore.saveJson(resultPath, { ...result, finishedAt: new Date().toISOString() });
+      await filesystemStore.saveJson(join(dir, RUN_END_FILE), { ...result, state: "finished", finishedAt: new Date().toISOString() });
     })().catch(() => undefined);
     runEndCommands.add(job);
     job.finally(() => runEndCommands.delete(job));
+  }
+  // Runs again every run-end command still pending in any run, for example after the gateway stopped while one ran.
+  // A finished command, successful or not, is not repeated.
+  async function resumeRunEndCommands(runsRoot: string) {
+    if (!runEnd?.command) return 0;
+    const dirs = async (path: string) => (await readdir(path, { withFileTypes: true }).catch(() => []))
+      .filter((entry) => entry.isDirectory() && !entry.isSymbolicLink()).map((entry) => join(path, entry.name));
+    let resumed = 0;
+    for (const projectDir of await dirs(runsRoot)) {
+      for (const dir of await dirs(projectDir)) {
+        const request = await filesystemStore.loadJson<any>(join(dir, RUN_END_FILE)).catch(() => null);
+        if (request?.state !== "pending") continue;
+        startRunEndCommand(dir, request);
+        resumed += 1;
+      }
+    }
+    return resumed;
   }
   async function settleRunEndCommands() {
     await Promise.all([...runEndCommands]);
@@ -60,7 +84,7 @@ export function createCycleStore(deps: CycleStoreDeps) {
       : {};
     const next = await filesystemStore.updateStatus(dir, { ...created, ...patch });
     if (CLOSED_PHASES.has(String(next?.phase || "")) && !CLOSED_PHASES.has(String(previous?.phase || ""))) {
-      startRunEndCommand(dir, next);
+      await queueRunEndCommand(dir, next);
     }
     const notice = phaseNotificationForTransition(previous, next);
     if (!notice) return next;
@@ -137,5 +161,5 @@ export function createCycleStore(deps: CycleStoreDeps) {
     });
   }
 
-  return { cycleDir, loadJson, saveJson, cycleStatus, settleRunEndCommands, appendJsonl, sendCycleMessage, clearActiveImplementationAttempt, clearActiveCorrectionsAttempt };
+  return { cycleDir, loadJson, saveJson, cycleStatus, resumeRunEndCommands, settleRunEndCommands, appendJsonl, sendCycleMessage, clearActiveImplementationAttempt, clearActiveCorrectionsAttempt };
 }

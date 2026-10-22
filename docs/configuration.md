@@ -94,7 +94,7 @@ export DEVELOPMENT_CYCLE_REPOSITORY_DELIVERY_BASE_BRANCH=main
 
 ## Run-end command
 
-An optional command the cycle runs once when a run closes (`merged`, `closed_success`, `closed_partial` or `closed_invalid`). It receives the run directory as its last argument and runs with that directory as its working directory, in the background, so closing a run never waits on it. Its outcome (exit code and output excerpts) is written to `run_end_command.json` in the run directory; a failure is recorded there and does not change the run's state. A run that closes while the gateway restarts may miss it.
+An optional command the cycle runs once when a run closes (`merged`, `closed_success`, `closed_partial` or `closed_invalid`). It receives the run directory as its last argument and runs with that directory as its working directory, in the background, so closing a run never waits on it. `run_end_command.json` in the run directory records the request as `pending` before the command starts and its outcome (`finished`, exit code and output excerpts) when it ends; a failure is recorded there and does not change the run's state. When the gateway starts, every command still `pending` (for example one interrupted by a restart) runs again, so the command should be safe to repeat. A finished command, successful or not, is not repeated.
 
 | Variable | Default | Description |
 | --- | --- | --- |

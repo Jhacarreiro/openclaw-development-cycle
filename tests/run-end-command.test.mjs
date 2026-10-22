@@ -24,7 +24,7 @@ async function fixture(t, runEnd) {
   t.after(async () => { notifications.dispose(); await rm(root, { recursive: true, force: true }); });
   await store.saveJson(join(dir, "status.json"), { phase: "council_validated", project: "demo", runId: "run-1" });
   const cycle = createCycleStore({ filesystemStore: store, cycleMessageDeliveryQueue: notifications, developmentCycleConfig: { runEnd } });
-  return { dir, cycle };
+  return { root, store, dir, cycle };
 }
 
 const calls = async (dir) => (await readFile(join(dir, "calls"), "utf8").catch(() => "")).split("\n").filter(Boolean);
@@ -44,6 +44,7 @@ test("closing a run runs the run-end command once with the run directory and rec
   assert.deepEqual(await calls(dir), [dir]);
   const result = JSON.parse(await readFile(join(dir, "run_end_command.json"), "utf8"));
   assert.equal(result.ok, true);
+  assert.equal(result.state, "finished");
   assert.equal(result.phase, "merged");
   assert.match(result.stdout, /"records":3/);
 });
@@ -71,4 +72,33 @@ test("without a configured command nothing runs and nothing is written", async (
   await cycle.settleRunEndCommands();
 
   await assert.rejects(access(join(dir, "run_end_command.json")), { code: "ENOENT" });
+});
+
+test("a run-end command left pending by a restart runs again on resume, and a finished one does not", async (t) => {
+  const { root, store, dir, cycle } = await fixture(t, recorder(0));
+  const finishedDir = store.runDir("demo", "run-0");
+  await store.saveJson(join(dir, "run_end_command.json"), { schemaVersion: 1, state: "pending", phase: "closed_partial", queuedAt: "2026-01-01T00:00:00.000Z" });
+  await store.saveJson(join(finishedDir, "run_end_command.json"), { schemaVersion: 1, state: "finished", ok: false, phase: "merged" });
+
+  assert.equal(await cycle.resumeRunEndCommands(join(root, "runs")), 1);
+  await cycle.settleRunEndCommands();
+
+  assert.deepEqual(await calls(dir), [dir]);
+  assert.deepEqual(await calls(finishedDir), []);
+  const result = JSON.parse(await readFile(join(dir, "run_end_command.json"), "utf8"));
+  assert.equal(result.state, "finished");
+  assert.equal(result.phase, "closed_partial");
+  assert.equal(await cycle.resumeRunEndCommands(join(root, "runs")), 0, "a resumed command that finished is not run again");
+});
+
+test("closing a run records the command as pending before it finishes", async (t) => {
+  const slow = { command: "sh", args: ["-c", "sleep 1", "sh"], timeoutSeconds: 30 };
+  const { dir, cycle } = await fixture(t, slow);
+
+  await cycle.cycleStatus(dir, { phase: "closed_success" });
+  const queued = JSON.parse(await readFile(join(dir, "run_end_command.json"), "utf8"));
+  await cycle.settleRunEndCommands();
+
+  assert.equal(queued.state, "pending");
+  assert.equal(JSON.parse(await readFile(join(dir, "run_end_command.json"), "utf8")).state, "finished");
 });

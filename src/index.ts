@@ -969,6 +969,9 @@ const runDriver = createRunDriver({
 const registerTools = developmentCyclePlugin.register.bind(developmentCyclePlugin);
 developmentCyclePlugin.register = (api: any) => {
   if (runDriverConfig.enabled) api.registerService?.({ id: "development-cycle-run-driver", start: async () => runDriver.start(), stop: async () => runDriver.stop() });
+  if (developmentCycleConfig.runEnd.command) {
+    api.registerService?.({ id: "development-cycle-run-end", start: async () => { await cycleContext2.resumeRunEndCommands(join(cycleRoot, "runs")); } });
+  }
   return registerTools(api);
 };
 

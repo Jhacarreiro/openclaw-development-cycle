@@ -92,6 +92,23 @@ export DEVELOPMENT_CYCLE_REPOSITORY_DELIVERY_AUTO_MERGE_SUCCESSFUL=true
 export DEVELOPMENT_CYCLE_REPOSITORY_DELIVERY_BASE_BRANCH=main
 ```
 
+## Run-end command
+
+An optional command the cycle runs once when a run closes (`merged`, `closed_success`, `closed_partial` or `closed_invalid`). It receives the run directory as its last argument and runs with that directory as its working directory, in the background, so closing a run never waits on it. `run_end_command.json` in the run directory records the request as `pending` before the command starts and its outcome (`finished`, exit code and output excerpts) when it ends; a failure is recorded there and does not change the run's state. When the gateway starts, every command still `pending` (for example one interrupted by a restart) runs again if its run is closed, so the command runs at least once per closed run and should be safe to repeat. The request is written just before the closing status, so a stop between the two writes cannot lose it. A finished command, successful or not, is not repeated. While a command runs, the run holds a `run_end_command.claim` file, so gateways sharing the state root never run the same command at the same time. The command is stopped at its time limit even if the gateway that started it dies, so a claim records its own expiry, that limit plus a minute from when it was made; only after it is it taken over, and a command that found a live claim tries again when it expires. The command runs with the plugin's environment and file access, like the repository-delivery adapter, so configure only a command you trust with that.
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `DEVELOPMENT_CYCLE_RUN_END_COMMAND` | empty | Executable to run when a run closes. Empty turns it off. |
+| `DEVELOPMENT_CYCLE_RUN_END_ARGS_JSON` | `[]` | Fixed arguments placed before the run directory. |
+| `DEVELOPMENT_CYCLE_RUN_END_TIMEOUT_SECONDS` | `300` | Time limit for one call. |
+
+For example, to keep a decision map with every run, using the `map-run.mjs` script from a separate decision-map tool:
+
+```bash
+export DEVELOPMENT_CYCLE_RUN_END_COMMAND=node
+export DEVELOPMENT_CYCLE_RUN_END_ARGS_JSON="[\"/path/to/decision-map/map-run.mjs\",\"--adapter\",\"$HOME/.claude-octopus\"]"
+```
+
 ## Runner
 
 | Variable | Default | Description |

@@ -1,12 +1,12 @@
 import { randomBytes } from "node:crypto";
-import { readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { link, readdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { hostname } from "node:os";
 import { join } from "node:path";
 import { phaseNotificationForTransition } from "../core/phase-notifications.js";
 import { execSupervisedCommand } from "../runtime/processes.js";
 import { excerpt } from "./files.js";
 import type { createNotificationService } from "../runtime/notifications.js";
-import { acquireLock, type FilesystemStore } from "../storage/filesystem.js";
+import { isProcessAlive, type FilesystemStore } from "../storage/filesystem.js";
 
 export interface CycleStoreDeps {
   filesystemStore: FilesystemStore;
@@ -20,7 +20,7 @@ const CLOSED_PHASES = new Set(["merged", "closed_success", "closed_partial", "cl
 
 // Run-end commands this process is running, shared by every cycle store in it, and the token its claims carry.
 const runningRunEnd = new Set<string>();
-const RUN_END_CLAIMANT = JSON.stringify({ host: hostname(), pid: process.pid, token: randomBytes(8).toString("hex") });
+const RUN_END_CLAIMANT = { host: hostname(), pid: process.pid, token: randomBytes(8).toString("hex") };
 
 export function createCycleStore(deps: CycleStoreDeps) {
   const { filesystemStore, cycleMessageDeliveryQueue } = deps;
@@ -36,34 +36,66 @@ export function createCycleStore(deps: CycleStoreDeps) {
     await filesystemStore.saveJson(join(dir, RUN_END_FILE), request);
     return request;
   }
-  // A run's command is claimed with a lock held while it runs, so two gateways sharing the state root (or a resume
-  // racing a close) never start it twice. A lock left by a process that died is taken over, including one left by an
-  // earlier gateway on this host that had the same pid, which is common in a container: its claimant token differs.
-  const RUN_END_LOCK = "run_end_command.lock";
+  // A run's command is claimed with a claim file kept while it runs, so two gateways sharing the state root (or a
+  // resume racing a close) never start it twice. The file is published whole with link(), which fails if a claim
+  // exists, so a claim is never seen half written. A claim is taken over only when it cannot be live: on this host,
+  // when its process has died or it was made by an earlier process with this pid (common in a container: the token
+  // differs, and every live claim of this process is in runningRunEnd); from another host, only once it is older than
+  // the command's time limit plus a grace period, since the command is stopped at that limit.
+  const RUN_END_CLAIM = "run_end_command.claim";
+  const claimSuffix = () => `${Date.now().toString(16)}-${randomBytes(6).toString("hex")}`;
+  const readClaim = (path: string) => readFile(path, "utf8").then((text) => JSON.parse(text)).catch(() => null);
+  function claimIsStale(claim: any) {
+    if (!claim || typeof claim !== "object") return true;
+    if (claim.host === RUN_END_CLAIMANT.host) {
+      return claim.pid === RUN_END_CLAIMANT.pid ? claim.token !== RUN_END_CLAIMANT.token : !isProcessAlive(Number(claim.pid));
+    }
+    const limitMs = ((runEnd?.timeoutSeconds || 300) + 60) * 1000;
+    return !(Date.parse(claim.claimedAt) > Date.now() - limitMs);
+  }
+  async function takeOverStaleClaim(claimPath: string, seen: any) {
+    const moved = `${claimPath}.stale-${claimSuffix()}`;
+    if (!(await rename(claimPath, moved).then(() => true, () => false))) return;
+    // Another process may have replaced the claim between the read and the move; if so, put it back.
+    const taken = await readClaim(moved);
+    if (JSON.stringify(taken) !== JSON.stringify(seen)) await link(moved, claimPath).catch(() => undefined);
+    await unlink(moved).catch(() => undefined);
+  }
   async function claimRunEndCommand(dir: string) {
     // Reserved before any await, so a second start in this process sees it at once.
     if (runningRunEnd.has(dir)) return null;
     runningRunEnd.add(dir);
-    const lockDir = join(dir, RUN_END_LOCK);
-    const owner = await readFile(join(lockDir, "owner"), "utf8").catch(() => "");
-    const claimant = await readFile(join(lockDir, "claimant"), "utf8").then((text) => JSON.parse(text)).catch(() => null);
-    const mine = JSON.parse(RUN_END_CLAIMANT);
-    // Every live claim of this process is in runningRunEnd, so a same-pid lock here is an earlier process's, unless its
-    // claimant says it belongs to another host whose process has the same pid.
-    const earlier = !claimant || (claimant.host === mine.host && claimant.token !== mine.token);
-    if (owner.startsWith(`${process.pid}:`) && earlier) {
-      const trash = `${lockDir}.stale-${Date.now().toString(16)}-${Math.random().toString(16).slice(2)}`;
-      await rename(lockDir, trash).then(() => rm(trash, { recursive: true, force: true })).catch(() => undefined);
+    const claimPath = join(dir, RUN_END_CLAIM);
+    const claim = { ...RUN_END_CLAIMANT, claimedAt: new Date().toISOString(), id: claimSuffix() };
+    const draft = `${claimPath}.new-${claim.id}`;
+    let claimed = false;
+    try {
+      await writeFile(draft, JSON.stringify(claim), { flag: "wx" });
+      for (let attempt = 0; attempt < 2 && !claimed; attempt += 1) {
+        claimed = await link(draft, claimPath).then(() => true, () => false);
+        if (!claimed) {
+          const seen = await readClaim(claimPath);
+          if (!claimIsStale(seen)) break;
+          await takeOverStaleClaim(claimPath, seen);
+        }
+      }
+    } catch {
+      claimed = false;
+    } finally {
+      await unlink(draft).catch(() => undefined);
     }
-    const lock = await acquireLock(lockDir, 200).catch(() => null);
-    const claimed = lock ? await writeFile(join(lockDir, "claimant"), RUN_END_CLAIMANT).then(() => true, () => false) : false;
-    const current = claimed ? await filesystemStore.loadJson<any>(join(dir, RUN_END_FILE)).catch(() => null) : null;
-    if (!lock || current?.state !== "pending") {
-      await lock?.release().catch(() => undefined);
+    const release = async () => {
+      const held = await readClaim(claimPath);
+      if (held?.id === claim.id) await unlink(claimPath).catch(() => undefined);
       runningRunEnd.delete(dir);
+    };
+    const current = claimed ? await filesystemStore.loadJson<any>(join(dir, RUN_END_FILE)).catch(() => null) : null;
+    if (!claimed || current?.state !== "pending") {
+      if (claimed) await release();
+      else runningRunEnd.delete(dir);
       return null;
     }
-    return lock;
+    return { release };
   }
   function startRunEndCommand(dir: string, request: any) {
     if (!runEnd?.command) return;

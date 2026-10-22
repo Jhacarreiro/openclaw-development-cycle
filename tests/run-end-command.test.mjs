@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { access, mkdir, mkdtemp, readFile, rm, utimes, writeFile } from "node:fs/promises";
+import { access, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -147,28 +147,32 @@ test("two gateways resuming the same state root run a pending command once", asy
   assert.equal(JSON.parse(await readFile(join(dir, "run_end_command.json"), "utf8")).state, "finished");
 });
 
-test("a claim left by a gateway that died, even one with this process's pid, does not block resume", async (t) => {
-  const earlier = [
-    [2 ** 22 + 17, null],
-    [process.pid, null],
-    [process.pid, JSON.stringify({ host: hostname(), pid: process.pid, token: "earlier-gateway" })],
-  ];
-  for (const [pid, claimant] of earlier) {
+// Writes a claim as another gateway would have left it.
+const leaveClaim = (dir, claim) => writeFile(join(dir, "run_end_command.claim"), JSON.stringify({ id: "earlier", ...claim }));
+const pendingClosedRun = async (store, dir) => {
+  await store.saveJson(join(dir, "status.json"), { phase: "merged", project: "demo", runId: "run-1" });
+  await store.saveJson(join(dir, "run_end_command.json"), { schemaVersion: 1, state: "pending", phase: "merged" });
+};
+
+test("a claim that cannot still be live does not block resume", async (t) => {
+  const recent = new Date().toISOString();
+  const left = {
+    "a dead process on this host": { host: hostname(), pid: 2 ** 22 + 17, token: "earlier", claimedAt: recent },
+    "an earlier gateway on this host with this pid": { host: hostname(), pid: process.pid, token: "earlier", claimedAt: recent },
+    "another host, past the time limit": { host: `${hostname()}-other`, pid: 1, token: "other", claimedAt: new Date(Date.now() - 120_000).toISOString() },
+    "an unreadable claim": null,
+  };
+  for (const [name, claim] of Object.entries(left)) {
     const { root, store, dir, cycle } = await fixture(t, recorder(0));
-    await store.saveJson(join(dir, "status.json"), { phase: "merged", project: "demo", runId: "run-1" });
-    await store.saveJson(join(dir, "run_end_command.json"), { schemaVersion: 1, state: "pending", phase: "merged" });
-    const lockDir = join(dir, "run_end_command.lock");
-    await mkdir(lockDir);
-    await writeFile(join(lockDir, "owner"), `${pid}:earlier-gateway`);
-    if (claimant) await writeFile(join(lockDir, "claimant"), claimant);
-    const past = new Date(Date.now() - 60_000);
-    await utimes(join(lockDir, "owner"), past, past);
-    await utimes(lockDir, past, past);
+    await pendingClosedRun(store, dir);
+    if (claim) await leaveClaim(dir, claim);
+    else await writeFile(join(dir, "run_end_command.claim"), "{");
 
     await cycle.resumeRunEndCommands(join(root, "runs"));
     await cycle.settleRunEndCommands();
 
-    assert.deepEqual(await calls(dir), [dir], `claim left by pid ${pid} ${claimant ? "with" : "without"} a claimant`);
+    assert.deepEqual(await calls(dir), [dir], name);
+    await assert.rejects(access(join(dir, "run_end_command.claim")), { code: "ENOENT" }, `${name}: the claim is released`);
   }
 });
 
@@ -188,18 +192,20 @@ test("a claim held by a running command is not taken over by another store in th
   assert.deepEqual(await calls(dir), [dir]);
 });
 
-test("a claim held by another host's process with the same pid is left alone", async (t) => {
-  const { root, store, dir, cycle } = await fixture(t, recorder(0));
-  await store.saveJson(join(dir, "status.json"), { phase: "merged", project: "demo", runId: "run-1" });
-  await store.saveJson(join(dir, "run_end_command.json"), { schemaVersion: 1, state: "pending", phase: "merged" });
-  const lockDir = join(dir, "run_end_command.lock");
-  await mkdir(lockDir);
-  await writeFile(join(lockDir, "owner"), `${process.pid}:other-host`);
-  await writeFile(join(lockDir, "claimant"), JSON.stringify({ host: `${hostname()}-other`, pid: process.pid, token: "other" }));
+test("a claim that may still be live is left alone", async (t) => {
+  const live = {
+    "another host with this pid": { host: `${hostname()}-other`, pid: process.pid, token: "other", claimedAt: new Date().toISOString() },
+    "a live process on this host": { host: hostname(), pid: process.ppid, token: "other", claimedAt: new Date(Date.now() - 3_600_000).toISOString() },
+  };
+  for (const [name, claim] of Object.entries(live)) {
+    const { root, store, dir, cycle } = await fixture(t, recorder(0));
+    await pendingClosedRun(store, dir);
+    await leaveClaim(dir, claim);
 
-  await cycle.resumeRunEndCommands(join(root, "runs"));
-  await cycle.settleRunEndCommands();
+    await cycle.resumeRunEndCommands(join(root, "runs"));
+    await cycle.settleRunEndCommands();
 
-  assert.deepEqual(await calls(dir), []);
-  assert.equal(JSON.parse(await readFile(join(dir, "run_end_command.json"), "utf8")).state, "pending");
+    assert.deepEqual(await calls(dir), [], name);
+    assert.equal(JSON.parse(await readFile(join(dir, "run_end_command.json"), "utf8")).state, "pending", name);
+  }
 });

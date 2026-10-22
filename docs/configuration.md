@@ -106,7 +106,7 @@ For example, to keep a decision map with every run, using the `map-run.mjs` scri
 
 ```bash
 export DEVELOPMENT_CYCLE_RUN_END_COMMAND=node
-export DEVELOPMENT_CYCLE_RUN_END_ARGS_JSON='["/opt/decision-map/map-run.mjs","--adapter","/home/user/.claude-octopus"]'
+export DEVELOPMENT_CYCLE_RUN_END_ARGS_JSON="[\"/path/to/decision-map/map-run.mjs\",\"--adapter\",\"$HOME/.claude-octopus\"]"
 ```
 
 ## Runner

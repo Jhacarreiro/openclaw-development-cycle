@@ -77,6 +77,8 @@ test("without a configured command nothing runs and nothing is written", async (
 test("a run-end command left pending by a restart runs again on resume, and a finished one does not", async (t) => {
   const { root, store, dir, cycle } = await fixture(t, recorder(0));
   const finishedDir = store.runDir("demo", "run-0");
+  await store.saveJson(join(dir, "status.json"), { phase: "closed_partial", project: "demo", runId: "run-1" });
+  await store.saveJson(join(finishedDir, "status.json"), { phase: "merged", project: "demo", runId: "run-0" });
   await store.saveJson(join(dir, "run_end_command.json"), { schemaVersion: 1, state: "pending", phase: "closed_partial", queuedAt: "2026-01-01T00:00:00.000Z" });
   await store.saveJson(join(finishedDir, "run_end_command.json"), { schemaVersion: 1, state: "finished", ok: false, phase: "merged" });
 
@@ -101,4 +103,18 @@ test("closing a run records the command as pending before it finishes", async (t
 
   assert.equal(queued.state, "pending");
   assert.equal(JSON.parse(await readFile(join(dir, "run_end_command.json"), "utf8")).state, "finished");
+});
+
+test("a run-end request whose run never closed is not run on resume", async (t) => {
+  const { root, dir, cycle } = await fixture(t, recorder(0));
+  // As left by a gateway that stopped after recording the request and before writing the closing status.
+  await cycle.saveJson(join(dir, "run_end_command.json"), { schemaVersion: 1, state: "pending", phase: "closed_success" });
+
+  assert.equal(await cycle.resumeRunEndCommands(join(root, "runs")), 0);
+  await cycle.settleRunEndCommands();
+  assert.deepEqual(await calls(dir), []);
+
+  await cycle.cycleStatus(dir, { phase: "closed_success" });
+  await cycle.settleRunEndCommands();
+  assert.deepEqual(await calls(dir), [dir]);
 });

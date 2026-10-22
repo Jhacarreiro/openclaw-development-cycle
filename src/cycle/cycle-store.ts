@@ -24,11 +24,10 @@ export function createCycleStore(deps: CycleStoreDeps) {
   // last argument. It runs in the background so closing a run never waits on it; its outcome is kept in the run.
   // The request is recorded as pending before it starts, so a gateway restart that interrupts it can run it again.
   const RUN_END_FILE = "run_end_command.json";
-  async function queueRunEndCommand(dir: string, status: any) {
-    if (!runEnd?.command) return;
-    const request = { schemaVersion: 1, state: "pending", phase: status?.phase || "", command: runEnd.command, queuedAt: new Date().toISOString() };
+  async function queueRunEndCommand(dir: string, phase: string) {
+    const request = { schemaVersion: 1, state: "pending", phase, command: runEnd?.command || "", queuedAt: new Date().toISOString() };
     await filesystemStore.saveJson(join(dir, RUN_END_FILE), request);
-    startRunEndCommand(dir, request);
+    return request;
   }
   function startRunEndCommand(dir: string, request: any) {
     if (!runEnd?.command) return;
@@ -63,6 +62,10 @@ export function createCycleStore(deps: CycleStoreDeps) {
       for (const dir of await dirs(projectDir)) {
         const request = await filesystemStore.loadJson<any>(join(dir, RUN_END_FILE)).catch(() => null);
         if (request?.state !== "pending") continue;
+        // The request is written just before the closing status; if the gateway stopped in between, the run is not
+        // closed and a later close queues it again.
+        const status = await filesystemStore.loadJson<any>(join(dir, "status.json")).catch(() => null);
+        if (!CLOSED_PHASES.has(String(status?.phase || ""))) continue;
         startRunEndCommand(dir, request);
         resumed += 1;
       }
@@ -82,10 +85,12 @@ export function createCycleStore(deps: CycleStoreDeps) {
     const created = Object.keys(previous || {}).length === 0
       ? { createdAt: new Date().toISOString(), interventionAnswerCount: 0, correctionRoundCount: 0 }
       : {};
+    // A closing run's run-end command is recorded before the status, so a stop between the two writes cannot lose it.
+    const closingPhase = String(patch?.phase ?? previous?.phase ?? "");
+    const closing = Boolean(runEnd?.command) && CLOSED_PHASES.has(closingPhase) && !CLOSED_PHASES.has(String(previous?.phase || ""));
+    const runEndRequest = closing ? await queueRunEndCommand(dir, closingPhase) : null;
     const next = await filesystemStore.updateStatus(dir, { ...created, ...patch });
-    if (CLOSED_PHASES.has(String(next?.phase || "")) && !CLOSED_PHASES.has(String(previous?.phase || ""))) {
-      await queueRunEndCommand(dir, next);
-    }
+    if (runEndRequest) startRunEndCommand(dir, runEndRequest);
     const notice = phaseNotificationForTransition(previous, next);
     if (!notice) return next;
 

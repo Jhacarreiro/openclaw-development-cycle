@@ -183,14 +183,16 @@ Reply to main; the run will resume after answer_intervention.`);
         return await cycleStatus(dir, { ...waiting, implementationInterventionNotification: notification });
       }
 
+      // Corrections run Octopus on an isolated branch too; when their review does not converge, that branch holds
+      // the corrected work, and delivering the checkout they started from would drop it.
       let failedOutputHandoff: any = null;
-      if (!isCorrectionsRun && String(session?.adapter || status?.implementationAdapter || "") === "octopus") {
+      if (String(session?.adapter || status?.implementationAdapter || "") === "octopus") {
         failedOutputHandoff = await resolveOctopusAttemptOutput(String(status?.projectRoot || session?.projectRoot || ""), observedAttemptId || activeAttemptId);
       }
       const reviewInfrastructureFailure = !isCorrectionsRun && failedOutputHandoff?.ok
         ? await detectOctopusReviewInfrastructureFailure(stdoutPath, stderrPath)
         : null;
-      const reviewNonConvergence = !isCorrectionsRun && failedOutputHandoff?.ok && !reviewInfrastructureFailure?.resumeEligible
+      const reviewNonConvergence = failedOutputHandoff?.ok && !reviewInfrastructureFailure?.resumeEligible
         ? await detectOctopusReviewNonConvergence(stderrPath)
         : null;
       let reviewInfrastructureFailureEvidence = "";
@@ -206,7 +208,16 @@ Reply to main; the run will resume after answer_intervention.`);
         });
       }
       const patch = isCorrectionsRun
-        ? { phase: "corrections_failed", owner: "main", ok: false, error: `Implementation exited non-zero: ${exitCode}`, correctionsStdout: stdoutPath, correctionsStderr: stderrPath, directCorrectionsStatus: statusPath }
+        ? {
+            phase: "corrections_failed", owner: "main", ok: false, error: `Implementation exited non-zero: ${exitCode}`, correctionsStdout: stdoutPath, correctionsStderr: stderrPath, directCorrectionsStatus: statusPath,
+            ...(reviewNonConvergence?.ok ? {
+              nextAction: "Review did not converge: deliver the corrected partial Octopus output and open one issue per remaining blocking finding.",
+              failureClass: "review_non_convergence",
+              reviewNonConvergence,
+              outputPath: failedOutputHandoff.outputPath,
+              implementationOutputHandoff: failedOutputHandoff,
+            } : {}),
+          }
         : reviewInfrastructureFailure?.ok && reviewInfrastructureFailure.resumeEligible
           ? {
               phase: "review_infrastructure_failed",

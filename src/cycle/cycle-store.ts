@@ -1,12 +1,12 @@
 import { randomBytes } from "node:crypto";
-import { link, readdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
+import { link, readdir, readFile, rename, stat, unlink, writeFile } from "node:fs/promises";
 import { hostname } from "node:os";
 import { join } from "node:path";
 import { phaseNotificationForTransition } from "../core/phase-notifications.js";
 import { execSupervisedCommand } from "../runtime/processes.js";
 import { excerpt } from "./files.js";
 import type { createNotificationService } from "../runtime/notifications.js";
-import { isProcessAlive, type FilesystemStore } from "../storage/filesystem.js";
+import type { FilesystemStore } from "../storage/filesystem.js";
 
 export interface CycleStoreDeps {
   filesystemStore: FilesystemStore;
@@ -18,9 +18,8 @@ export interface CycleStoreDeps {
 // from one of them to "closed", which is still closed and does not run it again.
 const CLOSED_PHASES = new Set(["merged", "closed_success", "closed_partial", "closed_invalid", "closed"]);
 
-// Run-end commands this process is running, shared by every cycle store in it, and the token its claims carry.
+// Run-end commands this process is running, shared by every cycle store in it.
 const runningRunEnd = new Set<string>();
-const RUN_END_CLAIMANT = { host: hostname(), pid: process.pid, token: randomBytes(8).toString("hex") };
 
 export function createCycleStore(deps: CycleStoreDeps) {
   const { filesystemStore, cycleMessageDeliveryQueue } = deps;
@@ -38,21 +37,18 @@ export function createCycleStore(deps: CycleStoreDeps) {
   }
   // A run's command is claimed with a claim file kept while it runs, so two gateways sharing the state root (or a
   // resume racing a close) never start it twice. The file is published whole with link(), which fails if a claim
-  // exists, so a claim is never seen half written. A claim is taken over only when it cannot be live: on this host,
-  // when its process has died or it was made by an earlier process with this pid (common in a container: the token
-  // differs, and every live claim of this process is in runningRunEnd); from another host, only once it is older than
-  // the command's time limit plus a grace period, since the command is stopped at that limit.
+  // exists, so a claim is never seen half written. The command is stopped at its time limit even if the gateway that
+  // started it died, so a claim is live until that limit plus a grace period and is taken over only after it; a
+  // command blocked by a live claim tries again once the claim expires.
   const RUN_END_CLAIM = "run_end_command.claim";
+  const claimLifetimeMs = () => ((runEnd?.timeoutSeconds || 300) + 60) * 1000;
   const claimSuffix = () => `${Date.now().toString(16)}-${randomBytes(6).toString("hex")}`;
   const readClaim = (path: string) => readFile(path, "utf8").then((text) => JSON.parse(text)).catch(() => null);
-  function claimIsStale(claim: any) {
-    if (!claim || typeof claim !== "object") return true;
-    if (claim.host === RUN_END_CLAIMANT.host) {
-      return claim.pid === RUN_END_CLAIMANT.pid ? claim.token !== RUN_END_CLAIMANT.token : !isProcessAlive(Number(claim.pid));
-    }
-    const limitMs = ((runEnd?.timeoutSeconds || 300) + 60) * 1000;
-    return !(Date.parse(claim.claimedAt) > Date.now() - limitMs);
-  }
+  const claimExpiresAt = (claim: any) => {
+    const claimedAt = Date.parse(String(claim?.claimedAt ?? ""));
+    // An unreadable claim is aged by nothing it says; give it one full lifetime from now.
+    return Number.isFinite(claimedAt) ? claimedAt + claimLifetimeMs() : Number.NaN;
+  };
   async function takeOverStaleClaim(claimPath: string, seen: any) {
     const moved = `${claimPath}.stale-${claimSuffix()}`;
     if (!(await rename(claimPath, moved).then(() => true, () => false))) return;
@@ -61,23 +57,35 @@ export function createCycleStore(deps: CycleStoreDeps) {
     if (JSON.stringify(taken) !== JSON.stringify(seen)) await link(moved, claimPath).catch(() => undefined);
     await unlink(moved).catch(() => undefined);
   }
-  async function claimRunEndCommand(dir: string) {
+  async function claimRunEndCommand(dir: string): Promise<{ release?: () => Promise<void>; retryAt?: number }> {
     // Reserved before any await, so a second start in this process sees it at once.
-    if (runningRunEnd.has(dir)) return null;
+    if (runningRunEnd.has(dir)) return {};
     runningRunEnd.add(dir);
     const claimPath = join(dir, RUN_END_CLAIM);
-    const claim = { ...RUN_END_CLAIMANT, claimedAt: new Date().toISOString(), id: claimSuffix() };
+    const claim = { host: hostname(), pid: process.pid, claimedAt: new Date().toISOString(), id: claimSuffix() };
     const draft = `${claimPath}.new-${claim.id}`;
     let claimed = false;
+    let retryAt: number | undefined;
     try {
       await writeFile(draft, JSON.stringify(claim), { flag: "wx" });
       for (let attempt = 0; attempt < 2 && !claimed; attempt += 1) {
         claimed = await link(draft, claimPath).then(() => true, () => false);
-        if (!claimed) {
-          const seen = await readClaim(claimPath);
-          if (!claimIsStale(seen)) break;
-          await takeOverStaleClaim(claimPath, seen);
+        if (claimed) break;
+        const seen = await readClaim(claimPath);
+        const expiresAt = claimExpiresAt(seen);
+        if (seen && expiresAt > Date.now()) {
+          retryAt = expiresAt;
+          break;
         }
+        if (!seen) {
+          // Unreadable (or just removed): judge it by its file age instead.
+          const age = await stat(claimPath).then((info) => Date.now() - info.mtimeMs, () => Number.POSITIVE_INFINITY);
+          if (age < claimLifetimeMs()) {
+            retryAt = Date.now() + claimLifetimeMs() - age;
+            break;
+          }
+        }
+        await takeOverStaleClaim(claimPath, seen);
       }
     } catch {
       claimed = false;
@@ -93,7 +101,7 @@ export function createCycleStore(deps: CycleStoreDeps) {
     if (!claimed || current?.state !== "pending") {
       if (claimed) await release();
       else runningRunEnd.delete(dir);
-      return null;
+      return { retryAt };
     }
     return { release };
   }
@@ -101,7 +109,10 @@ export function createCycleStore(deps: CycleStoreDeps) {
     if (!runEnd?.command) return;
     const job = (async () => {
       const lock = await claimRunEndCommand(dir);
-      if (!lock) return;
+      if (!lock.release) {
+        if (lock.retryAt) setTimeout(() => startRunEndCommand(dir, request), Math.max(0, lock.retryAt - Date.now()) + 1000).unref();
+        return;
+      }
       try {
         const base = { ...request, command: runEnd.command, startedAt: new Date().toISOString() };
         let result: any;
@@ -119,7 +130,6 @@ export function createCycleStore(deps: CycleStoreDeps) {
         }
         await filesystemStore.saveJson(join(dir, RUN_END_FILE), { ...result, state: "finished", finishedAt: new Date().toISOString() });
       } finally {
-        runningRunEnd.delete(dir);
         await lock.release().catch(() => undefined);
       }
     })().catch(() => undefined);

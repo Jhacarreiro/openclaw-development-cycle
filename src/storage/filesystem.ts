@@ -8,7 +8,7 @@ import { createEventLogWriter, defaultEventLogPolicy, type EventLogPolicy } from
 // into the lock dir so release/write can refuse to touch a replacement lock.
 // Stale takeover requires age beyond the stale grace and a dead owner pid; a live
 // holder is never evicted just because it paused past the timeout.
-export function isProcessAlive(pid: number): boolean {
+function isProcessAlive(pid: number): boolean {
   if (!Number.isInteger(pid) || pid <= 0) return false;
   try {
     process.kill(pid, 0);

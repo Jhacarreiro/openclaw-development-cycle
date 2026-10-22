@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { access, mkdir, mkdtemp, readFile, rm, utimes, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { createCycleStore } from "../dist/cycle/cycle-store.js";
@@ -148,13 +148,19 @@ test("two gateways resuming the same state root run a pending command once", asy
 });
 
 test("a claim left by a gateway that died, even one with this process's pid, does not block resume", async (t) => {
-  for (const pid of [process.pid, 2 ** 22 + 17]) {
+  const earlier = [
+    [2 ** 22 + 17, null],
+    [process.pid, null],
+    [process.pid, JSON.stringify({ host: hostname(), pid: process.pid, token: "earlier-gateway" })],
+  ];
+  for (const [pid, claimant] of earlier) {
     const { root, store, dir, cycle } = await fixture(t, recorder(0));
     await store.saveJson(join(dir, "status.json"), { phase: "merged", project: "demo", runId: "run-1" });
     await store.saveJson(join(dir, "run_end_command.json"), { schemaVersion: 1, state: "pending", phase: "merged" });
     const lockDir = join(dir, "run_end_command.lock");
     await mkdir(lockDir);
     await writeFile(join(lockDir, "owner"), `${pid}:earlier-gateway`);
+    if (claimant) await writeFile(join(lockDir, "claimant"), claimant);
     const past = new Date(Date.now() - 60_000);
     await utimes(join(lockDir, "owner"), past, past);
     await utimes(lockDir, past, past);
@@ -162,6 +168,38 @@ test("a claim left by a gateway that died, even one with this process's pid, doe
     await cycle.resumeRunEndCommands(join(root, "runs"));
     await cycle.settleRunEndCommands();
 
-    assert.deepEqual(await calls(dir), [dir], `claim left by pid ${pid}`);
+    assert.deepEqual(await calls(dir), [dir], `claim left by pid ${pid} ${claimant ? "with" : "without"} a claimant`);
   }
+});
+
+test("a claim held by a running command is not taken over by another store in the same process", async (t) => {
+  const { root, store, dir } = await fixture(t, recorder(0));
+  const slow = { command: "sh", args: ["-c", `printf '%s\\n' "$1" >> "$1/calls"; sleep 1`, "sh"], timeoutSeconds: 30 };
+  await store.saveJson(join(dir, "status.json"), { phase: "closed_success", project: "demo", runId: "run-1" });
+  await store.saveJson(join(dir, "run_end_command.json"), { schemaVersion: 1, state: "pending", phase: "closed_success" });
+  const gateway = () => createCycleStore({ filesystemStore: createFilesystemStore(root), cycleMessageDeliveryQueue: null, developmentCycleConfig: { runEnd: slow } });
+  const [first, second] = [gateway(), gateway()];
+
+  await first.resumeRunEndCommands(join(root, "runs"));
+  while ((await calls(dir)).length === 0) await new Promise((resolve) => setTimeout(resolve, 20));
+  await second.resumeRunEndCommands(join(root, "runs"));
+  await Promise.all([first.settleRunEndCommands(), second.settleRunEndCommands()]);
+
+  assert.deepEqual(await calls(dir), [dir]);
+});
+
+test("a claim held by another host's process with the same pid is left alone", async (t) => {
+  const { root, store, dir, cycle } = await fixture(t, recorder(0));
+  await store.saveJson(join(dir, "status.json"), { phase: "merged", project: "demo", runId: "run-1" });
+  await store.saveJson(join(dir, "run_end_command.json"), { schemaVersion: 1, state: "pending", phase: "merged" });
+  const lockDir = join(dir, "run_end_command.lock");
+  await mkdir(lockDir);
+  await writeFile(join(lockDir, "owner"), `${process.pid}:other-host`);
+  await writeFile(join(lockDir, "claimant"), JSON.stringify({ host: `${hostname()}-other`, pid: process.pid, token: "other" }));
+
+  await cycle.resumeRunEndCommands(join(root, "runs"));
+  await cycle.settleRunEndCommands();
+
+  assert.deepEqual(await calls(dir), []);
+  assert.equal(JSON.parse(await readFile(join(dir, "run_end_command.json"), "utf8")).state, "pending");
 });

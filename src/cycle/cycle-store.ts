@@ -1,4 +1,6 @@
-import { readdir, readFile, rename, rm } from "node:fs/promises";
+import { randomBytes } from "node:crypto";
+import { readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { hostname } from "node:os";
 import { join } from "node:path";
 import { phaseNotificationForTransition } from "../core/phase-notifications.js";
 import { execSupervisedCommand } from "../runtime/processes.js";
@@ -16,6 +18,10 @@ export interface CycleStoreDeps {
 // from one of them to "closed", which is still closed and does not run it again.
 const CLOSED_PHASES = new Set(["merged", "closed_success", "closed_partial", "closed_invalid", "closed"]);
 
+// Run-end commands this process is running, shared by every cycle store in it, and the token its claims carry.
+const runningRunEnd = new Set<string>();
+const RUN_END_CLAIMANT = JSON.stringify({ host: hostname(), pid: process.pid, token: randomBytes(8).toString("hex") });
+
 export function createCycleStore(deps: CycleStoreDeps) {
   const { filesystemStore, cycleMessageDeliveryQueue } = deps;
   const runEnd = deps.developmentCycleConfig?.runEnd;
@@ -32,21 +38,26 @@ export function createCycleStore(deps: CycleStoreDeps) {
   }
   // A run's command is claimed with a lock held while it runs, so two gateways sharing the state root (or a resume
   // racing a close) never start it twice. A lock left by a process that died is taken over, including one left by an
-  // earlier gateway that had the same pid, which is common in a container.
+  // earlier gateway on this host that had the same pid, which is common in a container: its claimant token differs.
   const RUN_END_LOCK = "run_end_command.lock";
-  const runningRunEnd = new Set<string>();
   async function claimRunEndCommand(dir: string) {
     // Reserved before any await, so a second start in this process sees it at once.
     if (runningRunEnd.has(dir)) return null;
     runningRunEnd.add(dir);
     const lockDir = join(dir, RUN_END_LOCK);
     const owner = await readFile(join(lockDir, "owner"), "utf8").catch(() => "");
-    if (owner.startsWith(`${process.pid}:`)) {
+    const claimant = await readFile(join(lockDir, "claimant"), "utf8").then((text) => JSON.parse(text)).catch(() => null);
+    const mine = JSON.parse(RUN_END_CLAIMANT);
+    // Every live claim of this process is in runningRunEnd, so a same-pid lock here is an earlier process's, unless its
+    // claimant says it belongs to another host whose process has the same pid.
+    const earlier = !claimant || (claimant.host === mine.host && claimant.token !== mine.token);
+    if (owner.startsWith(`${process.pid}:`) && earlier) {
       const trash = `${lockDir}.stale-${Date.now().toString(16)}-${Math.random().toString(16).slice(2)}`;
       await rename(lockDir, trash).then(() => rm(trash, { recursive: true, force: true })).catch(() => undefined);
     }
     const lock = await acquireLock(lockDir, 200).catch(() => null);
-    const current = lock ? await filesystemStore.loadJson<any>(join(dir, RUN_END_FILE)).catch(() => null) : null;
+    const claimed = lock ? await writeFile(join(lockDir, "claimant"), RUN_END_CLAIMANT).then(() => true, () => false) : false;
+    const current = claimed ? await filesystemStore.loadJson<any>(join(dir, RUN_END_FILE)).catch(() => null) : null;
     if (!lock || current?.state !== "pending") {
       await lock?.release().catch(() => undefined);
       runningRunEnd.delete(dir);

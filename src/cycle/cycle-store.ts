@@ -44,11 +44,9 @@ export function createCycleStore(deps: CycleStoreDeps) {
   const claimLifetimeMs = () => ((runEnd?.timeoutSeconds || 300) + 60) * 1000;
   const claimSuffix = () => `${Date.now().toString(16)}-${randomBytes(6).toString("hex")}`;
   const readClaim = (path: string) => readFile(path, "utf8").then((text) => JSON.parse(text)).catch(() => null);
-  const claimExpiresAt = (claim: any) => {
-    const claimedAt = Date.parse(String(claim?.claimedAt ?? ""));
-    // An unreadable claim is aged by nothing it says; give it one full lifetime from now.
-    return Number.isFinite(claimedAt) ? claimedAt + claimLifetimeMs() : Number.NaN;
-  };
+  // A claim carries its own expiry, from the time limit of the gateway that made it, so a gateway configured with a
+  // shorter limit never takes over a command that may still run.
+  const claimExpiresAt = (claim: any) => Date.parse(String(claim?.expiresAt ?? ""));
   async function takeOverStaleClaim(claimPath: string, seen: any) {
     const moved = `${claimPath}.stale-${claimSuffix()}`;
     if (!(await rename(claimPath, moved).then(() => true, () => false))) return;
@@ -62,7 +60,11 @@ export function createCycleStore(deps: CycleStoreDeps) {
     if (runningRunEnd.has(dir)) return {};
     runningRunEnd.add(dir);
     const claimPath = join(dir, RUN_END_CLAIM);
-    const claim = { host: hostname(), pid: process.pid, claimedAt: new Date().toISOString(), id: claimSuffix() };
+    const now = Date.now();
+    const claim = {
+      host: hostname(), pid: process.pid, claimedAt: new Date(now).toISOString(),
+      expiresAt: new Date(now + claimLifetimeMs()).toISOString(), id: claimSuffix(),
+    };
     const draft = `${claimPath}.new-${claim.id}`;
     let claimed = false;
     let retryAt: number | undefined;
@@ -73,12 +75,13 @@ export function createCycleStore(deps: CycleStoreDeps) {
         if (claimed) break;
         const seen = await readClaim(claimPath);
         const expiresAt = claimExpiresAt(seen);
-        if (seen && expiresAt > Date.now()) {
-          retryAt = expiresAt;
-          break;
-        }
-        if (!seen) {
-          // Unreadable (or just removed): judge it by its file age instead.
+        if (Number.isFinite(expiresAt)) {
+          if (expiresAt > Date.now()) {
+            retryAt = expiresAt;
+            break;
+          }
+        } else {
+          // Unreadable, without an expiry, or just removed: judge it by its file age instead.
           const age = await stat(claimPath).then((info) => Date.now() - info.mtimeMs, () => Number.POSITIVE_INFINITY);
           if (age < claimLifetimeMs()) {
             retryAt = Date.now() + claimLifetimeMs() - age;

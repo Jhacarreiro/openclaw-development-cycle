@@ -157,8 +157,8 @@ const pendingClosedRun = async (store, dir) => {
 test("an expired claim does not block resume", async (t) => {
   const expired = new Date(Date.now() - 600_000);
   const left = {
-    "a claim from this host": { host: hostname(), pid: process.pid, claimedAt: expired.toISOString() },
-    "a claim from another host": { host: `${hostname()}-other`, pid: 1, claimedAt: expired.toISOString() },
+    "a claim from this host": { host: hostname(), pid: process.pid, claimedAt: expired.toISOString(), expiresAt: expired.toISOString() },
+    "a claim from another host": { host: `${hostname()}-other`, pid: 1, claimedAt: expired.toISOString(), expiresAt: expired.toISOString() },
     "an unreadable claim file": null,
   };
   for (const [name, claim] of Object.entries(left)) {
@@ -179,11 +179,9 @@ test("an expired claim does not block resume", async (t) => {
 });
 
 test("a command blocked by a claim runs once the claim expires", async (t) => {
-  const quick = { ...recorder(0), timeoutSeconds: 1 };
-  const { root, store, dir, cycle } = await fixture(t, quick);
+  const { root, store, dir, cycle } = await fixture(t, recorder(0));
   await pendingClosedRun(store, dir);
-  // A one-second time limit gives a claim 61 seconds; this one has about one second left.
-  await leaveClaim(dir, { host: hostname(), pid: process.pid, claimedAt: new Date(Date.now() - 60_000).toISOString() });
+  await leaveClaim(dir, { host: hostname(), pid: process.pid, claimedAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 1000).toISOString() });
 
   await cycle.resumeRunEndCommands(join(root, "runs"));
   await cycle.settleRunEndCommands();
@@ -214,10 +212,13 @@ test("a claim held by a running command is not taken over by another store in th
 
 test("a live claim is left alone, even when the gateway that made it is gone", async (t) => {
   const recent = new Date().toISOString();
+  const later = new Date(Date.now() + 300_000).toISOString();
   const live = {
-    "another host with this pid": { host: `${hostname()}-other`, pid: process.pid, claimedAt: recent },
-    "a dead gateway on this host, whose command may still run": { host: hostname(), pid: 2 ** 22 + 17, claimedAt: recent },
-    "an earlier gateway with this pid": { host: hostname(), pid: process.pid, claimedAt: recent },
+    "another host with this pid": { host: `${hostname()}-other`, pid: process.pid, claimedAt: recent, expiresAt: later },
+    "a dead gateway on this host, whose command may still run": { host: hostname(), pid: 2 ** 22 + 17, claimedAt: recent, expiresAt: later },
+    "an earlier gateway with this pid": { host: hostname(), pid: process.pid, claimedAt: recent, expiresAt: later },
+    // Made by a gateway with a longer time limit than this one's (30 seconds): its own expiry is what counts.
+    "a gateway with a longer time limit": { host: hostname(), pid: 1, claimedAt: new Date(Date.now() - 120_000).toISOString(), expiresAt: later },
   };
   for (const [name, claim] of Object.entries(live)) {
     const { root, store, dir, cycle } = await fixture(t, recorder(0));

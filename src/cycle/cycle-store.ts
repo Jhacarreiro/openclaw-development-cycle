@@ -1,10 +1,10 @@
-import { readdir } from "node:fs/promises";
+import { readdir, readFile, rename, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { phaseNotificationForTransition } from "../core/phase-notifications.js";
 import { execSupervisedCommand } from "../runtime/processes.js";
 import { excerpt } from "./files.js";
 import type { createNotificationService } from "../runtime/notifications.js";
-import type { FilesystemStore } from "../storage/filesystem.js";
+import { acquireLock, type FilesystemStore } from "../storage/filesystem.js";
 
 export interface CycleStoreDeps {
   filesystemStore: FilesystemStore;
@@ -30,24 +30,55 @@ export function createCycleStore(deps: CycleStoreDeps) {
     await filesystemStore.saveJson(join(dir, RUN_END_FILE), request);
     return request;
   }
+  // A run's command is claimed with a lock held while it runs, so two gateways sharing the state root (or a resume
+  // racing a close) never start it twice. A lock left by a process that died is taken over, including one left by an
+  // earlier gateway that had the same pid, which is common in a container.
+  const RUN_END_LOCK = "run_end_command.lock";
+  const runningRunEnd = new Set<string>();
+  async function claimRunEndCommand(dir: string) {
+    // Reserved before any await, so a second start in this process sees it at once.
+    if (runningRunEnd.has(dir)) return null;
+    runningRunEnd.add(dir);
+    const lockDir = join(dir, RUN_END_LOCK);
+    const owner = await readFile(join(lockDir, "owner"), "utf8").catch(() => "");
+    if (owner.startsWith(`${process.pid}:`)) {
+      const trash = `${lockDir}.stale-${Date.now().toString(16)}-${Math.random().toString(16).slice(2)}`;
+      await rename(lockDir, trash).then(() => rm(trash, { recursive: true, force: true })).catch(() => undefined);
+    }
+    const lock = await acquireLock(lockDir, 200).catch(() => null);
+    const current = lock ? await filesystemStore.loadJson<any>(join(dir, RUN_END_FILE)).catch(() => null) : null;
+    if (!lock || current?.state !== "pending") {
+      await lock?.release().catch(() => undefined);
+      runningRunEnd.delete(dir);
+      return null;
+    }
+    return lock;
+  }
   function startRunEndCommand(dir: string, request: any) {
     if (!runEnd?.command) return;
-    const base = { ...request, command: runEnd.command, startedAt: new Date().toISOString() };
     const job = (async () => {
-      let result: any;
+      const lock = await claimRunEndCommand(dir);
+      if (!lock) return;
       try {
-        const out = await execSupervisedCommand(runEnd.command, [...runEnd.args, dir], {
-          cwd: dir, timeout: runEnd.timeoutSeconds * 1000, maxBuffer: 1024 * 1024,
-        });
-        result = { ...base, ok: true, exitCode: 0, stdout: excerpt(String(out.stdout || ""), 2000) };
-      } catch (err: any) {
-        result = {
-          ...base, ok: false, exitCode: typeof err?.code === "number" ? err.code : null,
-          error: excerpt(String(err?.message || err), 1000),
-          stdout: excerpt(String(err?.stdout || ""), 2000), stderr: excerpt(String(err?.stderr || ""), 2000),
-        };
+        const base = { ...request, command: runEnd.command, startedAt: new Date().toISOString() };
+        let result: any;
+        try {
+          const out = await execSupervisedCommand(runEnd.command, [...runEnd.args, dir], {
+            cwd: dir, timeout: runEnd.timeoutSeconds * 1000, maxBuffer: 1024 * 1024,
+          });
+          result = { ...base, ok: true, exitCode: 0, stdout: excerpt(String(out.stdout || ""), 2000) };
+        } catch (err: any) {
+          result = {
+            ...base, ok: false, exitCode: typeof err?.code === "number" ? err.code : null,
+            error: excerpt(String(err?.message || err), 1000),
+            stdout: excerpt(String(err?.stdout || ""), 2000), stderr: excerpt(String(err?.stderr || ""), 2000),
+          };
+        }
+        await filesystemStore.saveJson(join(dir, RUN_END_FILE), { ...result, state: "finished", finishedAt: new Date().toISOString() });
+      } finally {
+        runningRunEnd.delete(dir);
+        await lock.release().catch(() => undefined);
       }
-      await filesystemStore.saveJson(join(dir, RUN_END_FILE), { ...result, state: "finished", finishedAt: new Date().toISOString() });
     })().catch(() => undefined);
     runEndCommands.add(job);
     job.finally(() => runEndCommands.delete(job));

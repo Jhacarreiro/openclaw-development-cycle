@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { access, mkdtemp, readFile, rm } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, rm, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -130,4 +130,38 @@ test("a pending run-end command still runs on resume after the run was moved on 
   assert.equal(await cycle.resumeRunEndCommands(join(root, "runs")), 1);
   await cycle.settleRunEndCommands();
   assert.deepEqual(await calls(dir), [dir]);
+});
+
+test("two gateways resuming the same state root run a pending command once", async (t) => {
+  const { root, store, dir } = await fixture(t, recorder(0));
+  const slow = { command: "sh", args: ["-c", `printf '%s\\n' "$1" >> "$1/calls"; sleep 1`, "sh"], timeoutSeconds: 30 };
+  await store.saveJson(join(dir, "status.json"), { phase: "closed_success", project: "demo", runId: "run-1" });
+  await store.saveJson(join(dir, "run_end_command.json"), { schemaVersion: 1, state: "pending", phase: "closed_success" });
+  const gateway = () => createCycleStore({ filesystemStore: createFilesystemStore(root), cycleMessageDeliveryQueue: null, developmentCycleConfig: { runEnd: slow } });
+  const [first, second] = [gateway(), gateway()];
+
+  await Promise.all([first.resumeRunEndCommands(join(root, "runs")), second.resumeRunEndCommands(join(root, "runs"))]);
+  await Promise.all([first.settleRunEndCommands(), second.settleRunEndCommands()]);
+
+  assert.deepEqual(await calls(dir), [dir]);
+  assert.equal(JSON.parse(await readFile(join(dir, "run_end_command.json"), "utf8")).state, "finished");
+});
+
+test("a claim left by a gateway that died, even one with this process's pid, does not block resume", async (t) => {
+  for (const pid of [process.pid, 2 ** 22 + 17]) {
+    const { root, store, dir, cycle } = await fixture(t, recorder(0));
+    await store.saveJson(join(dir, "status.json"), { phase: "merged", project: "demo", runId: "run-1" });
+    await store.saveJson(join(dir, "run_end_command.json"), { schemaVersion: 1, state: "pending", phase: "merged" });
+    const lockDir = join(dir, "run_end_command.lock");
+    await mkdir(lockDir);
+    await writeFile(join(lockDir, "owner"), `${pid}:earlier-gateway`);
+    const past = new Date(Date.now() - 60_000);
+    await utimes(join(lockDir, "owner"), past, past);
+    await utimes(lockDir, past, past);
+
+    await cycle.resumeRunEndCommands(join(root, "runs"));
+    await cycle.settleRunEndCommands();
+
+    assert.deepEqual(await calls(dir), [dir], `claim left by pid ${pid}`);
+  }
 });

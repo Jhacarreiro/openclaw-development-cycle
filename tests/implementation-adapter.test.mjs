@@ -182,7 +182,7 @@ function runCodexBridge(store, config = {}) {
   writeFileSync(join(pkg, "package.json"), JSON.stringify({
     name: "openclaw",
     type: "module",
-    exports: { "./plugin-sdk/agent-runtime": "./agent-runtime.js", "./plugin-sdk/config-runtime": "./config-runtime.js" },
+    exports: { "./plugin-sdk/agent-runtime": "./agent-runtime.js", "./plugin-sdk/runtime-config-snapshot": "./runtime-config-snapshot.js" },
   }));
   // Like OpenClaw's resolver: the store's order wins over the configured one, and
   // expired OAuth profiles are dropped before the caller sees the order.
@@ -194,8 +194,8 @@ function runCodexBridge(store, config = {}) {
     "}",
     "",
   ].join("\n"));
-  writeFileSync(join(pkg, "config-runtime.js"), [
-    "export function loadConfig() { console.log('Config warnings: fake'); return JSON.parse(process.env.FAKE_OPENCLAW_CONFIG); }",
+  writeFileSync(join(pkg, "runtime-config-snapshot.js"), [
+    "export function getRuntimeConfig() { console.log('Config warnings: fake'); return JSON.parse(process.env.FAKE_OPENCLAW_CONFIG); }",
     "",
   ].join("\n"));
   writeFileSync(join(pkg, "openclaw"), "#!/bin/sh\nexit 0\n");

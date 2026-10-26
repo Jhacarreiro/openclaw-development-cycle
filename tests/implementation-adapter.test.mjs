@@ -302,6 +302,28 @@ test("Codex bridge starts the app-server behind a configured prefix, after readi
   assert.match(bad.stderr, /must be a JSON array of strings/);
 });
 
+const hasBwrap = spawnSync("bwrap", ["--ro-bind", "/", "/", "--unshare-pid", "true"]).status === 0;
+test("Codex bridge behind a real bwrap prefix with its own PID namespace leaves nothing running", { skip: !hasBwrap && "bwrap is not available here" }, () => {
+  const store = { profiles: { "openai:account": liveOpenAiProfile("live-account") } };
+  const marker = `development-cycle-bwrap-${process.pid}-${Date.now()}`;
+  const dir = mkdtempSync(join(tmpdir(), "development-cycle-codex-bwrap-"));
+  try {
+    // The sandboxed side starts a long-lived process of its own before the app-server.
+    const inner = join(dir, "inner.sh");
+    writeFileSync(inner, `#!/bin/sh\nsh -c 'sleep 60; : ${marker}' &\nexec "$@"\n`);
+    chmodSync(inner, 0o755);
+    const prefix = ["bwrap", "--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc", "--bind", tmpdir(), tmpdir(), "--unshare-pid", "--die-with-parent", "--", inner];
+    const result = runCodexBridge(store, {}, { DEVELOPMENT_CYCLE_CODEX_APP_SERVER_PREFIX: JSON.stringify(prefix) });
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.stdout, "live-account");
+    const left = () => spawnSync("pgrep", ["-f", marker], { encoding: "utf8" }).stdout.trim();
+    for (const end = Date.now() + 3000; left() && Date.now() < end;) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
+    assert.equal(left(), "", "a process from inside the sandbox outlived the bridge");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("Codex bridge discovers and forwards to the real CLI for non-exec commands", () => {
   const root = mkdtempSync(join(tmpdir(), "development-cycle-codex-bridge-"));
   const fakeBinDir = join(root, "real");

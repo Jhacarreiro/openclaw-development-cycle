@@ -175,7 +175,7 @@ test("Codex bridge reads OpenClaw's auth store without credential files or local
 
 // A fake OpenClaw package serving the given auth store and config, and a fake
 // Codex app-server that answers with the account id the bridge logged in with.
-function runCodexBridge(store, config = {}) {
+function runCodexBridge(store, config = {}, extraEnv = {}) {
   const root = mkdtempSync(join(tmpdir(), "development-cycle-codex-bridge-oauth-"));
   const pkg = join(root, "openclaw");
   mkdirSync(pkg, { recursive: true });
@@ -229,6 +229,7 @@ function runCodexBridge(store, config = {}) {
         DEVELOPMENT_CYCLE_CODEX_REAL_BIN: fakeCodex,
         FAKE_OPENCLAW_STORE: JSON.stringify(store),
         FAKE_OPENCLAW_CONFIG: JSON.stringify(config),
+        ...extraEnv,
       },
     });
     return { status: result.status, stdout: result.stdout.trim(), stderr: result.stderr.trim() };
@@ -260,6 +261,75 @@ test("Codex bridge stays within the configured profile order and says why no pro
   }, { auth: { order: { openai: ["openai:default"] } } });
   assert.equal(result.status, 78);
   assert.match(result.stderr, /OpenClaw OAuth profile read failed: openai oauth profile expired or near expiry/);
+});
+
+// Gone, or a zombie waiting for whoever adopted it to reap it.
+function stoppedWithin(pid, ms) {
+  for (const end = Date.now() + ms; Date.now() < end; Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50)) {
+    try {
+      process.kill(pid, 0);
+      if (readFileSync(`/proc/${pid}/stat`, "utf8").split(") ")[1]?.startsWith("Z")) return true;
+    } catch {
+      return true;
+    }
+  }
+  return false;
+}
+
+test("Codex bridge starts the app-server behind a configured prefix, after reading auth outside it", () => {
+  const store = { profiles: { "openai:account": liveOpenAiProfile("live-account") } };
+  const dir = mkdtempSync(join(tmpdir(), "development-cycle-codex-prefix-"));
+  try {
+    const log = join(dir, "prefix.log");
+    const prefix = join(dir, "prefix.sh");
+    const leftover = join(dir, "leftover.pid");
+    const ids = join(dir, "ids");
+    // A wrapper that leaves a process of its own behind, as a sandbox's init could, and records its
+    // own pid, process group and session.
+    writeFileSync(prefix, `#!/bin/sh\nprintf '%s\\n' "$@" > ${JSON.stringify(log)}\necho $$ $(cut -d')' -f2 /proc/$$/stat | cut -d' ' -f4,5) > ${JSON.stringify(ids)}\nsleep 60 &\necho $! > ${JSON.stringify(leftover)}\nshift\nexec "$@"\n`);
+    chmodSync(prefix, 0o755);
+    const result = runCodexBridge(store, {}, { DEVELOPMENT_CYCLE_CODEX_APP_SERVER_PREFIX: JSON.stringify([prefix, "--marker"]) });
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.stdout, "live-account");
+    const args = readFileSync(log, "utf8").trim().split("\n");
+    assert.equal(args[0], "--marker");
+    assert.deepEqual(args.slice(-2), ["app-server", "--stdio"]);
+    const pid = Number(readFileSync(leftover, "utf8"));
+    assert.ok(stoppedWithin(pid, 3000), "the wrapper's leftover process outlived the bridge");
+    // A group of its own, in the session the runner and its supervisor stop the run by.
+    const [wrapper, group, session] = readFileSync(ids, "utf8").trim().split(" ").map(Number);
+    assert.equal(group, wrapper);
+    assert.equal(session, Number(readFileSync("/proc/self/stat", "utf8").split(") ")[1].split(" ")[3]));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+  const bad = runCodexBridge(store, {}, { DEVELOPMENT_CYCLE_CODEX_APP_SERVER_PREFIX: "{\"not\": \"a list\"}" });
+  assert.equal(bad.status, 64);
+  assert.match(bad.stderr, /must be a JSON array of strings/);
+});
+
+const bwrap = spawnSync("sh", ["-c", "command -v bwrap"], { encoding: "utf8" }).stdout.trim();
+const hasBwrap = Boolean(bwrap) && spawnSync(bwrap, ["--ro-bind", "/", "/", "--unshare-pid", "true"]).status === 0;
+test("Codex bridge behind a real bwrap prefix with its own PID namespace leaves nothing running", { skip: !hasBwrap && "bwrap is not available here" }, () => {
+  const store = { profiles: { "openai:account": liveOpenAiProfile("live-account") } };
+  const marker = `development-cycle-bwrap-${process.pid}-${Date.now()}`;
+  const dir = mkdtempSync(join(tmpdir(), "development-cycle-codex-bwrap-"));
+  try {
+    // The sandboxed side starts a long-lived process of its own before the app-server.
+    const inner = join(dir, "inner.sh");
+    writeFileSync(inner, `#!/bin/sh\nsh -c 'sleep 60; : ${marker}' &\nexec "$@"\n`);
+    chmodSync(inner, 0o755);
+    // By absolute path: the bridge runs with a minimal PATH.
+    const prefix = [bwrap, "--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc", "--bind", tmpdir(), tmpdir(), "--unshare-pid", "--die-with-parent", "--", inner];
+    const result = runCodexBridge(store, {}, { DEVELOPMENT_CYCLE_CODEX_APP_SERVER_PREFIX: JSON.stringify(prefix) });
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.stdout, "live-account");
+    const left = () => spawnSync("pgrep", ["-f", marker], { encoding: "utf8" }).stdout.trim();
+    for (const end = Date.now() + 3000; left() && Date.now() < end;) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
+    assert.equal(left(), "", "a process from inside the sandbox outlived the bridge");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("Codex bridge discovers and forwards to the real CLI for non-exec commands", () => {

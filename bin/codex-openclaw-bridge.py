@@ -91,7 +91,31 @@ except Exception as e: print("development-cycle codex bridge: "+str(e),file=sys.
 prompt=sys.stdin.read() or " ".join(pos)
 if not prompt.strip(): prompt="Review current working-tree changes for correctness, regressions and actionable bugs."
 home=tempfile.mkdtemp(prefix="dc-codex-")
-p=subprocess.Popen([real,"app-server","--stdio"],cwd=os.getcwd(),env=env(home),stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,bufsize=1)
+# A sandbox for the app-server alone (say, bwrap hiding what it must not read), as a JSON argv prefix.
+# OpenClaw's auth store is read above, outside it, since OpenClaw refuses its state from a foreign
+# PID namespace; the model's file and command access all goes through the app-server.
+prefix=os.getenv("DEVELOPMENT_CYCLE_CODEX_APP_SERVER_PREFIX","").strip()
+try:
+ prefix=json.loads(prefix) if prefix else []
+ if not isinstance(prefix,list) or not all(isinstance(x,str) for x in prefix): raise ValueError
+except ValueError:
+ print("development-cycle codex bridge: DEVELOPMENT_CYCLE_CODEX_APP_SERVER_PREFIX must be a JSON array of strings",file=sys.stderr); sys.exit(64)
+# Behind a prefix the app-server is not our direct child (and may sit in its own PID namespace), so it
+# gets a process group of its own and the whole group is stopped at the end. It stays in our session:
+# the runner and its supervisor stop a run by its session, and kill us before our own 5 s wait is up,
+# so the session is what still reaches a group that outlives us. The prefix must take its descendants
+# down when it is killed (bwrap: --unshare-pid or --die-with-parent); one that moves them into a
+# session of their own (setsid) is not supported.
+p=subprocess.Popen(prefix+[real,"app-server","--stdio"],cwd=os.getcwd(),env=env(home),stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,bufsize=1,preexec_fn=os.setpgrp if prefix else None)
+def stop_app_server():
+ if not prefix:
+  p.terminate(); return
+ try: os.killpg(p.pid,signal.SIGTERM)
+ except ProcessLookupError: return
+ try: p.wait(timeout=5)
+ except subprocess.TimeoutExpired: pass
+ try: os.killpg(p.pid,signal.SIGKILL)
+ except ProcessLookupError: pass
 def stop(signum,frame): raise SystemExit(128+signum)
 signal.signal(signal.SIGTERM,stop); signal.signal(signal.SIGINT,stop)
 cv=threading.Condition(); pending={}; n=1; out=[]; done=False; err=""
@@ -147,6 +171,6 @@ try:
 except Exception as e:
  print("development-cycle codex bridge: "+str(e),file=sys.stderr);sys.exit(1)
 finally:
- try:p.terminate()
+ try:stop_app_server()
  except:pass
  shutil.rmtree(home,ignore_errors=True)

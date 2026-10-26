@@ -37,6 +37,7 @@ The command adapter is the portable default.
 | `DEVELOPMENT_CYCLE_OCTOPUS_CONTEXT_BUDGET` | `64000` | Prompt budget in tokens passed to Octopus as `OCTOPUS_CONTEXT_BUDGET` for implementation launches and council reviews. Octopus's own default (12000) makes it truncate planning prompts; it still caps the budget at each known model's context window. |
 | `DEVELOPMENT_CYCLE_OCTOPUS_CORRECTION_ROUNDS` | `3` | Maximum Octopus review/correction rounds per implementation launch, passed as `OCTOPUS_TANGLE_CORRECTION_HARD_CAP` (Octopus defaults to 10). When review still has blocking findings at the cap, the cycle delivers the partial output and opens one follow-up issue per remaining finding. |
 | `DEVELOPMENT_CYCLE_OCTOPUS_WRITE_SCOPE_MODE` | `adaptive` | Tangle write-scope policy: `adaptive` or `strict`. |
+| `DEVELOPMENT_CYCLE_CODEX_APP_SERVER_PREFIX` | empty | JSON array of strings placed before the Codex app-server command by the Codex bridge, to run the app-server in a sandbox such as bwrap. The bridge still reads OpenClaw's login outside it. The prefix must take its descendants down when it is killed (for bwrap, `--unshare-pid` or `--die-with-parent`). See [Codex app-server sandbox](adapters.md#codex-app-server-sandbox). |
 | `DEVELOPMENT_CYCLE_LOOP_UNTIL_APPROVED` | `true` | Retry failed Octopus subtasks until the configured quality retry limit is reached. Set `false` only for deliberate one-shot runs. |
 
 Example command adapter:

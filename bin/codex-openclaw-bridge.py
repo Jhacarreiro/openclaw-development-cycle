@@ -100,7 +100,18 @@ try:
  if not isinstance(prefix,list) or not all(isinstance(x,str) for x in prefix): raise ValueError
 except ValueError:
  print("development-cycle codex bridge: DEVELOPMENT_CYCLE_CODEX_APP_SERVER_PREFIX must be a JSON array of strings",file=sys.stderr); sys.exit(64)
-p=subprocess.Popen(prefix+[real,"app-server","--stdio"],cwd=os.getcwd(),env=env(home),stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,bufsize=1)
+# Behind a prefix the app-server is not our direct child (and may sit in its own PID namespace), so it
+# gets a process group of its own and the whole group is stopped at the end.
+p=subprocess.Popen(prefix+[real,"app-server","--stdio"],cwd=os.getcwd(),env=env(home),stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,bufsize=1,start_new_session=bool(prefix))
+def stop_app_server():
+ if not prefix:
+  p.terminate(); return
+ try: os.killpg(p.pid,signal.SIGTERM)
+ except ProcessLookupError: return
+ try: p.wait(timeout=5)
+ except subprocess.TimeoutExpired: pass
+ try: os.killpg(p.pid,signal.SIGKILL)
+ except ProcessLookupError: pass
 def stop(signum,frame): raise SystemExit(128+signum)
 signal.signal(signal.SIGTERM,stop); signal.signal(signal.SIGINT,stop)
 cv=threading.Condition(); pending={}; n=1; out=[]; done=False; err=""
@@ -156,6 +167,6 @@ try:
 except Exception as e:
  print("development-cycle codex bridge: "+str(e),file=sys.stderr);sys.exit(1)
 finally:
- try:p.terminate()
+ try:stop_app_server()
  except:pass
  shutil.rmtree(home,ignore_errors=True)

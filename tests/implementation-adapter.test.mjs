@@ -263,13 +263,28 @@ test("Codex bridge stays within the configured profile order and says why no pro
   assert.match(result.stderr, /OpenClaw OAuth profile read failed: openai oauth profile expired or near expiry/);
 });
 
+// Gone, or a zombie waiting for whoever adopted it to reap it.
+function stoppedWithin(pid, ms) {
+  for (const end = Date.now() + ms; Date.now() < end; Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50)) {
+    try {
+      process.kill(pid, 0);
+      if (readFileSync(`/proc/${pid}/stat`, "utf8").split(") ")[1]?.startsWith("Z")) return true;
+    } catch {
+      return true;
+    }
+  }
+  return false;
+}
+
 test("Codex bridge starts the app-server behind a configured prefix, after reading auth outside it", () => {
   const store = { profiles: { "openai:account": liveOpenAiProfile("live-account") } };
   const dir = mkdtempSync(join(tmpdir(), "development-cycle-codex-prefix-"));
   try {
     const log = join(dir, "prefix.log");
     const prefix = join(dir, "prefix.sh");
-    writeFileSync(prefix, `#!/bin/sh\nprintf '%s\\n' "$@" > ${JSON.stringify(log)}\nshift\nexec "$@"\n`);
+    const leftover = join(dir, "leftover.pid");
+    // A wrapper that leaves a process of its own behind, as a sandbox's init could.
+    writeFileSync(prefix, `#!/bin/sh\nprintf '%s\\n' "$@" > ${JSON.stringify(log)}\nsleep 60 &\necho $! > ${JSON.stringify(leftover)}\nshift\nexec "$@"\n`);
     chmodSync(prefix, 0o755);
     const result = runCodexBridge(store, {}, { DEVELOPMENT_CYCLE_CODEX_APP_SERVER_PREFIX: JSON.stringify([prefix, "--marker"]) });
     assert.equal(result.status, 0, result.stderr);
@@ -277,6 +292,8 @@ test("Codex bridge starts the app-server behind a configured prefix, after readi
     const args = readFileSync(log, "utf8").trim().split("\n");
     assert.equal(args[0], "--marker");
     assert.deepEqual(args.slice(-2), ["app-server", "--stdio"]);
+    const pid = Number(readFileSync(leftover, "utf8"));
+    assert.ok(stoppedWithin(pid, 3000), "the wrapper's leftover process outlived the bridge");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

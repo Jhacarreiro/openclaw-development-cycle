@@ -4,6 +4,7 @@ import { randomUUID } from "node:crypto";
 import { validationRuleMatches } from "../core/validation-config.js";
 import { cleanId } from "../core/ids.js";
 import { parseCouncilDecision, resolveAutoCouncilCorrectionsMax } from "../core/council-policy.js";
+import { clearedAttemptFailure } from "../core/runtime-failure.js";
 import { execSupervisedCommand } from "../runtime/processes.js";
 import { readTextIfExists, excerpt, readJsonIfExists, execSummary } from "./files.js";
 import type { createCycleStore } from "./cycle-store.js";
@@ -271,7 +272,7 @@ export function createCouncil(deps: CouncilDeps) {
     await updateImplementationObserverSession(dir, observerObservationId, { project, runId, command: "council-corrections", projectRoot, projectWikiPath, stdoutPath: launch.stdoutPath, stderrPath: launch.stderrPath, attemptId: launch.attemptId, status: "running", summary: `development_cycle council corrections ${project} running`, message: "Octopus council corrections runner launched; observer integration is optional." });
     const launchRecord = join(dir, "implementation_council_corrections_launch.json");
     await writeFile(launchRecord, JSON.stringify(launch, null, 2) + "\n");
-    const next = await cycleStatus(dir, { phase: "corrections_launched", owner: "implementation", implementationAdapter: launch.adapter, ok: false, councilCorrectionCount: count + 1, councilCorrectionFeedback: feedbackPath, nextAction: "Use development_cycle status to watch council corrections. Validation/council will rerun after corrections exit.", projectRoot, projectWikiPath, codexSandbox: defaultCodexSandbox, implementationCorrectionsSessionId: launch.sessionId, correctionsAttemptId: launch.attemptId, directCorrectionsStatus: launch.statusPath, directCorrectionsStdout: launch.stdoutPath, directCorrectionsStderr: launch.stderrPath, observerCorrectionsObservationId: observerObservationId, implementationCorrectionsRequest: requestPath, implementationCorrectionsLaunch: launchRecord, correctionsStdout: launch.stdoutPath, correctionsStderr: launch.stderrPath, externalValidation: "", validationSummary: "", councilReviewSummary: "", councilReviewSynthesis: "", councilReviewNeedsCorrections: null, councilReviewAttempts: 0 });
+    const next = await cycleStatus(dir, { ...clearedAttemptFailure(), phase: "corrections_launched", owner: "implementation", implementationAdapter: launch.adapter, councilCorrectionCount: count + 1, councilCorrectionFeedback: feedbackPath, nextAction: "Use development_cycle status to watch council corrections. Validation/council will rerun after corrections exit.", projectRoot, projectWikiPath, codexSandbox: defaultCodexSandbox, implementationCorrectionsSessionId: launch.sessionId, correctionsAttemptId: launch.attemptId, directCorrectionsStatus: launch.statusPath, directCorrectionsStdout: launch.stdoutPath, directCorrectionsStderr: launch.stderrPath, observerCorrectionsObservationId: observerObservationId, implementationCorrectionsRequest: requestPath, implementationCorrectionsLaunch: launchRecord, correctionsStdout: launch.stdoutPath, correctionsStderr: launch.stderrPath, externalValidation: "", validationSummary: "", councilReviewSummary: "", councilReviewSynthesis: "", councilReviewNeedsCorrections: null, councilReviewAttempts: 0 });
     return { ok: true, launch, feedbackPath, status: next };
   }
 

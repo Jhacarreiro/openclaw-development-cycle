@@ -175,7 +175,7 @@ test("Codex bridge reads OpenClaw's auth store without credential files or local
 
 // A fake OpenClaw package serving the given auth store and config, and a fake
 // Codex app-server that answers with the account id the bridge logged in with.
-function runCodexBridge(store, config = {}) {
+function runCodexBridge(store, config = {}, extraEnv = {}) {
   const root = mkdtempSync(join(tmpdir(), "development-cycle-codex-bridge-oauth-"));
   const pkg = join(root, "openclaw");
   mkdirSync(pkg, { recursive: true });
@@ -229,6 +229,7 @@ function runCodexBridge(store, config = {}) {
         DEVELOPMENT_CYCLE_CODEX_REAL_BIN: fakeCodex,
         FAKE_OPENCLAW_STORE: JSON.stringify(store),
         FAKE_OPENCLAW_CONFIG: JSON.stringify(config),
+        ...extraEnv,
       },
     });
     return { status: result.status, stdout: result.stdout.trim(), stderr: result.stderr.trim() };
@@ -260,6 +261,28 @@ test("Codex bridge stays within the configured profile order and says why no pro
   }, { auth: { order: { openai: ["openai:default"] } } });
   assert.equal(result.status, 78);
   assert.match(result.stderr, /OpenClaw OAuth profile read failed: openai oauth profile expired or near expiry/);
+});
+
+test("Codex bridge starts the app-server behind a configured prefix, after reading auth outside it", () => {
+  const store = { profiles: { "openai:account": liveOpenAiProfile("live-account") } };
+  const dir = mkdtempSync(join(tmpdir(), "development-cycle-codex-prefix-"));
+  try {
+    const log = join(dir, "prefix.log");
+    const prefix = join(dir, "prefix.sh");
+    writeFileSync(prefix, `#!/bin/sh\nprintf '%s\\n' "$@" > ${JSON.stringify(log)}\nshift\nexec "$@"\n`);
+    chmodSync(prefix, 0o755);
+    const result = runCodexBridge(store, {}, { DEVELOPMENT_CYCLE_CODEX_APP_SERVER_PREFIX: JSON.stringify([prefix, "--marker"]) });
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.stdout, "live-account");
+    const args = readFileSync(log, "utf8").trim().split("\n");
+    assert.equal(args[0], "--marker");
+    assert.deepEqual(args.slice(-2), ["app-server", "--stdio"]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+  const bad = runCodexBridge(store, {}, { DEVELOPMENT_CYCLE_CODEX_APP_SERVER_PREFIX: "{\"not\": \"a list\"}" });
+  assert.equal(bad.status, 64);
+  assert.match(bad.stderr, /must be a JSON array of strings/);
 });
 
 test("Codex bridge discovers and forwards to the real CLI for non-exec commands", () => {

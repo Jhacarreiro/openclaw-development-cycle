@@ -91,7 +91,16 @@ except Exception as e: print("development-cycle codex bridge: "+str(e),file=sys.
 prompt=sys.stdin.read() or " ".join(pos)
 if not prompt.strip(): prompt="Review current working-tree changes for correctness, regressions and actionable bugs."
 home=tempfile.mkdtemp(prefix="dc-codex-")
-p=subprocess.Popen([real,"app-server","--stdio"],cwd=os.getcwd(),env=env(home),stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,bufsize=1)
+# A sandbox for the app-server alone (say, bwrap hiding what it must not read), as a JSON argv prefix.
+# OpenClaw's auth store is read above, outside it, since OpenClaw refuses its state from a foreign
+# PID namespace; the model's file and command access all goes through the app-server.
+prefix=os.getenv("DEVELOPMENT_CYCLE_CODEX_APP_SERVER_PREFIX","").strip()
+try:
+ prefix=json.loads(prefix) if prefix else []
+ if not isinstance(prefix,list) or not all(isinstance(x,str) for x in prefix): raise ValueError
+except ValueError:
+ print("development-cycle codex bridge: DEVELOPMENT_CYCLE_CODEX_APP_SERVER_PREFIX must be a JSON array of strings",file=sys.stderr); sys.exit(64)
+p=subprocess.Popen(prefix+[real,"app-server","--stdio"],cwd=os.getcwd(),env=env(home),stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,bufsize=1)
 def stop(signum,frame): raise SystemExit(128+signum)
 signal.signal(signal.SIGTERM,stop); signal.signal(signal.SIGINT,stop)
 cv=threading.Condition(); pending={}; n=1; out=[]; done=False; err=""

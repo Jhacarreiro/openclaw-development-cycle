@@ -175,3 +175,57 @@ test("corrections relaunch ignores stale terminal markers", async (t) => {
   assert.equal(await readFile(join(sessionDir, "exit-code.txt"), "utf8"), "0\n");
   assert.equal(await readFile(join(sessionDir, "exited-at.txt"), "utf8"), "2000-01-01T00:00:00Z\n");
 });
+
+const staleFailure = {
+  ok: false,
+  error: "observer_root_session_creation_failed",
+  reason: "observer_root_session_creation_failed",
+  failureClass: "runtime_observation_blocker",
+  failureSeverity: "high",
+  failureHumanRequired: true,
+  failureSafeToAutoRetry: false,
+  failureAutoStopRecommended: true,
+  failureRecommendedAction: "Fix the observer before relaunching.",
+  failureMatched: { name: "observer_root_session_creation_failed" },
+  failureDetectedAt: "2000-01-01T00:00:00Z",
+  failureReplacedNextAction: "Call start_implementation.",
+};
+
+function assertNoStaleFailure(status) {
+  assert.equal(status.ok, true);
+  for (const field of Object.keys(staleFailure).filter((key) => key !== "ok")) assert.equal(status[field], null, field);
+}
+
+test("implementation retry does not inherit the failed attempt's error", async (t) => {
+  const root = join(tmpdir(), `development-cycle-stale-failure-${process.pid}-${Date.now()}`);
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await mkdir(root, { recursive: true });
+  const tool = await loadTool(root);
+  const run = await prepareRun(tool, root, "stale-failure", "run-stale-failure");
+  const cycleStatusPath = join(run.dir, "status.json");
+  const failed = JSON.parse(await readFile(cycleStatusPath, "utf8"));
+  await writeFile(cycleStatusPath, JSON.stringify({ ...failed, ...staleFailure, phase: "implementation_failed" }, null, 2));
+
+  const launched = detailsOf(await tool.execute("retry", { action: "start_implementation", ...run, implementationAdapter: "command" }, undefined, undefined));
+  assert.equal(launched.ok, true);
+  const status = JSON.parse(await readFile(cycleStatusPath, "utf8"));
+  assert.equal(status.phase, "implementation_launched");
+  assertNoStaleFailure(status);
+});
+
+test("corrections relaunch does not inherit the failed attempt's error", async (t) => {
+  const root = join(tmpdir(), `development-cycle-stale-corrections-failure-${process.pid}-${Date.now()}`);
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await mkdir(root, { recursive: true });
+  const tool = await loadTool(root);
+  const run = await prepareRun(tool, root, "stale-corrections-failure", "run-stale-corrections-failure");
+  const cycleStatusPath = join(run.dir, "status.json");
+  const failed = JSON.parse(await readFile(cycleStatusPath, "utf8"));
+  await writeFile(cycleStatusPath, JSON.stringify({ ...failed, ...staleFailure, phase: "council_review_needs_corrections", implementationAdapter: "command" }, null, 2));
+
+  const launched = detailsOf(await tool.execute("corrections", { action: "start_corrections", ...run, implementationAdapter: "command", feedbackText: "must fix the remaining issue" }, undefined, undefined));
+  assert.equal(launched.ok, true);
+  const status = JSON.parse(await readFile(cycleStatusPath, "utf8"));
+  assert.equal(status.phase, "corrections_launched");
+  assertNoStaleFailure(status);
+});

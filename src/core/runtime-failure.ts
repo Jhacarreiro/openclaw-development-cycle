@@ -20,6 +20,14 @@ export function transientRuntimeObservationRecoveryPatch(status: any, currentCla
               : null;
 
   return {
+    ...clearedFailureClassification(),
+    failureClearedAt: new Date().toISOString(),
+    ...(nextAction ? { nextAction } : {}),
+  };
+}
+
+function clearedFailureClassification() {
+  return {
     failureClass: null,
     failureSeverity: null,
     failureHumanRequired: null,
@@ -29,7 +37,11 @@ export function transientRuntimeObservationRecoveryPatch(status: any, currentCla
     failureMatched: null,
     failureDetectedAt: null,
     failureReplacedNextAction: null,
-    failureClearedAt: new Date().toISOString(),
-    ...(nextAction ? { nextAction } : {}),
   };
+}
+
+// Status updates merge into the previous status, so a transition that starts a new attempt or records a successful
+// launch must clear the earlier attempt's failure explicitly; otherwise a healthy run keeps reporting the old error.
+export function clearedAttemptFailure() {
+  return { ok: true, error: null, reason: null, ...clearedFailureClassification() };
 }

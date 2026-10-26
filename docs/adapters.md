@@ -96,6 +96,21 @@ The bridge is deliberately narrow: it does not choose models, alter canonical Oc
 
 If the OpenClaw OAuth profile cannot be resolved, the bridge fails closed before launching a Codex turn.
 
+### Codex app-server sandbox
+
+`DEVELOPMENT_CYCLE_CODEX_APP_SERVER_PREFIX` is an optional JSON argv prefix for the `codex app-server` the bridge starts. It is for runs where the model must not see parts of the filesystem. All of the model's file and command access goes through the app-server, so the prefix wraps only that process. OpenClaw's login is still read by the bridge itself, outside the prefix, because OpenClaw refuses to read its state from another PID namespace. The tokens reach the app-server over stdin, as without a prefix.
+
+A bwrap prefix might look like this:
+
+```json
+["bwrap", "--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc", "--tmpfs", "/tmp",
+ "--bind", "<scratch dir>", "<scratch dir>", "--tmpfs", "<dir to hide>", "--unshare-pid", "--die-with-parent", "--"]
+```
+
+The bridge creates the app-server's temporary `CODEX_HOME` under `TMPDIR`, so `TMPDIR` must name a directory the prefix keeps writable (the scratch directory above).
+
+Lifecycle contract: behind a prefix, the app-server starts in a session of its own. At the end, the bridge stops that process group with SIGTERM, then SIGKILL after 5 seconds. A prefix must take its descendants down when it is killed (for bwrap, `--unshare-pid` or `--die-with-parent`). A prefix that moves them into a session of their own, as `setsid` does, is not supported. A value that is not a JSON array of strings makes the bridge exit with status 64. Without the variable, nothing changes.
+
 The Octopus adapter requires exact `{provider, model}` routes for all eight canonical roles in `providers.json` and treats them as the source of truth for model selection. It maps them into upstream model-qualified seat overrides at launch time: Design Review uses `implementer`, `researcher`, `code-reviewer`, and `synthesizer`; contextual review maps logic/verifier to `code-reviewer`, security to `security-reviewer`, architecture to `architect`, CVE research to `researcher`, diversity/debate to `strategist`, and synthesis to `synthesizer`. The emitted `OCTOPUS_*_AGENT` values are transport only and are not a second persistent model table. Explicit process-level seat overrides take precedence after canonical role validation. Missing, malformed, or incomplete routes reject the launch.
 
 Council review and council-driven corrections are adapter-specific capabilities and only run when the active adapter is `octopus`. An explicit `autoCouncilCorrectionsMax: 0` disables automatic council corrections: the cycle records `council_review_waiting_human` immediately instead of silently falling back to the default two correction attempts.

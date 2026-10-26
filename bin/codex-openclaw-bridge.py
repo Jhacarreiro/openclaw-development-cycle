@@ -101,10 +101,12 @@ try:
 except ValueError:
  print("development-cycle codex bridge: DEVELOPMENT_CYCLE_CODEX_APP_SERVER_PREFIX must be a JSON array of strings",file=sys.stderr); sys.exit(64)
 # Behind a prefix the app-server is not our direct child (and may sit in its own PID namespace), so it
-# gets a process group of its own and the whole group is stopped at the end. The prefix must take its
-# descendants down when it is killed (bwrap: --unshare-pid or --die-with-parent); one that moves them
-# into a session of their own (setsid) is not supported.
-p=subprocess.Popen(prefix+[real,"app-server","--stdio"],cwd=os.getcwd(),env=env(home),stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,bufsize=1,start_new_session=bool(prefix))
+# gets a process group of its own and the whole group is stopped at the end. It stays in our session:
+# the runner and its supervisor stop a run by its session, and kill us before our own 5 s wait is up,
+# so the session is what still reaches a group that outlives us. The prefix must take its descendants
+# down when it is killed (bwrap: --unshare-pid or --die-with-parent); one that moves them into a
+# session of their own (setsid) is not supported.
+p=subprocess.Popen(prefix+[real,"app-server","--stdio"],cwd=os.getcwd(),env=env(home),stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,bufsize=1,process_group=0 if prefix else None)
 def stop_app_server():
  if not prefix:
   p.terminate(); return

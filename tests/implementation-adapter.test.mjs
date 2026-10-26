@@ -283,8 +283,10 @@ test("Codex bridge starts the app-server behind a configured prefix, after readi
     const log = join(dir, "prefix.log");
     const prefix = join(dir, "prefix.sh");
     const leftover = join(dir, "leftover.pid");
-    // A wrapper that leaves a process of its own behind, as a sandbox's init could.
-    writeFileSync(prefix, `#!/bin/sh\nprintf '%s\\n' "$@" > ${JSON.stringify(log)}\nsleep 60 &\necho $! > ${JSON.stringify(leftover)}\nshift\nexec "$@"\n`);
+    const ids = join(dir, "ids");
+    // A wrapper that leaves a process of its own behind, as a sandbox's init could, and records its
+    // own pid, process group and session.
+    writeFileSync(prefix, `#!/bin/sh\nprintf '%s\\n' "$@" > ${JSON.stringify(log)}\necho $$ $(cut -d')' -f2 /proc/$$/stat | cut -d' ' -f4,5) > ${JSON.stringify(ids)}\nsleep 60 &\necho $! > ${JSON.stringify(leftover)}\nshift\nexec "$@"\n`);
     chmodSync(prefix, 0o755);
     const result = runCodexBridge(store, {}, { DEVELOPMENT_CYCLE_CODEX_APP_SERVER_PREFIX: JSON.stringify([prefix, "--marker"]) });
     assert.equal(result.status, 0, result.stderr);
@@ -294,6 +296,10 @@ test("Codex bridge starts the app-server behind a configured prefix, after readi
     assert.deepEqual(args.slice(-2), ["app-server", "--stdio"]);
     const pid = Number(readFileSync(leftover, "utf8"));
     assert.ok(stoppedWithin(pid, 3000), "the wrapper's leftover process outlived the bridge");
+    // A group of its own, in the session the runner and its supervisor stop the run by.
+    const [wrapper, group, session] = readFileSync(ids, "utf8").trim().split(" ").map(Number);
+    assert.equal(group, wrapper);
+    assert.equal(session, Number(readFileSync("/proc/self/stat", "utf8").split(") ")[1].split(" ")[3]));
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

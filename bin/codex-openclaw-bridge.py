@@ -106,7 +106,7 @@ except ValueError:
 # so the session is what still reaches a group that outlives us. The prefix must take its descendants
 # down when it is killed (bwrap: --unshare-pid or --die-with-parent); one that moves them into a
 # session of their own (setsid) is not supported.
-p=subprocess.Popen(prefix+[real,"app-server","--stdio"],cwd=os.getcwd(),env=env(home),stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,bufsize=1,process_group=0 if prefix else None)
+p=subprocess.Popen(prefix+[real,"app-server","--stdio"],cwd=os.getcwd(),env=env(home),stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,bufsize=1,preexec_fn=os.setpgrp if prefix else None)
 def stop_app_server():
  if not prefix:
   p.terminate(); return

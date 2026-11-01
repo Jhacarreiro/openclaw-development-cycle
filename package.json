@@ -29,7 +29,7 @@
     "typebox": "^1.1.38"
   },
   "devDependencies": {
-    "openclaw": "2026.7.1",
+    "openclaw": "2026.10.9",
     "typescript": "^5.9.0"
   },
   "openclaw": {

@@ -28,6 +28,6 @@ Operators should:
 - keep notifications and external services disabled until configured;
 - store credentials outside the repository;
 - inspect generated plans before handoff;
-- require explicit final validation before closing a cycle.
+- know that the run driver runs final validation itself by default, executing the delivered checkout's test and check scripts with the plugin's privileges; set `DEVELOPMENT_CYCLE_RUN_DRIVER_AUTO_FINAL_STEPS=false` to require explicit final validation instead.
 
 The repository must not contain operator-specific network addresses, credentials, runtime state, or local filesystem paths. CI runs `npm run audit:public` to detect common leaks.

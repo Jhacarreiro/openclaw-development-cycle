@@ -1,6 +1,17 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { checkActionTransition } from "../dist/state-machine.js";
+
+test("blocked mechanical validation can be rerun or finalized as partial", () => {
+  for (const phase of ["external_validation_stopped", "external_validation_needs_revision"]) {
+    assert.equal(checkActionTransition("run_final_validation", phase).ok, true);
+    assert.equal(checkActionTransition("finalize_delivery", phase).ok, true);
+    assert.equal(checkActionTransition("record_final_validation", phase).ok, false);
+  }
+  for (const phase of ["external_validation_passed", "waiting_final_validation", "final_validated", "council_validated"]) {
+    assert.equal(checkActionTransition("run_final_validation", phase).ok, true);
+  }
+});
+import { checkActionTransition } from "../dist/core/state-machine.js";
 
 test("status and reconcile are always allowed", () => {
   assert.equal(checkActionTransition("status", "implementation_launched").ok, true);
@@ -19,8 +30,56 @@ test("final validation response requires the human gate phase", () => {
   assert.equal(checkActionTransition("record_final_validation", "external_validation_passed").ok, false);
 });
 
-test("close only accepts terminal human decisions", () => {
-  assert.equal(checkActionTransition("close", "final_validated").ok, true);
-  assert.equal(checkActionTransition("close", "stopped").ok, true);
-  assert.equal(checkActionTransition("close", "implementation_delivered").ok, false);
+
+test("finalize_delivery accepts terminal delivery outcomes", () => {
+  for (const phase of [
+    "final_validated",
+    "final_revised",
+    "needs_corrections",
+    "implementation_failed",
+    "corrections_failed",
+    "council_review_needs_corrections",
+    "council_review_failed",
+    "council_validated",
+    "council_review_waiting_human",
+    "external_validation_failed",
+    "stopped",
+    "repository_delivery_failed",
+  ]) {
+    assert.equal(checkActionTransition("finalize_delivery", phase).ok, true, phase);
+  }
+  assert.equal(checkActionTransition("finalize_delivery", "implementation_running").ok, false);
+});
+
+
+test("close cannot bypass repository delivery", () => {
+  assert.equal(checkActionTransition("close", "final_validated").ok, false);
+  assert.equal(checkActionTransition("close", "stopped").ok, false);
+  assert.equal(checkActionTransition("close", "merged").ok, true);
+  assert.equal(checkActionTransition("close", "closed_success").ok, true);
+  assert.equal(checkActionTransition("close", "closed_partial").ok, true);
+  assert.equal(checkActionTransition("close", "closed_invalid").ok, true);
+});
+
+test("council corrections can be launched from council_review_needs_corrections", () => {
+  assert.equal(checkActionTransition("start_corrections", "council_review_needs_corrections").ok, true);
+  assert.equal(checkActionTransition("start_corrections", "final_revised").ok, false);
+});
+
+test("failed implementation can be retried only through explicit start_implementation", () => {
+  assert.equal(checkActionTransition("start_implementation", "implementation_failed").ok, true);
+});
+
+
+test("mechanical validation can be rerun after a revise result", () => {
+  const transition = checkActionTransition("run_final_validation", "external_validation_needs_revision");
+  assert.equal(transition.ok, true);
+});
+
+
+test("review infrastructure failure resumes only through explicit finalization recovery", () => {
+  assert.equal(checkActionTransition("resume_finalization", "review_infrastructure_failed").ok, true);
+  assert.equal(checkActionTransition("resume_finalization", "implementation_failed").ok, false);
+  assert.equal(checkActionTransition("run_final_validation", "review_infrastructure_failed").ok, false);
+  assert.equal(checkActionTransition("finalize_delivery", "review_infrastructure_failed").ok, false);
 });

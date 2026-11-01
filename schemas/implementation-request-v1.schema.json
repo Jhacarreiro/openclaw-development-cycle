@@ -12,7 +12,6 @@
     "projectRoot",
     "promptPath",
     "resultsRoot",
-    "timeoutSeconds",
     "command"
   ],
   "properties": {
@@ -28,7 +27,10 @@
       "minLength": 1
     },
     "mode": {
-      "enum": ["delivery", "corrections"]
+      "enum": [
+        "delivery",
+        "corrections"
+      ]
     },
     "projectRoot": {
       "type": "string",

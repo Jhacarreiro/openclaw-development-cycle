@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 
 export interface DevelopmentCycleConfig {
   stateRoot: string;
+  eventLogs: { maxBytes: number; archivesToKeep: number };
   projectDocsRoot: string;
   projectDocsGitRoot: string;
   implementation: {
@@ -12,8 +13,32 @@ export interface DevelopmentCycleConfig {
     args: string[];
     octopusRoot: string;
     octopusSandbox: string;
+    octopusContextBudget: number;
+    octopusCorrectionRoundCap: number;
+    octopusWriteScopeMode: "strict" | "adaptive";
+    octopusReadScopeMode: "strict" | "contextual";
+    loopUntilApproved: boolean;
   };
-  retentionDays: number;
+  repositoryDelivery: {
+    enabled: boolean;
+    command: string;
+    args: string[];
+    autoMergeSuccessful: boolean;
+    baseBranch: string;
+    followUpAutoStart: boolean;
+    followUpMaxGenerations: number;
+  };
+  runEnd: {
+    command: string;
+    args: string[];
+    timeoutSeconds: number;
+  };
+  runDriver: {
+    enabled: boolean;
+    autoFinalSteps: boolean;
+    intervalSeconds: number;
+    maxIdleHours: number;
+  };
   notifications: {
     enabled: boolean;
     channel: string;
@@ -21,7 +46,6 @@ export interface DevelopmentCycleConfig {
     account: string;
     deliveryJson: string;
   };
-  openclawBin: string;
   externalGate: {
     secretPath: string;
     url: string;
@@ -46,6 +70,19 @@ export interface DevelopmentCycleConfig {
   };
 }
 
+// Octopus defaults every provider to a 12000-token prompt budget, well below
+// the context windows of the models the cycle routes to. Planning prompts
+// already exceed it, so Octopus truncates their tail (the plan and the
+// decomposition under review) after a slow, failing summarizer attempt. The
+// budget is a ceiling: Octopus still caps it at each known model's window.
+export const DEFAULT_OCTOPUS_CONTEXT_BUDGET = 64000;
+
+// Octopus repeats review and correction up to 10 rounds by default. When its
+// reviewers keep finding new issues each round, that is hours of paid calls
+// that end in the same partial delivery; the cycle stops earlier and hands the
+// remaining findings on as follow-up issues instead.
+export const DEFAULT_OCTOPUS_CORRECTION_ROUND_CAP = 3;
+
 function text(env: NodeJS.ProcessEnv, name: string, fallback = ""): string {
   const value = String(env[name] ?? "").trim();
   return value || fallback;
@@ -54,6 +91,13 @@ function text(env: NodeJS.ProcessEnv, name: string, fallback = ""): string {
 function positiveInteger(env: NodeJS.ProcessEnv, name: string, fallback: number): number {
   const parsed = Number(env[name]);
   return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function nonnegativeInteger(env: NodeJS.ProcessEnv, name: string, fallback: number): number {
+  if (!String(env[name] ?? "").trim()) return fallback;
+  const parsed = Number(env[name]);
+  if (!Number.isSafeInteger(parsed) || parsed < 0) throw new Error(`invalid_configuration: ${name}`);
+  return parsed;
 }
 
 function stringArray(env: NodeJS.ProcessEnv, name: string): string[] {
@@ -84,9 +128,17 @@ export function loadDevelopmentCycleConfig(env: NodeJS.ProcessEnv = process.env)
     join(home, ".openclaw", "development-cycle"),
   );
   const observerRoot = text(env, "DEVELOPMENT_CYCLE_OBSERVER_ADAPTER_ROOT");
+  const readScopeMode = text(env, "DEVELOPMENT_CYCLE_OCTOPUS_READ_SCOPE_MODE", "contextual");
+  if (readScopeMode !== "strict" && readScopeMode !== "contextual") {
+    throw new Error("invalid_octopus_read_scope_mode");
+  }
 
   return {
     stateRoot,
+    eventLogs: {
+      maxBytes: positiveInteger(env, "DEVELOPMENT_CYCLE_EVENT_LOG_MAX_BYTES", 8 * 1024 * 1024),
+      archivesToKeep: nonnegativeInteger(env, "DEVELOPMENT_CYCLE_EVENT_LOG_ARCHIVES_TO_KEEP", 0),
+    },
     projectDocsRoot: text(
       env,
       "DEVELOPMENT_CYCLE_PROJECT_DOCS_ROOT",
@@ -98,9 +150,44 @@ export function loadDevelopmentCycleConfig(env: NodeJS.ProcessEnv = process.env)
       command: text(env, "DEVELOPMENT_CYCLE_IMPLEMENTATION_COMMAND"),
       args: stringArray(env, "DEVELOPMENT_CYCLE_IMPLEMENTATION_ARGS_JSON"),
       octopusRoot: text(env, "DEVELOPMENT_CYCLE_OCTOPUS_ROOT"),
-      octopusSandbox: text(env, "DEVELOPMENT_CYCLE_OCTOPUS_SANDBOX", "workspace-write"),
+      octopusSandbox: text(env, "DEVELOPMENT_CYCLE_OCTOPUS_SANDBOX", "danger-full-access"),
+      octopusContextBudget: positiveInteger(
+        env,
+        "DEVELOPMENT_CYCLE_OCTOPUS_CONTEXT_BUDGET",
+        DEFAULT_OCTOPUS_CONTEXT_BUDGET,
+      ),
+      octopusCorrectionRoundCap: positiveInteger(
+        env,
+        "DEVELOPMENT_CYCLE_OCTOPUS_CORRECTION_ROUNDS",
+        DEFAULT_OCTOPUS_CORRECTION_ROUND_CAP,
+      ),
+      octopusWriteScopeMode: text(env, "DEVELOPMENT_CYCLE_OCTOPUS_WRITE_SCOPE_MODE", "adaptive") === "strict" ? "strict" : "adaptive",
+      octopusReadScopeMode: readScopeMode,
+      loopUntilApproved: boolean(env, "DEVELOPMENT_CYCLE_LOOP_UNTIL_APPROVED", true),
     },
-    retentionDays: positiveInteger(env, "DEVELOPMENT_CYCLE_RETENTION_DAYS", 30),
+    repositoryDelivery: {
+      enabled: boolean(env, "DEVELOPMENT_CYCLE_REPOSITORY_DELIVERY_ENABLED", false),
+      command: text(env, "DEVELOPMENT_CYCLE_REPOSITORY_DELIVERY_COMMAND"),
+      args: stringArray(env, "DEVELOPMENT_CYCLE_REPOSITORY_DELIVERY_ARGS_JSON"),
+      autoMergeSuccessful: boolean(env, "DEVELOPMENT_CYCLE_REPOSITORY_DELIVERY_AUTO_MERGE_SUCCESSFUL", true),
+      baseBranch: text(env, "DEVELOPMENT_CYCLE_REPOSITORY_DELIVERY_BASE_BRANCH", "main"),
+      followUpAutoStart: boolean(env, "DEVELOPMENT_CYCLE_FOLLOWUP_AUTO_START", true),
+      followUpMaxGenerations: positiveInteger(env, "DEVELOPMENT_CYCLE_FOLLOWUP_MAX_GENERATIONS", 2),
+    },
+    runEnd: {
+      command: text(env, "DEVELOPMENT_CYCLE_RUN_END_COMMAND"),
+      args: stringArray(env, "DEVELOPMENT_CYCLE_RUN_END_ARGS_JSON"),
+      timeoutSeconds: positiveInteger(env, "DEVELOPMENT_CYCLE_RUN_END_TIMEOUT_SECONDS", 300),
+    },
+    runDriver: {
+      enabled: boolean(env, "DEVELOPMENT_CYCLE_RUN_DRIVER_ENABLED", true),
+      // Final validation runs the delivered checkout's own scripts on the host; operators who do not trust implementation
+      // output to that degree turn this off and validate explicitly.
+      autoFinalSteps: boolean(env, "DEVELOPMENT_CYCLE_RUN_DRIVER_AUTO_FINAL_STEPS", true),
+      // Capped at a day: longer intervals overflow Node's timer and fire every millisecond.
+      intervalSeconds: Math.min(positiveInteger(env, "DEVELOPMENT_CYCLE_RUN_DRIVER_INTERVAL_SECONDS", 120), 86400),
+      maxIdleHours: positiveInteger(env, "DEVELOPMENT_CYCLE_RUN_DRIVER_MAX_IDLE_HOURS", 24),
+    },
     notifications: {
       enabled: boolean(env, "DEVELOPMENT_CYCLE_NOTIFICATIONS_ENABLED", false),
       channel: text(env, "DEVELOPMENT_CYCLE_NOTIFICATION_CHANNEL"),
@@ -108,7 +195,6 @@ export function loadDevelopmentCycleConfig(env: NodeJS.ProcessEnv = process.env)
       account: text(env, "DEVELOPMENT_CYCLE_NOTIFICATION_ACCOUNT"),
       deliveryJson: text(env, "DEVELOPMENT_CYCLE_NOTIFICATION_DELIVERY_JSON"),
     },
-    openclawBin: text(env, "DEVELOPMENT_CYCLE_OPENCLAW_BIN", "openclaw"),
     externalGate: {
       secretPath: text(env, "DEVELOPMENT_CYCLE_EXTERNAL_GATE_SECRET_PATH"),
       url: text(env, "DEVELOPMENT_CYCLE_EXTERNAL_GATE_URL").replace(/\/$/, ""),
@@ -132,7 +218,7 @@ export function loadDevelopmentCycleConfig(env: NodeJS.ProcessEnv = process.env)
       defaultTimeoutSeconds: positiveInteger(
         env,
         "DEVELOPMENT_CYCLE_DEFAULT_TIMEOUT_SECONDS",
-        7200,
+        0,
       ),
     },
     observer: {

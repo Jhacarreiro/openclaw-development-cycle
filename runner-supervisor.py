@@ -8,6 +8,9 @@ import signal
 import socket
 import sys
 import time
+import threading
+import tempfile
+import urllib.request
 from pathlib import Path
 
 PR_SET_CHILD_SUBREAPER = 36
@@ -34,7 +37,59 @@ def reap_all(runners: dict[int, int]) -> list[tuple[int, int]]:
     return exited
 
 
+
+def atomic_write_text(path: Path, text: str) -> None:
+    fd, tmp = tempfile.mkstemp(prefix=f".{path.name}.tmp.", dir=path.parent)
+    try:
+        with os.fdopen(fd, 'w') as file:
+            file.write(text)
+            file.flush()
+            os.fsync(file.fileno())
+        os.replace(tmp, path)
+        directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    finally:
+        try:
+            os.unlink(tmp)
+        except FileNotFoundError:
+            pass
+
+
+def persist_terminal_state_if_missing(cwd: str, wait_status: int) -> None:
+    session_dir = Path(cwd)
+    exit_code_path = session_dir / 'exit-code.txt'
+    if exit_code_path.exists():
+        return
+    try:
+        exit_code = os.waitstatus_to_exitcode(wait_status)
+    except ValueError:
+        exit_code = 1
+    exited_at = time.strftime('%Y-%m-%dT%H:%M:%S%z')
+    status_path = session_dir / 'status.json'
+    try:
+        status = json.loads(status_path.read_text()) if status_path.exists() else {}
+    except (OSError, json.JSONDecodeError):
+        status = {}
+    if not isinstance(status, dict):
+        status = {}
+    status.update({
+        'status': 'completed' if exit_code == 0 else 'failed',
+        'launchState': 'exited',
+        'exitCode': exit_code,
+        'exitedAt': exited_at,
+        'updatedAt': exited_at,
+        'message': 'Runner terminal state materialized by supervisor after missing finalizer markers.',
+    })
+    atomic_write_text(status_path, json.dumps(status, indent=2) + '\n')
+    atomic_write_text(session_dir / 'exited-at.txt', f"{exited_at}\n")
+    # Publish the exit marker last so reconcile sees the complete terminal state.
+    atomic_write_text(exit_code_path, f"{exit_code}\n")
+
 def group_members(pgid: int) -> list[int]:
+    # Live members of the runner's process group or of its session.
     members = []
     for entry in Path('/proc').iterdir():
         if not entry.name.isdigit():
@@ -44,45 +99,77 @@ def group_members(pgid: int) -> list[int]:
             right = stat.rsplit(')', 1)[1].strip().split()
             state = right[0]
             proc_pgid = int(right[2])
-            if proc_pgid == pgid and state != 'Z':
+            proc_session = int(right[3])
+            if (proc_pgid == pgid or proc_session == pgid) and state != 'Z':
                 members.append(int(entry.name))
         except (FileNotFoundError, PermissionError, ValueError, IndexError):
             continue
     return members
 
 
-def terminate_group(pgid: int, runners: dict[int, int]) -> None:
+def signal_members(pgid: int, sig: int) -> None:
+    # The runner is setsid()'d, so its pid is both its group and its session.
+    # Octopus starts some subtasks in groups of their own; when their parent
+    # exits they are reparented here but stay in the runner's session.
     try:
-        os.killpg(pgid, signal.SIGTERM)
+        os.killpg(pgid, sig)
     except ProcessLookupError:
         pass
+    for pid in group_members(pgid):
+        try:
+            os.kill(pid, sig)
+        except ProcessLookupError:
+            pass
+
+
+def terminate_group(pgid: int, runners: dict[int, int]) -> None:
+    signal_members(pgid, signal.SIGTERM)
     deadline = time.monotonic() + 2.0
     while time.monotonic() < deadline:
-        reap_all(runners)
         if not group_members(pgid):
             return
         time.sleep(0.1)
-    try:
-        os.killpg(pgid, signal.SIGKILL)
-    except ProcessLookupError:
-        pass
+    signal_members(pgid, signal.SIGKILL)
     deadline = time.monotonic() + 2.0
     while time.monotonic() < deadline:
-        reap_all(runners)
         if not group_members(pgid):
             return
         time.sleep(0.1)
 
 
 def launch_runner(runner_path: str, cwd: str) -> int:
-    pid = os.fork()
+    ready_r, ready_w = os.pipe()
+    try:
+        pid = os.fork()
+    except BaseException:
+        os.close(ready_r)
+        os.close(ready_w)
+        raise
     if pid == 0:
+        os.close(ready_r)
         try:
             os.setsid()
+            os.write(ready_w, b'1')
+            os.close(ready_w)
             os.chdir(cwd)
             os.execv('/bin/sh', ['sh', runner_path])
         except BaseException:
+            try:
+                os.close(ready_w)
+            except OSError:
+                pass
             os._exit(127)
+    os.close(ready_w)
+    try:
+        ready = os.read(ready_r, 1)
+    finally:
+        os.close(ready_r)
+    if ready != b'1':
+        try:
+            os.waitpid(pid, 0)
+        except ChildProcessError:
+            pass
+        raise RuntimeError('runner failed before process-group readiness')
     return pid
 
 
@@ -99,12 +186,50 @@ def serve(socket_path: str) -> None:
     server.listen(16)
     server.settimeout(0.2)
     runners: dict[int, int] = {}
+    runner_cwds: dict[int, str] = {}
+    callbacks: dict[int, dict] = {}
+    launch_in_flight = False
+    shutdown_requested = False
 
     def ignore_sigchld(_sig, _frame):
         return None
 
+    def cleanup_and_exit() -> None:
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+        for pgid in list(runners.values()):
+            try:
+                terminate_group(pgid, runners)
+            except BaseException:
+                pass
+        for pid, wait_status in reap_all(runners):
+            cwd = runner_cwds.get(pid)
+            if cwd:
+                try:
+                    persist_terminal_state_if_missing(cwd, wait_status)
+                except Exception:
+                    print('runner terminal state persistence failed', file=sys.stderr, flush=True)
+        os._exit(0)
+
+    def shutdown(_sig, _frame):
+        # Runners are setsid()'d into their own process groups; if the
+        # supervisor dies without terminating them they survive, reparent
+        # to init, and run unmanaged (a relaunched supervisor starts with
+        # an empty runners dict and never sees them). Kill every group on
+        # SIGTERM/SIGINT so a supervisor restart cannot orphan runners.
+        # launch_runner() forks and setsid()s before serve() records
+        # runners[pid]; if a signal arrives in that window, defer _exit
+        # until the new group is tracked.
+        nonlocal shutdown_requested
+        shutdown_requested = True
+        if launch_in_flight:
+            return
+        cleanup_and_exit()
+
     signal.signal(signal.SIGCHLD, ignore_sigchld)
     signal.signal(signal.SIGPIPE, signal.SIG_IGN)
+    signal.signal(signal.SIGTERM, shutdown)
+    signal.signal(signal.SIGINT, shutdown)
 
     while True:
         try:
@@ -113,6 +238,7 @@ def serve(socket_path: str) -> None:
             conn = None
         if conn is not None:
             with conn:
+                conn.settimeout(1.0)
                 try:
                     raw = b''
                     while not raw.endswith(b'\n'):
@@ -120,6 +246,8 @@ def serve(socket_path: str) -> None:
                         if not chunk:
                             break
                         raw += chunk
+                        if len(raw) > 1024 * 1024:
+                            raise ValueError('request too large')
                     request = json.loads(raw.decode('utf-8'))
                     action = request.get('action')
                     if action == 'ping':
@@ -127,19 +255,58 @@ def serve(socket_path: str) -> None:
                     elif action == 'launch':
                         runner_path = str(request['runnerPath'])
                         cwd = str(request['cwd'])
-                        pid = launch_runner(runner_path, cwd)
-                        runners[pid] = pid
-                        response = {'ok': True, 'pid': pid, 'pgid': pid, 'supervisorPid': os.getpid()}
+                        launch_in_flight = True
+                        try:
+                            pid = launch_runner(runner_path, cwd)
+                            runners[pid] = pid
+                            runner_cwds[pid] = cwd
+                            if isinstance(request.get('reconcile'), dict):
+                                callbacks[pid] = request['reconcile']
+                            response = {'ok': True, 'pid': pid, 'pgid': pid, 'supervisorPid': os.getpid()}
+                        finally:
+                            launch_in_flight = False
+                            if shutdown_requested:
+                                cleanup_and_exit()
                     else:
                         response = {'ok': False, 'error': 'unknown_action'}
                 except Exception as exc:
                     response = {'ok': False, 'error': f'{type(exc).__name__}:{exc}'}
-                conn.sendall((json.dumps(response) + '\n').encode('utf-8'))
+                try:
+                    conn.sendall((json.dumps(response) + '\n').encode('utf-8'))
+                except (BrokenPipeError, ConnectionResetError, OSError):
+                    # Client disconnected before reading; never let that take down
+                    # the supervisor (it is the subreaper for running sessions).
+                    pass
 
-        for pid, _status in reap_all(runners):
-            pgid = runners.pop(pid, pid)
+        for pid, wait_status in reap_all(runners):
+            cwd = runner_cwds.get(pid)
+            if cwd:
+                try:
+                    persist_terminal_state_if_missing(cwd, wait_status)
+                except Exception:
+                    print('runner terminal state persistence failed', file=sys.stderr, flush=True)
+            pgid = runners.get(pid, pid)
             terminate_group(pgid, runners)
-            reap_all(runners)
+            runners.pop(pid, None)
+            runner_cwds.pop(pid, None)
+            callback = callbacks.pop(pid, None)
+            if callback:
+                # Run outside the terminated runner group and outside the socket loop.
+                threading.Thread(target=reconcile_after_exit, args=(callback,), daemon=True).start()
+
+
+def reconcile_after_exit(callback: dict) -> None:
+    try:
+        payload = json.dumps({'tool': 'development_cycle', 'action': 'reconcile',
+                              'args': {'project': callback['project'], 'runId': callback['runId']}}).encode()
+        request = urllib.request.Request(callback['url'].rstrip('/') + '/tools/invoke', data=payload,
+                                         headers={'Authorization': 'Bearer ' + callback['token'],
+                                                  'Content-Type': 'application/json'})
+        with urllib.request.urlopen(request, timeout=20) as response:
+            response.read(4096)
+    except Exception:
+        # Best effort; durable runner markers remain available to ordinary reconcile.
+        print('runner reconcile callback failed', file=sys.stderr, flush=True)
 
 
 def client(socket_path: str, payload: dict) -> int:
@@ -173,7 +340,15 @@ def main() -> int:
         return 0
     if args.command == 'ping':
         return client(args.socket, {'action': 'ping'})
-    return client(args.socket, {'action': 'launch', 'runnerPath': args.runner_path, 'cwd': args.cwd})
+    payload = {'action': 'launch', 'runnerPath': args.runner_path, 'cwd': args.cwd}
+    token = os.environ.get('OPENCLAW_GATEWAY_TOKEN', '')
+    project = os.environ.get('DEVELOPMENT_CYCLE_RECONCILE_PROJECT', '')
+    run_id = os.environ.get('DEVELOPMENT_CYCLE_RECONCILE_RUN_ID', '')
+    if token and project and run_id:
+        payload['reconcile'] = {'token': token, 'project': project, 'runId': run_id,
+                                'url': os.environ.get('DEVELOPMENT_CYCLE_GATEWAY_URL') or
+                                       os.environ.get('OPENCLAW_GATEWAY_URL') or 'http://127.0.0.1:18789'}
+    return client(args.socket, payload)
 
 
 if __name__ == '__main__':

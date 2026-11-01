@@ -67,6 +67,8 @@ chmod +x examples/command-runner.sh
 export DEVELOPMENT_CYCLE_IMPLEMENTATION_COMMAND="$PWD/examples/command-runner.sh"
 ```
 
+Direct implementation and corrections runners use immutable per-attempt directories under `implementation_session/attempts/<attemptId>/` and `corrections_session/attempts/<attemptId>/`. The cycle persists the active attempt id and exact status path; retries must never reuse terminal markers, logs, or `status.json` from an earlier attempt, and reconciliation ignores state whose attempt id does not match the active cycle attempt.
+
 ## Octopus adapter
 
 The optional Octopus adapter translates the generic request into:
@@ -80,12 +82,38 @@ Configuration:
 ```bash
 export DEVELOPMENT_CYCLE_IMPLEMENTATION_ADAPTER=octopus
 export DEVELOPMENT_CYCLE_OCTOPUS_ROOT=/path/to/claude-octopus
-export DEVELOPMENT_CYCLE_OCTOPUS_SANDBOX=workspace-write
+export DEVELOPMENT_CYCLE_OCTOPUS_SANDBOX=danger-full-access
+export DEVELOPMENT_CYCLE_OCTOPUS_WRITE_SCOPE_MODE=adaptive
 ```
 
 When the optional observer integration is enabled, the adapter maps generic observer metadata to the Octopus and Crabfleet lifecycle environment expected by that ecosystem.
 
-Council review and council-driven corrections are adapter-specific capabilities and only run when the active adapter is `octopus`.
+Codex seats use the owned `bin/codex` compatibility shim. The shim intercepts non-interactive `codex exec` calls, reads the current OpenClaw `openai` OAuth profile directly through the public auth-profile store API, and supplies the resulting ChatGPT auth ephemerally to `codex app-server`. The shim creates a temporary empty `CODEX_HOME` for the child process and removes it afterwards, so Octopus does not depend on a second persistent `$OPENCLAW_STATE_DIR/codex/auth.json`.
+
+Octopus's own Codex health check still refuses the seat unless `$HOME/.codex/auth.json` exists, even though the file is never used to authenticate `codex exec`. Because `$HOME/.codex` is usually not on a persistent volume, the runner links it to `$OPENCLAW_STATE_DIR/codex/auth.json` before every Octopus launch when it is missing. It never reads, copies or replaces an existing file, and skips the link when the OpenClaw-managed file does not exist.
+
+The bridge is deliberately narrow: it does not choose models, alter canonical Octopus role routing, copy OAuth credentials into repository/runtime state, or patch Octopus upstream. Commands other than `codex exec` are forwarded to the real Codex CLI unchanged.
+
+If the OpenClaw OAuth profile cannot be resolved, the bridge fails closed before launching a Codex turn.
+
+### Codex app-server sandbox
+
+`DEVELOPMENT_CYCLE_CODEX_APP_SERVER_PREFIX` is an optional JSON argv prefix for the `codex app-server` the bridge starts. It is for runs where the model must not see parts of the filesystem. All of the model's file and command access goes through the app-server, so the prefix wraps only that process. OpenClaw's login is still read by the bridge itself, outside the prefix, because OpenClaw refuses to read its state from another PID namespace. The tokens reach the app-server over stdin, as without a prefix.
+
+A bwrap prefix might look like this:
+
+```json
+["bwrap", "--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc", "--tmpfs", "/tmp",
+ "--bind", "<scratch dir>", "<scratch dir>", "--tmpfs", "<dir to hide>", "--unshare-pid", "--die-with-parent", "--"]
+```
+
+The bridge creates the app-server's temporary `CODEX_HOME` under `TMPDIR`, so `TMPDIR` must name a directory the prefix keeps writable (the scratch directory above).
+
+Lifecycle contract: behind a prefix, the app-server starts in a process group of its own, still in the runner's session, so stopping a run or the runner supervisor reaches it even when the bridge is killed first. At the end, the bridge stops that process group with SIGTERM, then SIGKILL after 5 seconds. A prefix must take its descendants down when it is killed (for bwrap, `--unshare-pid` or `--die-with-parent`). A prefix that moves them into a session of their own, as `setsid` does, is not supported. A value that is not a JSON array of strings makes the bridge exit with status 64. Without the variable, nothing changes.
+
+The Octopus adapter requires exact `{provider, model}` routes for all eight canonical roles in `providers.json` and treats them as the source of truth for model selection. It maps them into upstream model-qualified seat overrides at launch time: Design Review uses `implementer`, `researcher`, `code-reviewer`, and `synthesizer`; contextual review maps logic/verifier to `code-reviewer`, security to `security-reviewer`, architecture to `architect`, CVE research to `researcher`, diversity/debate to `strategist`, and synthesis to `synthesizer`. The emitted `OCTOPUS_*_AGENT` values are transport only and are not a second persistent model table. Explicit process-level seat overrides take precedence after canonical role validation. Missing, malformed, or incomplete routes reject the launch.
+
+Council review and council-driven corrections are adapter-specific capabilities and only run when the active adapter is `octopus`. An explicit `autoCouncilCorrectionsMax: 0` disables automatic council corrections: the cycle records `council_review_waiting_human` immediately instead of silently falling back to the default two correction attempts.
 
 ## Other adapters
 
@@ -110,3 +138,21 @@ Keep adapter-specific authentication, provider selection, and sandbox policy out
 - write artifacts only under documented paths;
 - return non-zero on incomplete or failed execution;
 - do not bypass final validation or state transitions.
+
+
+### Contextual reads for Octopus
+
+`DEVELOPMENT_CYCLE_OCTOPUS_READ_SCOPE_MODE` defaults to `contextual`; `strict`
+keeps repository-relative reads only. Invalid values are rejected. Implementation
+and correction launches can select `readScopeMode: "strict"` or `"contextual"`.
+
+The adapter passes `OCTOPUS_TANGLE_READ_SCOPE_MODE` and
+`OCTOPUS_TANGLE_CONTEXTUAL_READ_ROOTS` from validated launch metadata: project
+root, project documentation root, this run-specific handoff directory, approved
+plan, request and prompt files. File entries never grant their parent directories.
+Task prose and inherited read-root environment variables cannot expand the list.
+
+This requires an Octopus revision supporting contextual reads. External read
+grants never authorize writing. Known secret/auth paths and symlink escapes are
+rejected. This is declaration validation and guidance, not OS sandboxing or
+complete secret isolation in full-access execution.

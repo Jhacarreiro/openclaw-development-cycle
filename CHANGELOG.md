@@ -16,8 +16,6 @@ The format is based on Keep a Changelog and the project follows Semantic Version
 
 ### Changed
 
-- Operational failure classification requires current-attempt adapter evidence instead of review/prose keyword matches; updates separate retry prohibition from cancellation, and legacy lexical incidents retain a retraction audit. See `docs/operational-failure-contract.md`.
-
 - Octopus implementation launches stop after 3 review/correction rounds instead of Octopus's default 10 (`DEVELOPMENT_CYCLE_OCTOPUS_CORRECTION_ROUNDS`).
 
 ### Fixed

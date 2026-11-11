@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, writeFile, rm, symlink } from "node:fs/promises";
+import { mkdtemp, mkdir, writeFile, rm, symlink } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { classifyOperationalFailure } from "../dist/cycle/operational-failure.js";
@@ -20,4 +20,19 @@ test("an attributed current-attempt error is classified without scanning model p
   await writeFile(path, "x".repeat(16385)); assert.equal(await classifyOperationalFailure(status), null);
   await rm(path); await writeFile(join(dir, "target"), JSON.stringify(evidence)); await symlink(join(dir, "target"), path);
   assert.equal(await classifyOperationalFailure(status), null);
+});
+
+test("corrections attribution remains current after stop and partial finalization", async t => {
+  const dir = await mkdtemp(join(tmpdir(), "cycle-correction-operation-")); t.after(() => rm(dir, { recursive:true, force:true }));
+  for (const [id, failureClass] of [["implementation", "auth_failed"], ["corrections", "local_runtime_fault"]]) {
+    await mkdir(join(dir, id));
+    await writeFile(join(dir, id, "status.json"), JSON.stringify({ attemptId:id }));
+    await writeFile(join(dir, id, "operational-failure.json"), JSON.stringify({ schemaVersion:1, source:"provider", provider:"fixture", attemptId:id, failureClass, errorCode:"FIXTURE", occurredAt:"2026-01-01T00:00:00Z" }));
+  }
+  const status = { implementationAttemptId:"implementation", directImplementationStatus:join(dir,"implementation","status.json"), correctionsAttemptId:"corrections", directCorrectionsStatus:join(dir,"corrections","status.json") };
+  for (const phase of ["corrections_running", "stopped", "closed_partial"]) {
+    const result = await classifyOperationalFailure({ ...status, phase });
+    assert.equal(result.failureClass, "local_runtime_fault");
+    assert.equal(result.matched.attemptId, "corrections");
+  }
 });

@@ -435,7 +435,8 @@ async function projectCycle(params: CycleParameters | null | undefined): Promise
 
   if (action === "stop_implementation") {
     if (params.stopIntent === "failure-policy") {
-      const current = await dcClassify(dir, status, {});
+      const currentRuntime = await cycleRuntimeSummary(dir, status);
+      const current = await dcClassify(dir, status, currentRuntime);
       if (current.classification?.autoStopRecommended !== true || current.classification?.matched?.name !== "attributed_operation") {
         return { ok: false, error: "automatic_stop_not_recommended", project, runId, phase: status?.phase };
       }

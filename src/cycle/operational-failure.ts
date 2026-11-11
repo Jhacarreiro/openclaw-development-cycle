@@ -15,7 +15,8 @@ const policies = {
 } as const;
 
 export async function classifyOperationalFailure(status: any) {
-  const corrections = String(status?.phase || "").startsWith("corrections_");
+  // Current attempt pointers survive stop/finalization phase transitions.
+  const corrections = Boolean(status?.correctionsAttemptId);
   const attemptId = corrections ? status?.correctionsAttemptId : status?.implementationAttemptId;
   const statusPath = corrections ? status?.directCorrectionsStatus : status?.directImplementationStatus;
   if (!attemptId || !statusPath) return null;

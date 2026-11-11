@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, writeFile, rm } from "node:fs/promises";
+import { copyFile, mkdtemp, writeFile, rm } from "node:fs/promises";
+import { spawn } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -16,4 +17,17 @@ test("failure-policy cancellation cannot act on a retry-only warning", async t =
   const result = (await tool.execute("stop", { action: "stop_implementation", project: "fixture", runId: planned.runId, stopIntent: "failure-policy", stopReason: "warning" }, undefined, undefined)).details;
   assert.equal(result.error, "automatic_stop_not_recommended"); assert.equal(result.phase, "implementation_running");
   }
+  // An inert native process named like a provider exercises the real fresh
+  // runtime observation; it never invokes a model or any external service.
+  const providerPath = join(root, "codex");
+  await copyFile("/bin/sleep", providerPath);
+  const child = spawn(providerPath, ["30"], { cwd:process.cwd(), stdio:"ignore" });
+  await new Promise((resolve, reject) => { child.once("spawn", resolve); child.once("error", reject); });
+  t.after(() => { child.kill("SIGTERM"); });
+  const sessionPath = join(root, "runner.json");
+  await writeFile(sessionPath, JSON.stringify({ attemptId:"current" }));
+  await writeFile(join(root, "operational-failure.json"), JSON.stringify({ schemaVersion:1, source:"provider", provider:"fixture", attemptId:"current", failureClass:"auth_failed", errorCode:"HTTP_401", occurredAt:"2026-01-01T00:00:00Z" }));
+  await writeFile(join(planned.dir, "status.json"), JSON.stringify({ ...planned.status, project:"fixture", runId:planned.runId, projectRoot:process.cwd(), phase:"implementation_running", implementationAttemptId:"current", directImplementationStatus:sessionPath }));
+  const blocked = (await tool.execute("stop-with-orphan", { action:"stop_implementation", project:"fixture", runId:planned.runId, stopIntent:"failure-policy" }, undefined, undefined)).details;
+  assert.equal(blocked.error, "automatic_stop_not_recommended", JSON.stringify(blocked));
 });

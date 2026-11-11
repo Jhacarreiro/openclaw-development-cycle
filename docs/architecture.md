@@ -159,6 +159,17 @@ Revalidation clears the earlier council verdict. Each council invocation searche
 
 ## Process supervision
 
+Default status lookup and the run driver select the latest registered run by its
+persisted `createdAt`, including caller-supplied IDs. Legacy runs without usable
+creation metadata fall back to an embedded ID timestamp, then directory creation
+time (modification time only where creation time is unavailable). Reconciliation
+and log updates do not make an old timestamped run supersede a newer registered
+continuation. Project/run/status symlinks remain excluded from selection.
+
+The driver leaves manually `stopped` runs idle. An explicit supervised action may
+still address that run by ID; a stored failure or a changing observational alert
+does not make it eligible for automatic reconciliation again.
+
 The packaged supervisor:
 
 - starts each runner in a new session, so its pid is both its process group and its session;

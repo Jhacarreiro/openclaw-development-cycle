@@ -20,6 +20,11 @@ The format is based on Keep a Changelog and the project follows Semantic Version
 
 ### Fixed
 
+- Latest-run selection orders caller-supplied and generated IDs by persisted
+  creation time, with legacy timestamp fallback. A previously stopped run no
+  longer hides a newer manually named continuation, and stopped runs are not
+  repeatedly reconciled by the automatic driver.
+
 - A new attempt no longer inherits the previous attempt's failure. Status updates merge into the previous status, so a run relaunched after a failed launch kept `ok: false`, `error` and the failure classification (for example `observer_root_session_creation_failed`) while its runner was healthy, and that stale error fed later failure classification. Requesting or recording a plan and every successful implementation, corrections and council-corrections launch now write `ok: true` and clear `error`, `reason` and the `failure*` fields; council corrections no longer record a successful launch as `ok: false`. The read-only `status` action is unchanged.
 - Council corrections whose Octopus review hits the correction cap are treated as review non-convergence, like an implementation run: the delivery ships the corrections' own branch instead of the checkout they started from, issues are opened only for the findings the review left, and the follow-up run starts from them. Before, the corrected work stayed on a preserved branch, the PR got the pre-correction code, the issues repeated the council's input, and no follow-up started.
 - Council findings written as markdown table rows or bold list items become plain findings (severity and text first, location last), so follow-up issue titles no longer start with table pipes or stray `**`.

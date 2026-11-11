@@ -12,6 +12,7 @@ const RESTING_PHASES = new Set([
   "closed",
   "closed_success",
   "closed_invalid",
+  "stopped",
 ]);
 
 export function runNeedsDriving(status: any, maxIdleMs: number, now: number) {

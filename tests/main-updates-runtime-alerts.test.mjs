@@ -53,3 +53,25 @@ test("a classification that persists across a later transition keeps that transi
   await updates.dcPersistFailure("/nonexistent", status, await updates.dcClassify("/nonexistent", status, runtimeWith()));
   assert.equal(status.nextAction, "Follow-up run x is working the open issues on the delivery PR.");
 });
+
+test("application and review prose cannot establish an operational provider failure", async () => {
+  for (const text of ["No rate limits", "Documents HTTP 429 Too Many Requests", "Updated billing documentation", "Handle 401 Unauthorized", "Test Permission denied / EACCES", "all providers failed is a test fixture"]) {
+    const result = await dcClassify("/nonexistent", { phase: "implementation_launched", error: text, reason: text, councilReviewSummary: text }, { richObservation: { alerts: [], latestTimeline: [{ line: text }] } });
+    assert.equal(result.classification, null, text);
+  }
+});
+
+test("legacy review-derived incidents are retracted without restarting stopped work", async () => {
+  let status = { phase: "stopped", error: "Rate limit detected", failureClass: "rate_limited", failureMatched: { name: "rate_limit", pattern: "/rate limit/i" } };
+  const updates = createMainUpdates({ runtimeHome: "/nonexistent", loadJson: async () => null, saveJson: async () => {}, appendJsonl: async () => {}, cycleStatus: async (_dir, patch) => (status = { ...status, ...patch }) });
+  await updates.dcPersistFailure("/nonexistent", status, await updates.dcClassify("/nonexistent", status, runtimeWith()));
+  assert.equal(status.phase, "stopped"); assert.equal(status.failureClass, null);
+  assert.equal(status.retractedFailure.failureClass, "rate_limited");
+});
+
+test("notification separates retry safety from cancellation intent", async () => {
+  const updates = createMainUpdates({ runtimeHome: "/nonexistent", loadJson: async () => null, saveJson: async () => {}, cycleStatus: async () => ({}), appendJsonl: async () => {} });
+  const result = await updates.dcNotifyMain("/nonexistent", "fixture", "run", { phase: "implementation_launched" }, { dryRunMainUpdate: true }, { shouldNotifyMain: true, classification: { failureClass: "rate_limited", safeToAutoRetry: false, autoStopRecommended: false } });
+  assert.match(result.text, /Automatic stop recommended: false/);
+  assert.match(result.text, /retry prohibition is not a cancellation request/);
+});

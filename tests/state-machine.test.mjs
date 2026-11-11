@@ -81,5 +81,5 @@ test("review infrastructure failure resumes only through explicit finalization r
   assert.equal(checkActionTransition("resume_finalization", "review_infrastructure_failed").ok, true);
   assert.equal(checkActionTransition("resume_finalization", "implementation_failed").ok, false);
   assert.equal(checkActionTransition("run_final_validation", "review_infrastructure_failed").ok, false);
-  assert.equal(checkActionTransition("finalize_delivery", "review_infrastructure_failed").ok, false);
+  assert.equal(checkActionTransition("finalize_delivery", "review_infrastructure_failed").ok, true);
 });

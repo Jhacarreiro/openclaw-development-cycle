@@ -22,13 +22,32 @@ export interface RepositoryDeliveryDeps {
   effectiveImplementationRoot: ReturnType<typeof createOctopusOutput>["effectiveImplementationRoot"];
   repositoryDeliveryMissingRequiredOutput: ReturnType<typeof createOctopusOutput>["repositoryDeliveryMissingRequiredOutput"];
   resolveOctopusAttemptOutput: ReturnType<typeof createOctopusOutput>["resolveOctopusAttemptOutput"];
+  inventoryPreservedOctopusOutput: ReturnType<typeof createOctopusOutput>["inventoryPreservedOctopusOutput"];
 }
 
 export function createRepositoryDelivery(deps: RepositoryDeliveryDeps) {
-  const { repositoryDeliveryConfig, loadJson, saveJson, cycleStatus, pinTrustedProjectRoot, pinAllowedCanonicalPlan, execGit, effectiveImplementationRoot, repositoryDeliveryMissingRequiredOutput, resolveOctopusAttemptOutput } = deps;
+  const { repositoryDeliveryConfig, loadJson, saveJson, cycleStatus, pinTrustedProjectRoot, pinAllowedCanonicalPlan, execGit, effectiveImplementationRoot, repositoryDeliveryMissingRequiredOutput, resolveOctopusAttemptOutput, inventoryPreservedOctopusOutput } = deps;
+
+  async function recoverPreservedAttemptStatus(dir: string, status: any) {
+    if (status?.implementationAdapter !== "octopus" || !["stopped", "implementation_failed", "corrections_failed", "review_infrastructure_failed"].includes(String(status?.phase || ""))) return status;
+    const recovery = await inventoryPreservedOctopusOutput(status);
+    return cycleStatus(dir, {
+      outputRecovery: { ...recovery,
+        ...(status?.phase === "review_infrastructure_failed" ? { reviewVerification: "incomplete" } : {}),
+        inventoriedAt: new Date().toISOString() },
+      outputPath: recovery.ok ? recovery.handoff.outputPath : null,
+      ...(recovery.ok ? {
+        implementationOutputHandoff: recovery.handoff,
+        requiredMechanicalValidation: true,
+        validationEvidence: null,
+        repositoryDeliverySuppressed: null,
+        nextAction: "Preserve this partial output in a draft PR with remaining-work issues. Continue from that PR after resolving the blocker; validation is still required.",
+      } : {}),
+    });
+  }
 
   async function resumeReviewInfrastructureFinalization(dir: string, status: any) {
-    if (String(status?.phase || "") !== "review_infrastructure_failed") {
+    if (String(status?.phase || "") !== "review_infrastructure_failed" && !(status?.phase === "closed_partial" && status?.reviewInfrastructureResumeEligible === true)) {
       return { ok: false, error: "review_infrastructure_phase_required" };
     }
     if (status?.reviewInfrastructureResumeEligible !== true) {
@@ -79,6 +98,7 @@ export function createRepositoryDelivery(deps: RepositoryDeliveryDeps) {
       reviewInfrastructureResumeEligible: false,
       reviewInfrastructureRecoveredAt: recoveredAt,
       reviewInfrastructureRecovery: recoveryPath,
+      outputRecovery: null,
       resumedFromPhase: "review_infrastructure_failed",
       requiredMechanicalValidation: true,
       validationEvidence: null,
@@ -87,11 +107,11 @@ export function createRepositoryDelivery(deps: RepositoryDeliveryDeps) {
     return { ok: true, phase: next.phase, recoveryPath, outputHandoff, status: next };
   }
 
-  function repositoryFindings(status: any, max = 12) {
-    const residue = status?.reviewNonConvergence?.ok && Array.isArray(status.reviewNonConvergence.remaining) ? status.reviewNonConvergence.remaining : null;
+  function repositoryFindings(status: any) {
+    const residue = status?.outputRecovery?.reviewVerification !== "incomplete" && status?.reviewNonConvergence?.ok && Array.isArray(status.reviewNonConvergence.remaining) ? status.reviewNonConvergence.remaining : null;
     // When corrections did not converge, the council findings were their input and the review's residue is what is
     // left of them, so only the residue becomes issues.
-    const raw = residue ? [] : [...(status?.councilReviewFindings || [])];
+    const raw = residue || status?.outputRecovery?.reviewVerification === "incomplete" ? [] : [...(status?.councilReviewFindings || [])];
     if (residue) {
       // One issue per finding the review left blocking.
       for (const f of residue) raw.push(`${f.title}${f.file ? ` (${f.file}${f.line ? `:${f.line}` : ""})` : ""}${f.detail ? `: ${f.detail}` : ""}`);
@@ -101,6 +121,11 @@ export function createRepositoryDelivery(deps: RepositoryDeliveryDeps) {
         raw.push(`Review stopped after ${status.reviewNonConvergence.roundCeiling} correction round(s) with ${status.reviewNonConvergence.blockingCount} blocking finding(s) left, but the findings file could not be read: re-review this branch.`);
       }
     }
+    if (!raw.length && status?.outputRecovery?.ok) {
+      raw.push("Compare the preserved branch with every acceptance criterion in the approved plan; retain completed work and implement only the remaining scope.");
+      raw.push("Run the approved mechanical validation on the preserved branch, resolve failures, and record fresh evidence for its exact commit.");
+      if (status.outputRecovery.reviewVerification !== "complete") raw.push("Complete independent review of the preserved branch with complete verifier inputs; validate candidate findings before treating them as defects.");
+    }
     // A failure's recommended action is an instruction for whoever runs the
     // cycle, not work left in the code, so it never becomes an issue.
     const out: string[] = [];
@@ -108,7 +133,6 @@ export function createRepositoryDelivery(deps: RepositoryDeliveryDeps) {
       const text = String(value || "").trim().replace(/\s+/g, " ");
       if (!text || out.includes(text)) continue;
       out.push(text);
-      if (out.length >= max) break;
     }
     return out;
   }
@@ -158,6 +182,8 @@ export function createRepositoryDelivery(deps: RepositoryDeliveryDeps) {
       sourcePhase,
       acceptedSourcePhase: classificationPhase,
       classification,
+      draft: classification === "partial",
+      preservedBaseline: status?.outputRecovery?.ok ? status.outputRecovery.baseline : null,
       baseBranch: String(params.repositoryBaseBranch || repositoryDeliveryConfig.baseBranch || "main"),
       // A decision the implementation left for a person keeps the PR open for them to merge after answering.
       autoMerge: operation !== "status" && classification === "success" && repositoryDeliveryConfig.autoMergeSuccessful && status?.pendingDecision?.status !== "pending",
@@ -246,7 +272,8 @@ export function createRepositoryDelivery(deps: RepositoryDeliveryDeps) {
   }
 
   async function finalizeRepositoryDeliveryState(dir: string, status: any, params: any) {
-    if (["final_validated", "council_validated"].includes(String(status?.phase || ""))) {
+    status = await recoverPreservedAttemptStatus(dir, status);
+    if (!["repository_delivery_failed", "delivery_published"].includes(String(status?.phase || ""))) {
       await cycleStatus(dir, { repositoryDeliverySourcePhase: status.phase });
     }
     const delivery = await runRepositoryDeliveryAdapter(dir, status, params);
@@ -280,7 +307,8 @@ export function createRepositoryDelivery(deps: RepositoryDeliveryDeps) {
       owner: "main",
       ok: true,
       repositoryDelivery: delivery,
-      nextAction: phase === "delivery_published" ? "Wait for repository checks/auto-merge." : "none",
+      nextAction: phase === "delivery_published" ? "Wait for repository checks/auto-merge."
+        : phase === "closed_partial" ? "Work is preserved in the delivery PR. Resolve the blocker, then use start_followup to continue its open issues on the same branch." : "none",
     });
     return { ok: true, phase: next.phase, status: next, delivery };
   }
@@ -344,5 +372,5 @@ export function createRepositoryDelivery(deps: RepositoryDeliveryDeps) {
     }
   }
 
-  return { resumeReviewInfrastructureFinalization, requiredValidationError, readRepositoryFollowUps, finalizeRepositoryDeliveryState, reconcileRepositoryDeliveryState, autoCommitCanonicalPlan };
+  return { recoverPreservedAttemptStatus, resumeReviewInfrastructureFinalization, requiredValidationError, readRepositoryFollowUps, finalizeRepositoryDeliveryState, reconcileRepositoryDeliveryState, autoCommitCanonicalPlan };
 }

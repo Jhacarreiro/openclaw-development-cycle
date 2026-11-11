@@ -7,6 +7,7 @@ import type { createCycleStore } from "./cycle-store.js";
 import type { createObserver } from "./observer.js";
 import type { createRuntimeObservation } from "./runtime-observation.js";
 import type { createFinalValidation } from "./final-validation.js";
+import type { createRepositoryDelivery } from "./repository-delivery.js";
 
 export interface StopDeps {
   runnerHeartbeatIntervalSeconds: number;
@@ -17,10 +18,11 @@ export interface StopDeps {
   runtimeProcessSnapshot: ReturnType<typeof createRuntimeObservation>["runtimeProcessSnapshot"];
   loadProjectValidationConfig: ReturnType<typeof createFinalValidation>["loadProjectValidationConfig"];
   runExternalFinalValidation: ReturnType<typeof createFinalValidation>["runExternalFinalValidation"];
+  recoverPreservedAttemptStatus: ReturnType<typeof createRepositoryDelivery>["recoverPreservedAttemptStatus"];
 }
 
 export function createStop(deps: StopDeps) {
-  const { runnerHeartbeatIntervalSeconds, saveJson, cycleStatus, collectObserverSessions, finalizeObserverSessions, runtimeProcessSnapshot, loadProjectValidationConfig, runExternalFinalValidation } = deps;
+  const { runnerHeartbeatIntervalSeconds, saveJson, cycleStatus, collectObserverSessions, finalizeObserverSessions, runtimeProcessSnapshot, loadProjectValidationConfig, runExternalFinalValidation, recoverPreservedAttemptStatus } = deps;
 
   function numericPid(value: any) {
     const pid = Number(value);
@@ -98,10 +100,10 @@ export function createStop(deps: StopDeps) {
       stoppedReason: reason,
       processGroupStopResults: stopped,
       observerFinalization,
-      nextAction: "Inspect logs and dirty worktree before deciding whether to clean/relaunch.",
+      nextAction: "Inventory and preserve partial work before deciding how to continue from the remaining tasks.",
       error: reason,
     });
-    return { ok: true, stopped, status: next };
+    return { ok: true, stopped, status: await recoverPreservedAttemptStatus(dir, next) };
   }
 
   async function latestRunActivityMtime(status: any) {

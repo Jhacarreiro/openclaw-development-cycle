@@ -36,7 +36,7 @@ export function createOctopusOutput(deps: OctopusOutputDeps) {
   }
 
   function repositoryDeliveryMissingRequiredOutput(status: any) {
-    return octopusDeliveryRequiresOutputPath(status) && !hasMaterializedImplementationOutput(status);
+    return octopusDeliveryRequiresOutputPath(status) && (!hasMaterializedImplementationOutput(status) || status?.outputRecovery?.ok === false);
   }
 
   async function resolveOctopusAttemptOutput(projectRoot: string, attemptId: string) {
@@ -80,11 +80,51 @@ export function createOctopusOutput(deps: OctopusOutputDeps) {
       if (actualBranch !== runBranch) {
         return { ok: false, error: "octopus_output_checked_out_branch_mismatch", manifestPath, attemptId: safeAttemptId, manifestBranch: runBranch, actualBranch };
       }
-      return { ok: true, attemptId: safeAttemptId, manifestPath, outputPath: outputPinned.realPath, sourceRepository: sourcePinned.realPath, sourceCommit: String(manifest.sourceCommit || "").trim() || null, runBranch };
+      return { ok: true, attemptId: safeAttemptId, manifestPath, outputPath: outputPinned.realPath, sourceRepository: sourcePinned.realPath, sourceCommit: String(manifest.sourceCommit || "").trim() || null, runBranch,
+        reviewVerification: manifest.reviewVerification === "incomplete" ? "incomplete" : manifest.reviewVerification === "complete" ? "complete" : "unknown" };
     } finally {
       await sourcePinned?.handle.close().catch(() => null);
       await manifestSourcePinned?.handle.close().catch(() => null);
       await outputPinned?.handle.close().catch(() => null);
+    }
+  }
+
+  // A terminal runner can leave useful dirty or committed work behind before
+  // emitting its final handoff. Inventory that exact attempt without changing
+  // files, rebasing, cleaning, or claiming that the product passed validation.
+  async function inventoryPreservedOctopusOutput(status: any) {
+    const attemptId = String(status?.correctionsAttemptId || status?.implementationAttemptId || "").trim();
+    if (!attemptId) return { ok: false as const, error: "octopus_attempt_id_missing" };
+    const handoff = await resolveOctopusAttemptOutput(String(status?.projectRoot || ""), attemptId);
+    if (!handoff.ok || !handoff.outputPath || !handoff.sourceRepository) return { ok: false as const, error: "octopus_output_handoff_unavailable", handoff };
+    const baseline = handoff.sourceCommit || "";
+    if (!/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/i.test(baseline)) return { ok: false as const, error: "octopus_output_baseline_missing", handoff };
+    const pinned = await pinTrustedProjectRoot(handoff.outputPath);
+    const source = await pinTrustedProjectRoot(handoff.sourceRepository);
+    try {
+      if (!pinned || !source) return { ok: false as const, error: "octopus_output_checkout_untrusted", handoff };
+      const [head, dirty, ancestor, common, sourceCommon] = await Promise.all([
+        execGit(["rev-parse", "HEAD"], pinned.procPath),
+        execGit(["status", "--porcelain", "--untracked-files=all"], pinned.procPath),
+        execGit(["merge-base", "--is-ancestor", baseline, "HEAD"], pinned.procPath),
+        execGit(["rev-parse", "--path-format=absolute", "--git-common-dir"], pinned.procPath),
+        execGit(["rev-parse", "--path-format=absolute", "--git-common-dir"], source.procPath),
+      ]);
+      if (![head, dirty, ancestor, common, sourceCommon].every((probe) => probe.ok)) return { ok: false as const, error: "octopus_output_inventory_failed", handoff };
+      const [commonReal, sourceCommonReal] = await Promise.all([
+        realpath(common.stdout.trim()), realpath(sourceCommon.stdout.trim()),
+      ]);
+      if (commonReal !== sourceCommonReal) return { ok: false as const, error: "octopus_output_repository_mismatch", handoff };
+      const committedProgress = head.stdout.trim() !== baseline;
+      const dirtyProgress = Boolean(dirty.stdout.trim());
+      if (!committedProgress && !dirtyProgress) return { ok: false as const, error: "octopus_output_pristine", handoff };
+      return { ok: true as const, handoff, attemptId, sourcePhase: String(status?.phase || ""),
+        head: head.stdout.trim(), baseline, committedProgress, dirtyProgress,
+        reviewVerification: handoff.reviewVerification, validationRequired: true };
+    } catch { return { ok: false as const, error: "octopus_output_inventory_failed", handoff }; }
+    finally {
+      await pinned?.handle.close().catch(() => null);
+      await source?.handle.close().catch(() => null);
     }
   }
 
@@ -163,6 +203,7 @@ export function createOctopusOutput(deps: OctopusOutputDeps) {
       if (rel && !rel.startsWith("..") && !isAbsolute(rel)) findingsPath = real;
     } catch {}
     const doc = findingsPath ? await readJsonIfExists(findingsPath) : null;
+    if (doc?.verification_status === "incomplete" || (Array.isArray(doc?.findings) && doc.findings.some((f: any) => f?.verdict === "unverified"))) return { ok: false };
     const remaining = (Array.isArray(doc?.findings) ? doc.findings : [])
       .filter((f: any) => String(f?.severity || "") === "normal")
       .map((f: any) => ({
@@ -215,5 +256,5 @@ export function createOctopusOutput(deps: OctopusOutputDeps) {
     }
   }
 
-  return { execGit, effectiveImplementationRoot, repositoryDeliveryMissingRequiredOutput, resolveOctopusAttemptOutput, detectOctopusReviewInfrastructureFailure, detectOctopusReviewNonConvergence, octopusAttemptPristine };
+  return { execGit, effectiveImplementationRoot, repositoryDeliveryMissingRequiredOutput, resolveOctopusAttemptOutput, inventoryPreservedOctopusOutput, detectOctopusReviewInfrastructureFailure, detectOctopusReviewNonConvergence, octopusAttemptPristine };
 }

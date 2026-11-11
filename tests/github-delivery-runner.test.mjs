@@ -22,6 +22,7 @@ if(a[0]==="push") fs.writeFileSync(d+"/git-push-env.json",JSON.stringify({askpas
 if(a[0]==="status") process.stdout.write(a.includes("-z")?(process.env.TEST_GIT_STATUS||"").replace(/\\n/g,"\\0"):(process.env.TEST_GIT_STATUS||""));
 else if(a[0]==="branch") process.stdout.write(process.env.TEST_BRANCH||"feat/test");
 else if(a[0]==="diff"&&a.includes("--cached")) process.stdout.write("src/app.ts\\n");
+else if(a[0]==="diff"&&a.includes("--name-only")) process.stdout.write((process.env.TEST_COMMITTED_PATHS||"").replace(/\\n/g,"\\0"));
 else if(a[0]==="rev-parse") process.stdout.write("abc123def456\\n");
 else if(a[0]==="config") { if(process.env.TEST_GIT_EMAIL) process.stdout.write(process.env.TEST_GIT_EMAIL+"\\n"); else process.exit(1); }
 `;
@@ -33,13 +34,15 @@ else if(a[0]==="api"&&a[1]==="user") process.stdout.write(JSON.stringify({login:
 else if(a[0]==="pr"&&a[1]==="view") {
   if(!fs.existsSync(d+"/pr")) process.exit(1);
   const merged=process.env.TEST_PR_MERGED==="1";
-  process.stdout.write(JSON.stringify({number:42,url:"https://github.test/acme/demo/pull/42",state:merged?"MERGED":"OPEN",mergedAt:merged?"2026-08-20T17:00:00Z":null,autoMergeRequest:process.env.TEST_PR_AUTO_MERGE==="1"?{mergeMethod:"SQUASH"}:null}));
+  process.stdout.write(JSON.stringify({number:42,url:"https://github.test/acme/demo/pull/42",state:merged?"MERGED":"OPEN",isDraft:fs.existsSync(d+"/draft")||process.env.TEST_PR_DRAFT==="1",mergedAt:merged?"2026-08-20T17:00:00Z":null,autoMergeRequest:process.env.TEST_PR_AUTO_MERGE==="1"?{mergeMethod:"SQUASH"}:null}));
 } else if(a[0]==="pr"&&a[1]==="create") {
   fs.writeFileSync(d+"/pr","1");
+  if(a.includes("--draft")) fs.writeFileSync(d+"/draft","1");
   process.stdout.write("https://github.test/acme/demo/pull/42\\n");
 } else if(a[0]==="issue"&&a[1]==="list") process.stdout.write("[]");
 else if(a[0]==="issue"&&a[1]==="create") {
   let n=100; try{n=Number(fs.readFileSync(d+"/issue-n","utf8"))}catch{}
+  if(process.env.TEST_ISSUE_FAIL_AT===String(n+1)&&!fs.existsSync(d+"/issue-failed")) { fs.writeFileSync(d+"/issue-failed","1"); process.exit(1); }
   n++; fs.writeFileSync(d+"/issue-n",String(n));
   process.stdout.write("https://github.test/acme/demo/issues/"+n+"\\n");
 }
@@ -57,7 +60,7 @@ async function runFixture(f, request, extraEnv = {}) {
   return JSON.parse(stdout);
 }
 
-test("partial delivery opens normal PR and residual issues without merge", async () => {
+test("partial delivery opens a draft PR and residual issues without merge", async () => {
   const f = await fixture();
   const out = await runFixture(f, { classification:"partial", autoMerge:false, findings:["race condition","port mismatch"] });
   assert.equal(out.ok, true);
@@ -66,8 +69,54 @@ test("partial delivery opens normal PR and residual issues without merge", async
   assert.equal(out.mergeQueued, false);
   const gh = await readFile(join(f.state, "gh.log"), "utf8");
   assert.match(gh, /"pr","create"/);
+  assert.match(gh, /"--draft"/);
   assert.match(gh, /"issue","create"/);
   assert.doesNotMatch(gh, /"pr","merge"/);
+});
+
+test("a publication retry reuses issues recorded before a later operation failed", async () => {
+  const f = await fixture();
+  const request = { classification:"partial", autoMerge:false, findings:["remaining work one", "remaining work two"] };
+  await assert.rejects(runFixture(f, request, { TEST_ISSUE_FAIL_AT:"102" }));
+  const out = await runFixture(f, request);
+  assert.deepEqual(out.issues.map(issue => issue.number), [101,102]);
+  await runFixture(f, request);
+  const calls = (await readFile(join(f.state,"gh.log"),"utf8")).trim().split("\n").map(JSON.parse);
+  assert.equal(calls.filter(a => a[0]==="pr" && a[1]==="create").length,1);
+  assert.equal(calls.filter(a => a[0]==="issue" && a[1]==="create").length,3);
+  const journal = JSON.parse(await readFile(join(f.root,"repository_delivery_progress.json"),"utf8"));
+  assert.equal(journal.issues.length,2);
+});
+
+test("recovered commits receive the same sensitive-path checks as dirty files", async () => {
+  const f = await fixture("");
+  await assert.rejects(runFixture(f, { classification:"partial", preservedBaseline:"a".repeat(40), findings:[] }, { TEST_COMMITTED_PATHS:"config/credentials.json\n" }), /refusing_sensitive_paths/);
+  assert.equal(await readFile(join(f.state,"gh.log"),"utf8").catch(()=>""), "");
+});
+
+test("a validated continuation marks its draft ready before queuing merge", async () => {
+  const f = await fixture("");
+  await writeFile(join(f.state,"pr"),"1");
+  await runFixture(f, { classification:"success", targetBranch:"feat/test", autoMerge:true }, { TEST_PR_DRAFT:"1" });
+  const calls = (await readFile(join(f.state,"gh.log"),"utf8")).trim().split("\n").map(JSON.parse);
+  const ready = calls.findIndex(a => a[0]==="pr" && a[1]==="ready" && !a.includes("--undo"));
+  const merge = calls.findIndex(a => a[0]==="pr" && a[1]==="merge" && a.includes("--auto"));
+  assert.ok(ready >= 0 && merge > ready);
+});
+
+test("long findings with the same title prefix remain distinct issues", async () => {
+  const f = await fixture();
+  const prefix = "Complete the remaining acceptance check ".repeat(5);
+  const out = await runFixture(f, { classification:"partial", findings:[prefix+"one",prefix+"two"] });
+  assert.equal(new Set(out.issues.map(issue => issue.number)).size,2);
+  assert.equal(new Set(out.issues.map(issue => issue.title)).size,2);
+});
+
+test("partial publication disables any previously queued auto-merge", async () => {
+  const f = await fixture(""); await writeFile(join(f.state,"pr"),"1");
+  await runFixture(f, { classification:"partial", autoMerge:true }, { TEST_PR_AUTO_MERGE:"1" });
+  const calls = (await readFile(join(f.state,"gh.log"),"utf8")).trim().split("\n").map(JSON.parse);
+  assert.deepEqual(calls.filter(a => a[0]==="pr"&&a[1]==="merge"), [["pr","merge","42","--disable-auto"]]);
 });
 
 test("successful delivery queues GitHub auto-merge without local branch deletion", async () => {

@@ -9,6 +9,7 @@ export function inferDeliveryClassification(phase: string, requested: unknown): 
     "needs_corrections",
     "implementation_failed",
     "corrections_failed",
+    "review_infrastructure_failed",
     "council_review_needs_corrections",
     "council_review_failed",
     "council_review_waiting_human",

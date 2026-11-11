@@ -28,6 +28,11 @@ The plugin registers one OpenClaw tool, `development_cycle`:
 
 State is persisted under `$HOME/.openclaw/development-cycle` by default, so runs survive OpenClaw turns and process restarts.
 
+Failed or stopped Octopus attempts can preserve verified partial progress in a
+draft PR with remaining-work issues. Follow-up runs continue that PR from its
+open issues and the original acceptance criteria. See
+[partial delivery and continuation](docs/partial-delivery-recovery.md).
+
 ### Supervision modes
 
 The state machine is designed to support two operating styles:
@@ -163,7 +168,7 @@ stop
 
 Invalid phase transitions are rejected by the state machine.
 
-When an Octopus attempt exits non-zero only because contextual review infrastructure explicitly reports `No changes found to review`, while a trusted Tangle output handoff is already materialized, `reconcile` records `review_infrastructure_failed` instead of flattening the run into a generic implementation failure. The output is preserved and marked resume-eligible. `resume_finalization` revalidates the exact attempt manifest, source checkout, worktree, and branch before moving back to `implementation_delivered`; `run_final_validation` is still mandatory before final review or repository delivery. Other non-zero failures do not use this recovery path.
+When an Octopus attempt exits non-zero only because contextual review infrastructure explicitly reports `No changes found to review`, while a trusted Tangle output handoff is already materialized, `reconcile` records `review_infrastructure_failed` instead of flattening the run into a generic implementation failure. The output is preserved and marked resume-eligible, including when its verified progress is published as a partial draft. `resume_finalization` revalidates the exact attempt manifest, source checkout, worktree, and branch before moving back to `implementation_delivered`; `run_final_validation` is still mandatory before final review or successful repository delivery. Other non-zero failures do not use this dedicated finalization recovery path.
 
 ### Approved-plan normalization
 

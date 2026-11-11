@@ -177,6 +177,7 @@ test("corrections relaunch ignores stale terminal markers", async (t) => {
 });
 
 const staleFailure = {
+  outputRecovery: { ok:false, attemptId:"old-attempt" },
   ok: false,
   error: "observer_root_session_creation_failed",
   reason: "observer_root_session_creation_failed",

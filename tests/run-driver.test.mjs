@@ -4,8 +4,21 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { createRunDriver, projectsWithRuns, runToDrive } from "../dist/cycle/run-driver.js";
+import { shouldAutoContinuePartialDelivery } from "../dist/cycle/follow-up.js";
 
 const hour = 3600 * 1000;
+
+test("partial continuation respects manual stops and unresolved infrastructure while preserving bounded review follow-ups", () => {
+  const partial = { outputRecovery:{ ok:true, sourcePhase:"implementation_failed", reviewVerification:"complete" } };
+  assert.equal(shouldAutoContinuePartialDelivery(partial),true);
+  for (const patch of [
+    { failureSafeToAutoRetry:false }, { failureHumanRequired:true },
+    { outputRecovery:{ ...partial.outputRecovery, sourcePhase:"stopped" } },
+    { outputRecovery:{ ...partial.outputRecovery, reviewVerification:"incomplete" } },
+    { pendingDecision:{ status:"pending" } },
+  ]) assert.equal(shouldAutoContinuePartialDelivery({ ...partial, ...patch }),false);
+  assert.equal(shouldAutoContinuePartialDelivery({ failureClass:"review_non_convergence", failureSafeToAutoRetry:false }),true);
+});
 
 test("the run driver reconciles only each project's latest run while it is open and recently active", async (t) => {
   const runsRoot = join(tmpdir(), `development-cycle-run-driver-${process.pid}-${Date.now()}`);

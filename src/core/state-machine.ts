@@ -25,7 +25,7 @@ const ALLOWED_PHASES: Partial<Record<DevelopmentCycleAction, ReadonlySet<string>
   record_plan: new Set(["", "waiting_external_plan", "plan_ready_for_implementation"]),
   start_implementation: new Set(["plan_ready_for_implementation", "implementation_failed", "implementation_waiting_human"]),
   answer_intervention: new Set(["implementation_waiting_human"]),
-  resume_finalization: new Set(["review_infrastructure_failed"]),
+  resume_finalization: new Set(["review_infrastructure_failed", "closed_partial"]),
   stop_implementation: new Set([
     "implementation_launched",
     "implementation_running",
@@ -57,6 +57,7 @@ const ALLOWED_PHASES: Partial<Record<DevelopmentCycleAction, ReadonlySet<string>
   start_corrections: new Set(["needs_corrections", "council_review_needs_corrections"]),
   start_followup: new Set([""]),
   finalize_delivery: new Set([
+    "review_infrastructure_failed",
     "final_validated",
     "final_revised",
     "needs_corrections",

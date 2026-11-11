@@ -1,11 +1,11 @@
 import { Type, type Static } from "typebox";
 import { defineToolPlugin } from "openclaw/plugin-sdk/tool-plugin";
-import { lstat, mkdir, readdir, realpath, writeFile } from "node:fs/promises";
-import { join, relative, sep, basename, dirname } from "node:path";
+import { mkdir, readdir, writeFile } from "node:fs/promises";
+import { join, basename, dirname } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { ACTIONS, checkActionTransition } from "./core/state-machine.js";
 import { parseFinalDecision } from "./core/decisions.js";
-import { cleanId, newRunId as createRunId, projectPathCandidates } from "./core/ids.js";
+import { cleanId, newRunId as createRunId } from "./core/ids.js";
 import { classifyAutomaticImplementationRecovery } from "./core/automatic-recovery.js";
 import { clearedAttemptFailure } from "./core/runtime-failure.js";
 import { createNotificationService } from "./runtime/notifications.js";
@@ -30,6 +30,7 @@ import { createFinalValidation } from "./cycle/final-validation.js";
 import { createCouncil } from "./cycle/council.js";
 import { createStop } from "./cycle/stop.js";
 import { createRunDriver, projectsWithRuns, runToDrive } from "./cycle/run-driver.js";
+import { latestRunDir as selectLatestRunDir } from "./cycle/run-selection.js";
 
 const lifecycleLockHeld = Symbol("developmentCycleLifecycleLockHeld");
 const resolvedCycleDir = Symbol("developmentCycleResolvedCycleDir");
@@ -194,57 +195,7 @@ function firstLaunch(status: any) {
 }
 
 async function latestRunDir(project: string) {
-  const runsRoot = join(cycleRoot, "runs");
-  const runsRootInfo = await lstat(runsRoot).catch(() => null);
-  if (!runsRootInfo?.isDirectory() || runsRootInfo.isSymbolicLink()) return "";
-  const realRunsRoot = await realpath(runsRoot).catch(() => "");
-  if (!realRunsRoot) return "";
-
-  const containedDir = async (path: string) => {
-    const info = await lstat(path).catch(() => null);
-    if (!info?.isDirectory() || info.isSymbolicLink()) return null;
-    const realPath = await realpath(path).catch(() => "");
-    if (!realPath) return null;
-    const rel = relative(realRunsRoot, realPath);
-    if (!rel || rel === ".." || rel.startsWith(".." + sep) || rel.startsWith(sep)) return null;
-    return info;
-  };
-
-  const entries: Array<{ dir: string; name: string; mtime: number; ts: string }> = [];
-  for (const dirName of projectPathCandidates(project)) {
-    const base = join(runsRoot, dirName);
-    if (!(await containedDir(base))) continue;
-
-    let ents: Array<{ name: string; isDirectory: () => boolean }> = [];
-    try { ents = await readdir(base, { withFileTypes: true }); } catch { continue; }
-    for (const ent of ents) {
-      if (!ent.isDirectory() || !ent.name || ent.name === "." || ent.name === ".." || ent.name === ".git") continue;
-      const full = join(base, ent.name);
-      const fullInfo = await containedDir(full);
-      if (!fullInfo) continue;
-
-      const statusPath = join(full, "status.json");
-      const statusInfo = await lstat(statusPath).catch(() => null);
-      if (!statusInfo?.isFile() || statusInfo.isSymbolicLink()) continue;
-
-      const tsMatch = ent.name.match(/-(\d{14,17})(?:-[a-z0-9]+)?$/i);
-      entries.push({
-        dir: full,
-        name: ent.name,
-        mtime: fullInfo.mtimeMs,
-        ts: tsMatch ? tsMatch[1].padEnd(17, "0") : "",
-      });
-    }
-  }
-
-  entries.sort((a, b) => {
-    if (a.ts && b.ts && a.ts !== b.ts) return a.ts.localeCompare(b.ts);
-    if (a.ts && !b.ts) return 1;
-    if (!a.ts && b.ts) return -1;
-    if (a.mtime !== b.mtime) return a.mtime - b.mtime;
-    return a.name.localeCompare(b.name);
-  });
-  return entries.at(-1)?.dir || "";
+  return selectLatestRunDir(join(cycleRoot, "runs"), project);
 }
 
 const LIVE_RUN_PHASES = ["implementation_launched", "implementation_running", "corrections_launched", "corrections_running"];

@@ -23,6 +23,7 @@ test("the run driver reconciles only each project's latest run while it is open 
     // A follow-up linked just before a restart, not yet launched.
     "linked/linked-20261020100000000-hhhhhh": { phase: "plan_ready_for_implementation", followUp: { sourceRunId: "x" }, updatedAt: "2026-10-20T17:00:00Z" },
     "planned/planned-20261020100000000-iiiiii": { phase: "plan_ready_for_implementation", updatedAt: "2026-10-20T17:00:00Z" },
+    "stopped/stopped-20261020100000000-jjjjjj": { phase: "stopped", failureClass: "rate_limited", updatedAt: "2026-10-20T17:59:00Z" },
   };
   for (const [path, status] of Object.entries(runs)) {
     await mkdir(join(runsRoot, path), { recursive: true });

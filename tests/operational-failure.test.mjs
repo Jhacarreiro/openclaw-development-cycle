@@ -4,6 +4,7 @@ import { mkdtemp, mkdir, writeFile, rm, symlink } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { classifyOperationalFailure } from "../dist/cycle/operational-failure.js";
+import { createMainUpdates } from "../dist/cycle/main-updates.js";
 
 test("an attributed current-attempt error is classified without scanning model prose", async t => {
   const dir = await mkdtemp(join(tmpdir(), "cycle-operation-")); t.after(() => rm(dir, { recursive: true, force: true }));
@@ -14,6 +15,12 @@ test("an attributed current-attempt error is classified without scanning model p
   await writeFile(path, JSON.stringify(evidence));
   const result = await classifyOperationalFailure(status);
   assert.equal(result.failureClass, "rate_limited"); assert.equal(result.autoStopRecommended, false); assert.equal(result.matched.evidencePath, path);
+  const updates = createMainUpdates({ runtimeHome:dir, loadJson:async()=>null, saveJson:async()=>{}, appendJsonl:async()=>{}, cycleStatus:async()=>status });
+  const event = await updates.dcClassify(dir,status,{});
+  const notice = await updates.dcNotifyMain(dir,"fixture","run",status,{dryRunMainUpdate:true},event);
+  assert.match(notice.text,/fixture-provider/); assert.match(notice.text,/HTTP_429/);
+  assert.match(notice.text,/attempt-a/); assert.doesNotMatch(notice.text,/undefined/);
+  assert.ok(notice.event.evidencePaths.includes(path));
   for (const change of [{ attemptId: "old-attempt" }, { source: "application" }, { source: "runner" }, { occurredAt: "unknown" }, { schemaVersion: 2 }, { provider: "" }]) {
     await writeFile(path, JSON.stringify({ ...evidence, ...change })); assert.equal(await classifyOperationalFailure(status), null);
   }

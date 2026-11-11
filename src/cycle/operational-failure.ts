@@ -36,7 +36,7 @@ export async function classifyOperationalFailure(status: any) {
     if (evidence.source === "runner" && evidence.failureClass !== "local_runtime_fault") return null;
     const policy = policies[evidence.failureClass as keyof typeof policies];
     return { failureClass: evidence.failureClass, ...policy, safeToAutoRetry: false,
-      matched: { name: "attributed_operation", source: evidence.source, provider: evidence.provider ?? null, errorCode: evidence.errorCode, attemptId, evidencePath: path, occurredAt: evidence.occurredAt } };
+      matched: { name: "attributed_operation", match: JSON.stringify({ source:evidence.source, provider:evidence.provider ?? null, errorCode:evidence.errorCode, attemptId }), source: evidence.source, provider: evidence.provider ?? null, errorCode: evidence.errorCode, attemptId, evidencePath: path, occurredAt: evidence.occurredAt } };
   } catch { return null; }
   finally { await handle?.close(); }
 }

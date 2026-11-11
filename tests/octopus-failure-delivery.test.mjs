@@ -222,3 +222,24 @@ test("incomplete verification opens validation work instead of candidate-defect 
   assert.doesNotMatch(request.findings.join("\n"),/Speculative defect|Unverified candidate/);
   assert.equal(out.automaticFollowUp,null);
 });
+
+test("application rate-limit review prose cannot cancel progress; incomplete review still preserves remaining validation", async t => {
+  const ctx = await setup(t,"causal-replay");
+  await preservedAttempt(ctx,{reviewVerification:"incomplete"});
+  const session = JSON.parse(await readFile(ctx.launched.directImplementationStatus,"utf8"));
+  await writeFile(session.stdoutPath,"Review finding: matching has no concurrency or rate limits. HTTP 429 handling belongs to the application.\n");
+  const active = await reconcile(ctx);
+  assert.equal(active.status.phase,"implementation_launched");
+  assert.notEqual(active.status.failureClass,"rate_limited");
+  assert.equal(active.automaticRepositoryDelivery,null);
+  const policyStop = detailsOf(await ctx.tool.execute("policy-stop",{action:"stop_implementation",...ctx.params,stopIntent:"failure-policy"},undefined,undefined));
+  assert.equal(policyStop.error,"automatic_stop_not_recommended");
+  await forceNonZero(ctx.launched);
+  const partial = await reconcile(ctx);
+  assert.equal(partial.status.phase,"closed_partial");
+  assert.equal(partial.status.failureClass,"review_infrastructure_failed");
+  assert.equal(partial.automaticFollowUp,null);
+  const request = JSON.parse(await readFile(ctx.deliveryMarker,"utf8"));
+  assert.equal(request.draft,true);
+  assert.match(request.findings.join("\n"),/Complete independent review/);
+});

@@ -16,6 +16,20 @@ export interface FollowUpDeps {
   readRepositoryFollowUps: ReturnType<typeof createRepositoryDelivery>["readRepositoryFollowUps"];
 }
 
+export function shouldAutoContinuePartialDelivery(status: any) {
+  if (status?.failureHumanRequired === true || status?.pendingDecision?.status === "pending") return false;
+  if (status?.outputRecovery?.reviewVerification === "incomplete") return false;
+  // A manual cancellation stays cancelled. An explicit start_followup can
+  // continue its PR once the operator resolves the reason for stopping.
+  if (status?.outputRecovery?.sourcePhase === "stopped" || status?.repositoryDeliverySourcePhase === "stopped") return false;
+  // Non-convergence already has an explicit bounded follow-up policy. Its
+  // prohibition on re-running the failed attempt does not prohibit that path.
+  if (status?.failureClass === "review_non_convergence") return true;
+  if (status?.failureSafeToAutoRetry === false) return false;
+  return status?.outputRecovery?.ok === true
+    && ["implementation_failed", "corrections_failed"].includes(String(status.outputRecovery.sourcePhase || ""));
+}
+
 // The plan a follow-up run executes: the open issues a partial delivery left,
 // on top of the code that delivery already holds. The original plan travels
 // along as fenced context so its own headings and paths stay out of this plan.
@@ -36,11 +50,15 @@ export function buildFollowUpPlan(input: {
   return [
     `# Follow-up plan for ${input.sourceRunId}`,
     "",
-    `The previous run's review stopped before it converged. Its work is delivered on ${input.pullRequestUrl} (branch \`${input.branch}\`), and projectRoot is a checkout of that branch. Keep that work; resolve only the open issues below.`,
+    `The previous run left a partial delivery on ${input.pullRequestUrl} (branch \`${input.branch}\`), and projectRoot is a checkout of that branch. Inspect and retain its completed work; resolve the open issues below, including any acceptance criteria they identify as unfinished.`,
     "",
     "## Ordered implementation tasks",
     "",
     ...tasks,
+    "",
+    "## Remaining issue details and acceptance criteria",
+    "",
+    ...input.issues.map((issue) => `### Issue #${issue.number}\n\n\`\`\`\`text\n${String(issue.body || issue.title).trim()}\n\`\`\`\`\n`),
     "",
     "## Validation checks",
     "",
@@ -50,7 +68,7 @@ export function buildFollowUpPlan(input: {
     "## Stop conditions",
     "",
     "- Stop and report before risky, destructive or protected changes, or when an issue needs a product decision the original plan does not settle.",
-    "- Do not redo or restructure work the original plan already delivered.",
+    "- Keep working implementations; do not repeat completed tasks or assume unchecked acceptance criteria are complete.",
     "",
     "## Expected artifacts",
     "",
@@ -61,7 +79,7 @@ export function buildFollowUpPlan(input: {
     `- projectRoot: ${input.projectRoot}`,
     `- projectWikiPath: ${input.projectWikiPath}`,
     "",
-    "## Original approved plan (context, already implemented on this branch)",
+    "## Original approved plan (acceptance context; completion must be checked)",
     "",
     "````markdown",
     String(input.originalPlan || "").trim(),

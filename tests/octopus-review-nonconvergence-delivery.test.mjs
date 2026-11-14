@@ -24,7 +24,7 @@ function planText(projectRoot, wikiPath) {
 // Runs a failed Octopus attempt that left a partial worktree and the given
 // stderr, then reconciles it; returns the run status and the delivery request.
 // With `corrections`, the attempt is a council corrections run instead.
-async function reconcileFailedOctopusRun(t, stderrLines, { corrections = false, operationalFailure = false } = {}) {
+async function reconcileFailedOctopusRun(t, stderrLines, { corrections = false, operationalFailure = false, findings = null } = {}) {
   const root = join(tmpdir(), `development-cycle-octopus-nonconvergence-${process.pid}-${Date.now()}`);
   t.after(() => rm(root, { recursive: true, force: true }));
   const home = join(root, "home");
@@ -90,7 +90,7 @@ async function reconcileFailedOctopusRun(t, stderrLines, { corrections = false, 
     runWorktree: await realpath(outputPath),
   }, null, 2));
   const findingsPath = join(manifestDir, "review-findings-1-octopus-tangle-review-marker.test.json");
-  await writeFile(findingsPath, JSON.stringify({ findings: [
+  await writeFile(findingsPath, JSON.stringify({ findings: findings || [
     { file: "src/workflow.ts", line: 370, severity: "normal", category: "auth", title: "Publish never checks the hash-bound approval", detail: "Compare the approval hash before posting." },
     { file: "src/db.ts", line: 12, severity: "normal", category: "data-exposure", title: "Database files are created without O_NOFOLLOW", detail: "" },
     { file: "src/cli.ts", line: 5, severity: "nit", category: "usability", title: "Option values that begin with -- are rejected", detail: "" },
@@ -139,6 +139,13 @@ test("Octopus review that hits the correction ceiling delivers partial output wi
   assert.deepEqual(request.findings, remainingBlockingFindings);
 });
 
+test("a partial delivery retains every confirmed remaining finding beyond twelve", async t => {
+  const findings = Array.from({length:20},(_,i)=>({ file:"src/app.ts", line:i+1, severity:"normal", verdict:"confirmed", title:`Remaining behavior ${i+1}`, detail:"Complete this acceptance check" }));
+  const {request} = await reconcileFailedOctopusRun(t, path => [`Correction loop hit the absolute round ceiling (3) with 20 blocking finding(s) remaining: ${path}`], {findings});
+  assert.equal(request.findings.length,20);
+  for (const finding of findings) assert.ok(request.findings.some(text=>text.includes(finding.title)));
+});
+
 test("Octopus that gives up on corrections after a review left blocking findings delivers those findings as follow-ups", async (t) => {
   const { status, request } = await reconcileFailedOctopusRun(t, (findingsPath) => [
     `\u001b[0;34m[2026-10-19 02:38:43]\u001b[0m \u001b[0;32mINFO\u001b[0m: Contextual code review findings: ${findingsPath} (normal=2)`,
@@ -160,7 +167,9 @@ test("A run that fails for another reason after a review is classified by that f
     "\u001b[0;34m[2026-10-19 03:08:47]\u001b[0m \u001b[1;33mWARN\u001b[0m: Tangle run failed; preserving isolated branch and worktree for inspection: octopus/run/x/integration",
   ], { operationalFailure: true });
   assert.equal(status.failureClass, "local_runtime_fault");
-  assert.deepEqual(request.findings, []);
+  assert.equal(request.findings.length, 3);
+  assert.match(request.findings.join("\n"), /acceptance criterion/);
+  assert.doesNotMatch(request.findings.join("\n"), /local permissions|relaunch a clean|Permission denied|provider history/);
 });
 
 test("Council corrections whose review does not converge deliver the corrected branch and open issues only for what is left", async (t) => {

@@ -23,7 +23,7 @@ import { looksLikePlanRequest, analyzeImplementationPlan, normalizeImplementatio
 import { createPlanningPack } from "./cycle/planning-pack.js";
 import { createOctopusOutput } from "./cycle/octopus-output.js";
 import { createRepositoryDelivery } from "./cycle/repository-delivery.js";
-import { createFollowUp } from "./cycle/follow-up.js";
+import { createFollowUp, shouldAutoContinuePartialDelivery } from "./cycle/follow-up.js";
 import { createImplementationStatus } from "./cycle/implementation-status.js";
 import { createRuntimeObservation } from "./cycle/runtime-observation.js";
 import { createFinalValidation } from "./cycle/final-validation.js";
@@ -112,7 +112,7 @@ const {
   pinContainedWikiDir, persistApprovedPlan, createImplementationRunnerSession,
   createImplementationObserverSession, updateImplementationObserverSession, finalizeObserverSessions,
   writePlanningPack, repositoryDeliveryMissingRequiredOutput, octopusAttemptPristine,
-  resumeReviewInfrastructureFinalization, requiredValidationError, finalizeRepositoryDeliveryState,
+  recoverPreservedAttemptStatus, resumeReviewInfrastructureFinalization, requiredValidationError, finalizeRepositoryDeliveryState,
   reconcileRepositoryDeliveryState, autoCommitCanonicalPlan, refreshLaunchedImplementationStatus,
   cycleRuntimeSummary, writeFinalValidationPack, runExternalFinalValidation, maybeRunCouncilEndgate,
   stopLaunchedImplementation, maybeHandleStalledRun, isExactBroadProjectRoot, prepareFollowUp,
@@ -345,6 +345,7 @@ async function projectCycle(params: CycleParameters | null | undefined): Promise
       const earlyPolicy = await dcPersistFailure(dir, effectiveStatus, await dcClassify(dir, { ...effectiveStatus, project, runId }, earlyRuntime));
       effectiveStatus = earlyPolicy.status || effectiveStatus;
     }
+    effectiveStatus = await recoverPreservedAttemptStatus(dir, effectiveStatus);
     const automaticRecovery = await supersededForDriver()
       ? { attempted: false, status: null, relaunch: null }
       : await maybeAutoRecoverImplementationFailure(dir, { ...effectiveStatus, project, runId }, params);
@@ -382,25 +383,26 @@ async function projectCycle(params: CycleParameters | null | undefined): Promise
     const failurePolicy = await dcPersistFailure(dir, effectiveStatus, runtimeEvent);
     effectiveStatus = failurePolicy.status || effectiveStatus;
     let automaticRepositoryDelivery: any = null;
-    const failureDeliveryPhase = ["implementation_failed", "corrections_failed", "stopped"].includes(String(effectiveStatus?.phase || ""));
-    if (repositoryDeliveryConfig.enabled && failureDeliveryPhase && repositoryDeliveryMissingRequiredOutput(effectiveStatus)) {
+    const failureDeliveryPhase = ["implementation_failed", "corrections_failed", "stopped", "review_infrastructure_failed"].includes(String(effectiveStatus?.phase || ""));
+    const publicationHeldForActiveProvider = (runtime?.richObservation?.alerts || []).some((a: any) => a?.code === "provider_processes_outside_observed_tree");
+    if (!publicationHeldForActiveProvider && repositoryDeliveryConfig.enabled && failureDeliveryPhase && repositoryDeliveryMissingRequiredOutput(effectiveStatus)) {
       effectiveStatus = await cycleStatus(dir, {
         repositoryDeliverySuppressed: {
           reason: "octopus_output_path_missing",
           phase: String(effectiveStatus?.phase || ""),
           suppressedAt: new Date().toISOString(),
         },
-        nextAction: "No deliverable Octopus output exists for this attempt. Start a new clean plan/implementation handoff after fixing the blocker.",
+        nextAction: "No publishable progress was verified for this exact attempt. Inspect outputRecovery and the attempt manifest; preserve any work before choosing a continuation.",
       });
-    } else if (repositoryDeliveryConfig.enabled && failureDeliveryPhase && !(await supersededForDriver())) {
+    } else if (!publicationHeldForActiveProvider && repositoryDeliveryConfig.enabled && failureDeliveryPhase && !(await supersededForDriver())) {
       automaticRepositoryDelivery = await finalizeRepositoryDeliveryState(dir, { ...effectiveStatus, project, runId }, params);
       effectiveStatus = automaticRepositoryDelivery.status || effectiveStatus;
     }
     let automaticFollowUp: any = null;
     // Keyed on durable state, so a restart or a failed issue lookup is retried
     // by the next reconcile; only a refusal that cannot change records a block.
-    if (repositoryDeliveryConfig.followUpAutoStart && effectiveStatus?.phase === "closed_partial"
-      && effectiveStatus?.failureClass === "review_non_convergence" && effectiveStatus?.repositoryDelivery?.issues?.length
+    if (!publicationHeldForActiveProvider && repositoryDeliveryConfig.followUpAutoStart && effectiveStatus?.phase === "closed_partial"
+      && shouldAutoContinuePartialDelivery(effectiveStatus) && effectiveStatus?.repositoryDelivery?.issues?.length
       && !effectiveStatus?.followUpRunId && !effectiveStatus?.followUpBlocked) {
       // The residue of a review that did not converge is the next run's work:
       // continue on the same PR branch until the issues close or the
@@ -866,6 +868,10 @@ Create or validate the implementation plan only. Do not implement. The plan must
   }
 
   if (action === "finalize_delivery") {
+    const currentRuntime = await cycleRuntimeSummary(dir, status);
+    if ((currentRuntime?.richObservation?.alerts || []).some((a: any) => a?.code === "provider_processes_outside_observed_tree")) {
+      return { ok: false, error: "repository_delivery_active_provider", project, runId, dir, phase: status?.phase };
+    }
     const finalized = await finalizeRepositoryDeliveryState(dir, { ...status, project, runId }, params);
     return { ok: finalized.ok, project, runId, dir, phase: finalized.phase, delivery: finalized.delivery };
   }

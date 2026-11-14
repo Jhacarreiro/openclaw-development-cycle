@@ -1,7 +1,8 @@
 #!/usr/bin/env node
-import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { execFileSync } from "node:child_process";
-import { join } from "node:path";
+import { createHash } from "node:crypto";
+import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 
 const requestPath = process.argv[2];
@@ -106,6 +107,12 @@ const paths = [];
     if (/[RC]/.test(entry.slice(0, 2)) && entries[i + 1]) paths.push(entries[++i]);
   }
 }
+if (req.preservedBaseline) {
+  const baseline = String(req.preservedBaseline);
+  if (!/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/i.test(baseline)) throw new Error("invalid_preserved_baseline");
+  run("git", ["merge-base", "--is-ancestor", baseline, "HEAD"]);
+  paths.push(...runRaw("git", ["diff", "--name-only", "-z", baseline, "HEAD"]).split("\0").filter(Boolean));
+}
 // Secret-looking paths: anything under a secrets or credentials directory,
 // env files, private keys and key stores, and files named after secrets,
 // credentials, tokens or auth. Source and test code is not refused for its
@@ -133,6 +140,7 @@ if (porcelain) {
   run("git", ["add", "-A"]);
   const staged = run("git", ["diff", "--cached", "--name-only"]);
   if (staged) {
+    process.stderr.write(`${run("git", ["diff", "--cached", "--stat"])}\nStaged files: ${staged.split("\n").length}\n`);
     run("git", [...commitIdentityArgs(), "commit", "-m", `development-cycle: ${req.classification} delivery for ${req.project} ${req.runId}`]);
   }
 }
@@ -144,14 +152,16 @@ const targetBranch = safe(req.targetBranch);
 const prBranch = targetBranch || branch;
 const findPullRequest = () => {
   try {
-    return JSON.parse(run("gh", ["pr", "view", prBranch, "--json", "number,url,state"]));
+    return JSON.parse(run("gh", ["pr", "view", prBranch, "--json", "number,url,state,isDraft"]));
   } catch {
     return null;
   }
 };
 // Check before pushing: commits pushed to a closed or merged PR's branch
 // would land outside any PR.
-if (targetBranch && findPullRequest()?.state !== "OPEN") throw new Error(`followup_pull_request_not_open:${prBranch}`);
+const beforePush = findPullRequest();
+if (targetBranch && beforePush?.state !== "OPEN") throw new Error(`followup_pull_request_not_open:${prBranch}`);
+if (req.classification === "partial" && beforePush?.state === "MERGED") throw new Error(`partial_pull_request_already_merged:${prBranch}`);
 await pushWithGitHubToken(targetBranch ? `HEAD:refs/heads/${targetBranch}` : branch);
 
 const repository = run("gh", ["repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"]);
@@ -165,7 +175,9 @@ if (!pullRequest || pullRequest.state === "CLOSED") {
       `Classification: ${req.classification}`,
       `Source phase: ${req.sourcePhase}`,
       "",
-      "This PR is the materialized output of the supervised development cycle.",
+      req.classification === "partial"
+        ? "This draft preserves partial work. The approved scope, validation and review remain to be checked through the residual issues. Continue from this branch; do not treat preservation as validation."
+        : "This PR is the materialized output of the supervised development cycle.",
     ].join("\n"));
     const url = run("gh", [
       "pr", "create",
@@ -173,26 +185,56 @@ if (!pullRequest || pullRequest.state === "CLOSED") {
       "--head", branch,
       "--title", `${req.project}: ${req.classification} delivery ${req.runId}`,
       "--body-file", bodyPath,
+      ...(req.classification === "partial" ? ["--draft"] : []),
     ]);
-    pullRequest = JSON.parse(run("gh", ["pr", "view", url, "--json", "number,url,state"]));
+    pullRequest = JSON.parse(run("gh", ["pr", "view", url, "--json", "number,url,state,isDraft"]));
   } finally {
     await rm(bodyDir, { recursive: true, force: true });
   }
 }
 
 const issues = [];
+// Keep each published issue durable even if a later GitHub operation fails.
+// The next attempt must not recreate an issue outside the list window.
+const progressPath = join(dirname(requestPath), "repository_delivery_progress.json");
+let previousProgress = null;
+try { previousProgress = JSON.parse(await readFile(progressPath, "utf8")); } catch {}
+const knownIssues = [
+  ...(req.existingDelivery?.issues || []),
+  ...(previousProgress?.runId === req.runId && previousProgress?.project === req.project
+    && previousProgress?.repository === repository && previousProgress?.branch === prBranch
+    && previousProgress?.pullRequest?.number === pullRequest.number ? previousProgress.issues || [] : []),
+];
+async function recordProgress() {
+  const dir = await mkdtemp(join(dirname(requestPath), ".delivery-progress-"));
+  try {
+    const path = join(dir, "progress.json");
+    const published = [...new Map([...knownIssues, ...issues].map((issue) => [issue.number, issue])).values()];
+    await writeFile(path, JSON.stringify({ project:req.project, runId:req.runId, repository, branch:prBranch, commit, pullRequest, issues:published }), { mode:0o600 });
+    await rename(path, progressPath);
+  } finally { await rm(dir, { recursive:true, force:true }); }
+}
 if (req.classification === "partial") {
+  if (pullRequest.state === "OPEN") {
+    if (!pullRequest.isDraft) run("gh", ["pr", "ready", String(pullRequest.number), "--undo"]);
+    const current = JSON.parse(run("gh", ["pr", "view", String(pullRequest.number), "--json", "autoMergeRequest"]));
+    if (current.autoMergeRequest) run("gh", ["pr", "merge", String(pullRequest.number), "--disable-auto"]);
+  }
   let existing = [];
   try {
     existing = JSON.parse(run("gh", ["issue", "list", "--state", "all", "--limit", "100", "--json", "number,title,url"]));
   } catch {}
+  existing.push(...knownIssues);
   for (const finding of req.findings || []) {
     const clean = safe(finding).replace(/^\[(?:critical|high|medium|low)\]\s*/i, "");
     if (!clean) continue;
-    const title = (`Follow-up: ${clean}`).slice(0, 120);
+    const fullTitle = `Follow-up: ${clean}`;
+    const title = fullTitle.length <= 120 ? fullTitle
+      : `${fullTitle.slice(0, 108)} [${createHash("sha256").update(clean).digest("hex").slice(0, 8)}]`;
     const exact = existing.find((item) => String(item.title || "").toLowerCase() === title.toLowerCase());
     if (exact) {
       issues.push(exact);
+      await recordProgress();
       continue;
     }
     const body = [
@@ -203,14 +245,22 @@ if (req.classification === "partial") {
       finding,
       "",
       "Acceptance criteria:",
-      "- Resolve the finding and add/update validation that prevents regression.",
+      "- Inspect the preserved branch against this task and the approved plan; retain completed work and finish only the remaining scope.",
+      "- Add or update meaningful validation where the behavior is not already covered.",
       "- Re-run the relevant development-cycle validation before closing.",
     ].join("\n");
-    const url = run("gh", ["issue", "create", "--title", title, "--body", body]);
+    const bodyDir = await mkdtemp(join(tmpdir(), "development-cycle-issue-body-"));
+    let url;
+    try {
+      const path = join(bodyDir, "issue.md");
+      await writeFile(path, body, { mode:0o600 });
+      url = run("gh", ["issue", "create", "--title", title, "--body-file", path]);
+    } finally { await rm(bodyDir, { recursive:true, force:true }); }
     const number = Number((url.match(/\/(\d+)$/) || [])[1] || 0);
     const issue = { number, url, title };
     issues.push(issue);
     existing.push(issue);
+    await recordProgress();
   }
   if (issues.length) {
     run("gh", [
@@ -218,6 +268,10 @@ if (req.classification === "partial") {
       "--body", `Residual follow-ups: ${issues.map((item) => `#${item.number}`).join(", ")}`,
     ]);
   }
+}
+
+if (req.classification === "success" && pullRequest?.isDraft) {
+  run("gh", ["pr", "ready", String(pullRequest.number)]);
 }
 
 // When a follow-up run succeeds, the PR now carries the whole delivery: give

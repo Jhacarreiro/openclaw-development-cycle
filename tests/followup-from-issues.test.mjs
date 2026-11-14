@@ -21,7 +21,7 @@ function planText(projectRoot, wikiPath) {
   ].join("\n");
 }
 
-test("A partial delivery whose review did not converge starts a follow-up run on the delivery PR branch from its open issues", async (t) => {
+for (const reviewStopped of [true,false]) test(`A partial delivery (${reviewStopped ? "review non-convergence" : "interrupted implementation"}) continues on the same PR from open issues`, async (t) => {
   const root = join(tmpdir(), `development-cycle-followup-${process.pid}-${Date.now()}`);
   t.after(() => rm(root, { recursive: true, force: true }));
   const home = join(root, "home");
@@ -121,11 +121,11 @@ test("A partial delivery whose review did not converge starts a follow-up run on
   ] }));
   const session = JSON.parse(await readFile(launched.directImplementationStatus, "utf8"));
   // The reviewed code handles EACCES; that text in the log must not reclassify the run as a local runtime fault.
-  await writeFile(session.stderrPath, [
+  await writeFile(session.stderrPath, (reviewStopped ? [
     "\u001b[0;34m[2026-10-15 07:50:00]\u001b[0m INFO: review_run: finding mentions EACCES when chmod fails",
     `\u001b[0;34m[2026-10-15 08:12:12]\u001b[0m \u001b[0;31mERROR\u001b[0m: Correction loop hit the absolute round ceiling (10) with 2 blocking finding(s) remaining: ${findingsPath} — raise or disable with OCTOPUS_TANGLE_CORRECTION_HARD_CAP (0 = no ceiling)`,
     "",
-  ].join("\n"));
+  ] : ["Implementation interrupted after producing partial work."]).join("\n"));
   await writeFile(session.exitCodePath, "8\n");
   await writeFile(session.exitedAtPath, "2026-08-30T06:30:00Z\n");
   await writeFile(launched.directImplementationStatus, JSON.stringify({ ...session, status: "failed", launchState: "exited", exitCode: 8, exitedAt: "2026-08-30T06:30:00Z" }, null, 2));
@@ -156,4 +156,6 @@ test("A partial delivery whose review did not converge starts a follow-up run on
   const followUpPlan = await readFile(followUpStatus.plan, "utf8");
   assert.match(followUpPlan, /1\. Resolve issue #11 \(https:\/\/example\.invalid\/issues\/11\): Publish never checks the hash-bound approval \(src\/workflow\.ts:370\): Compare the approval hash before posting\./);
   assert.doesNotMatch(followUpPlan, /#12/);
+  assert.match(followUpPlan, /Acceptance criteria:/);
+  assert.doesNotMatch(followUpPlan, /already implemented on this branch/);
 });

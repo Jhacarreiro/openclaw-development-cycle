@@ -39,7 +39,7 @@ export function createMainUpdates(deps: MainUpdatesDeps) {
           recommendedAction: "Reply to main with the requested decision; main should call development_cycle answer_intervention for this run.",
           matched: { name: "human_intervention", pattern: "durable_phase", match: "implementation_waiting_human" },
         }
-      : status?.reviewNonConvergence?.ok
+      : status?.reviewNonConvergence?.ok && status?.outputRecovery?.reviewVerification !== "incomplete"
       ? {
           failureClass: "review_non_convergence",
           severity: "warning",
@@ -49,14 +49,16 @@ export function createMainUpdates(deps: MainUpdatesDeps) {
           recommendedAction: "Review did not converge within the Octopus correction ceiling. The partial output is delivered and each remaining blocking finding becomes a follow-up issue; do not relaunch this run.",
           matched: status.reviewNonConvergence.matched || { name: "review_non_convergence", pattern: "durable_status", match: "reviewNonConvergence" },
         }
-      : phase === "review_infrastructure_failed"
+      : phase === "review_infrastructure_failed" || status?.outputRecovery?.reviewVerification === "incomplete"
       ? {
           failureClass: "review_infrastructure_failed",
           severity: "blocking",
           humanRequired: true,
           safeToAutoRetry: false,
           autoStopRecommended: false,
-          recommendedAction: "Call resume_finalization only for this preserved Octopus output, then run mechanical final validation. Do not relaunch implementation automatically.",
+          recommendedAction: status?.reviewInfrastructureResumeEligible === true
+            ? "Call resume_finalization for the preserved Octopus output, then run mechanical final validation."
+            : "Preserve the partial output in a draft PR with a validation issue. Resolve the verifier blocker, then explicitly continue the open issues on that PR; do not repeat the whole implementation automatically.",
           matched: status?.reviewInfrastructureFailure?.matched || { name: "review_infrastructure_failure", pattern: "durable_phase", match: "review_infrastructure_failed" },
         }
       : null;

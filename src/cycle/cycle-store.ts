@@ -242,6 +242,9 @@ export function createCycleStore(deps: CycleStoreDeps) {
 
   async function clearActiveCorrectionsAttempt(dir: string) {
     return await cycleStatus(dir, {
+      outputRecovery: null,
+      repositoryDeliverySuppressed: null,
+      reviewNonConvergence: null,
       correctionsAttemptId: null,
       directCorrectionsStatus: null,
       directCorrectionsStdout: null,

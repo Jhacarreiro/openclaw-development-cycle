@@ -45,3 +45,16 @@ function clearedFailureClassification() {
 export function clearedAttemptFailure() {
   return { ok: true, error: null, reason: null, ...clearedFailureClassification() };
 }
+
+// Retract old free-text classifications without deleting their audit history or
+// changing the stopped/running state. A new attempt is still an explicit action.
+export function legacyFailureRecoveryPatch(status: any, currentClassification: any) {
+  if (currentClassification?.failureClass || !status?.failureClass) return null;
+  const matched = status?.failureMatched;
+  if (!matched || !String(matched.pattern || "").startsWith("/") || matched.evidencePath) return null;
+  return { ...clearedFailureClassification(),
+    retractedFailure: { failureClass: status.failureClass, matched, reason: "unattributed_legacy_classification", retractedAt: new Date().toISOString() },
+    ...(status.nextAction === status.failureRecommendedAction && ["implementation_launched", "implementation_running", "corrections_launched", "corrections_running"].includes(status.phase)
+      ? { nextAction: status.failureReplacedNextAction || "Continue observing the current attempt; no attributed operational failure is recorded." } : {}),
+  };
+}

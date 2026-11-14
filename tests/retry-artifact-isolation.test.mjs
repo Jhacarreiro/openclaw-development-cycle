@@ -204,12 +204,14 @@ test("implementation retry does not inherit the failed attempt's error", async (
   const run = await prepareRun(tool, root, "stale-failure", "run-stale-failure");
   const cycleStatusPath = join(run.dir, "status.json");
   const failed = JSON.parse(await readFile(cycleStatusPath, "utf8"));
-  await writeFile(cycleStatusPath, JSON.stringify({ ...failed, ...staleFailure, phase: "implementation_failed" }, null, 2));
+  await writeFile(cycleStatusPath, JSON.stringify({ ...failed, ...staleFailure, phase: "implementation_failed", correctionsAttemptId:"old-corrections", directCorrectionsStatus:join(root,"old-corrections.json") }, null, 2));
 
   const launched = detailsOf(await tool.execute("retry", { action: "start_implementation", ...run, implementationAdapter: "command" }, undefined, undefined));
   assert.equal(launched.ok, true);
   const status = JSON.parse(await readFile(cycleStatusPath, "utf8"));
   assert.equal(status.phase, "implementation_launched");
+  assert.equal(status.correctionsAttemptId, null);
+  assert.equal(status.directCorrectionsStatus, null);
   assertNoStaleFailure(status);
 });
 

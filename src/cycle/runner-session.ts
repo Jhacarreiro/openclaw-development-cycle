@@ -69,6 +69,7 @@ export function createRunnerSession(deps: RunnerSessionDeps) {
     const stdoutPath = join(logsDir, "stdout.log");
     const stderrPath = join(logsDir, "stderr.log");
     const interventionPath = join(sessionDir, "intervention.json");
+    const operationalFailurePath = join(sessionDir, "operational-failure.json");
 
     await mkdir(logsDir, { recursive: true });
     await writeFile(promptPath, prompt);
@@ -88,6 +89,7 @@ export function createRunnerSession(deps: RunnerSessionDeps) {
       timeoutSeconds: effectiveTimeoutSeconds,
       command,
       interventionPath,
+      operationalFailurePath,
     };
     await saveJson(requestPath, request);
 
@@ -124,6 +126,7 @@ export function createRunnerSession(deps: RunnerSessionDeps) {
       return { ok: false, error: String(error?.message || error), adapter: params.implementationAdapter || implementationConfig.adapter };
     }
 
+    launchSpec.env.DEVELOPMENT_CYCLE_OPERATIONAL_FAILURE_PATH = operationalFailurePath;
     const executableStat = await stat(launchSpec.executable).catch(() => null);
     if (!executableStat?.isFile() || (executableStat.mode & 0o111) === 0) {
       return {
@@ -230,6 +233,7 @@ python3 ${shellQuote(boundedLogPath)} --stdout ${shellQuote(stdoutPath)} --stder
       exitCodePath,
       exitedAtPath,
       interventionPath,
+      operationalFailurePath,
       logs: { stdout: stdoutPath, stderr: stderrPath },
       stdoutPath,
       stderrPath,
@@ -247,6 +251,7 @@ python3 ${shellQuote(boundedLogPath)} --stdout ${shellQuote(stdoutPath)} --stder
       requestPath,
       promptPath,
       interventionPath,
+      operationalFailurePath,
       purpose: params.purpose || "development_cycle implementation",
     });
     await saveJson(statusPath, status);

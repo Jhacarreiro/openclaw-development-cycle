@@ -219,6 +219,8 @@ export function createCycleStore(deps: CycleStoreDeps) {
   }
 
   async function clearActiveImplementationAttempt(dir: string) {
+    // A new implementation invalidates the previous corrections lineage.
+    await clearActiveCorrectionsAttempt(dir);
     return await cycleStatus(dir, {
       implementationAttemptId: null,
       implementationSessionId: null,

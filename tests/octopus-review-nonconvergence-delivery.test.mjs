@@ -24,7 +24,7 @@ function planText(projectRoot, wikiPath) {
 // Runs a failed Octopus attempt that left a partial worktree and the given
 // stderr, then reconciles it; returns the run status and the delivery request.
 // With `corrections`, the attempt is a council corrections run instead.
-async function reconcileFailedOctopusRun(t, stderrLines, { corrections = false } = {}) {
+async function reconcileFailedOctopusRun(t, stderrLines, { corrections = false, operationalFailure = false } = {}) {
   const root = join(tmpdir(), `development-cycle-octopus-nonconvergence-${process.pid}-${Date.now()}`);
   t.after(() => rm(root, { recursive: true, force: true }));
   const home = join(root, "home");
@@ -113,6 +113,7 @@ async function reconcileFailedOctopusRun(t, stderrLines, { corrections = false }
     }, null, 2));
   }
 
+  if (operationalFailure) await writeFile(session.operationalFailurePath, JSON.stringify({ schemaVersion: 1, attemptId, source: "runner", failureClass: "local_runtime_fault", errorCode: "EACCES", occurredAt: "2026-08-30T06:30:00Z" }));
   const reconciled = detailsOf(await tool.execute("reconcile", {
     action: "reconcile", ...params, notifyMain: false, autoStopStalled: false, autoRunFinalValidation: false, autoRunCouncilReview: false,
   }, undefined, undefined));
@@ -157,7 +158,7 @@ test("A run that fails for another reason after a review is classified by that f
     "\u001b[0;34m[2026-10-19 02:14:30]\u001b[0m \u001b[0;31mERROR\u001b[0m: Permission denied writing the provider history",
     "\u001b[0;34m[2026-10-19 02:14:33]\u001b[0m \u001b[0;31mERROR\u001b[0m: Quality gate FAILED with 66%. Aborting workflow.",
     "\u001b[0;34m[2026-10-19 03:08:47]\u001b[0m \u001b[1;33mWARN\u001b[0m: Tangle run failed; preserving isolated branch and worktree for inspection: octopus/run/x/integration",
-  ]);
+  ], { operationalFailure: true });
   assert.equal(status.failureClass, "local_runtime_fault");
   assert.deepEqual(request.findings, []);
 });

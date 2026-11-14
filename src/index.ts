@@ -434,6 +434,13 @@ async function projectCycle(params: CycleParameters | null | undefined): Promise
   }
 
   if (action === "stop_implementation") {
+    if (params.stopIntent === "failure-policy") {
+      const currentRuntime = await cycleRuntimeSummary(dir, status);
+      const current = await dcClassify(dir, status, currentRuntime);
+      if (current.classification?.autoStopRecommended !== true || current.classification?.matched?.name !== "attributed_operation") {
+        return { ok: false, error: "automatic_stop_not_recommended", project, runId, phase: status?.phase };
+      }
+    }
     const reason = String(params.stopReason || params.reason || "Stopped by development_cycle stop_implementation.");
     const stopped = await stopLaunchedImplementation(dir, status, reason);
     const files = (await readdir(dir).catch(() => [])).sort();
@@ -897,6 +904,7 @@ const cycleParameters = Type.Object({
   timeoutSeconds: Type.Optional(Type.Number()),
   timeout_ms: Type.Optional(Type.Number()),
   stopReason: Type.Optional(Type.String()),
+  stopIntent: Type.Optional(lit("manual", "failure-policy")),
   interventionId: Type.Optional(Type.String({ description: "Pending implementation intervention id, when answering a human gate." })),
   interventionResponse: Type.Optional(Type.String({ description: "Human decision for a pending implementation intervention. answer_intervention resumes the same run automatically." })),
   reason: Type.Optional(Type.String()),

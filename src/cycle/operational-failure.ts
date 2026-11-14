@@ -8,11 +8,18 @@ import { readJsonIfExists } from "./files.js";
 // that a provider operation failed.
 const policies = {
   rate_limited: { severity: "warning", humanRequired: false, autoStopRecommended: false, recommendedAction: "Observe active work. Back off the failed operation; retry only through a bounded supervised policy that preserves progress." },
+  turn_limit_reached: { severity: "warning", humanRequired: false, autoStopRecommended: false, recommendedAction: "The operation reached its turn limit. Preserve completed changes in a draft PR and record remaining work and validation. Continue only the remaining work under a bounded supervised policy; do not replay the whole plan or raise limits automatically. This is an execution limit, not evidence of insufficient account balance." },
+  continuation_limit_reached: { severity: "warning", humanRequired: false, autoStopRecommended: false, recommendedAction: "The operation exhausted its continuation allowance without a final response. Preserve completed changes and retry only the unfinished stage under a bounded supervised policy. If verification failed, retain findings as unverified and continue verification rather than restarting implementation. This does not establish a financial quota failure." },
   auth_failed: { severity: "blocking", humanRequired: true, autoStopRecommended: true, recommendedAction: "Resolve the attributed provider authentication failure, preserving the current worktree for supervised continuation." },
   billing_or_quota_blocked: { severity: "blocking", humanRequired: true, autoStopRecommended: true, recommendedAction: "Resolve the attributed billing/quota failure or explicitly choose an alternate provider; retain completed work." },
   provider_fleet_failed: { severity: "blocking", humanRequired: true, autoStopRecommended: false, recommendedAction: "Inspect the attributed provider failures and preserve completed work before deciding how to continue." },
   local_runtime_fault: { severity: "blocking", humanRequired: true, autoStopRecommended: true, recommendedAction: "Resolve the attributed runner fault and continue from preserved work after verification." },
 } as const;
+
+const canonicalLimitCodes: Record<string, string> = {
+  TURN_LIMIT_REACHED: "turn_limit_reached",
+  CONTINUATION_LIMIT_REACHED: "continuation_limit_reached",
+};
 
 export async function classifyOperationalFailure(status: any) {
   // Current attempt pointers survive stop/finalization phase transitions.
@@ -34,6 +41,9 @@ export async function classifyOperationalFailure(status: any) {
     if (!["provider", "runner"].includes(evidence.source) || typeof evidence.errorCode !== "string" || !evidence.errorCode.trim() || evidence.errorCode.length > 128 || typeof evidence.occurredAt !== "string" || !Number.isFinite(Date.parse(evidence.occurredAt))) return null;
     if (evidence.source === "provider" && (typeof evidence.provider !== "string" || !evidence.provider.trim() || evidence.provider.length > 200)) return null;
     if (evidence.source === "runner" && evidence.failureClass !== "local_runtime_fault") return null;
+    // A contradictory receipt must not turn a known execution limit into a
+    // financial incident. Provider-specific codes may still use explicit classes.
+    if (Object.hasOwn(canonicalLimitCodes, evidence.errorCode) && canonicalLimitCodes[evidence.errorCode] !== evidence.failureClass) return null;
     const policy = policies[evidence.failureClass as keyof typeof policies];
     return { failureClass: evidence.failureClass, ...policy, safeToAutoRetry: false,
       matched: { name: "attributed_operation", match: JSON.stringify({ source:evidence.source, provider:evidence.provider ?? null, errorCode:evidence.errorCode, attemptId }), source: evidence.source, provider: evidence.provider ?? null, errorCode: evidence.errorCode, attemptId, evidencePath: path, occurredAt: evidence.occurredAt } };

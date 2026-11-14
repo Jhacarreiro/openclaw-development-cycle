@@ -55,7 +55,7 @@ test("a classification that persists across a later transition keeps that transi
 });
 
 test("application and review prose cannot establish an operational provider failure", async () => {
-  for (const text of ["No rate limits", "Documents HTTP 429 Too Many Requests", "Updated billing documentation", "Handle 401 Unauthorized", "Test Permission denied / EACCES", "all providers failed is a test fixture"]) {
+  for (const text of ["No rate limits", "Documents HTTP 429 Too Many Requests", "Updated billing documentation", "Handle 401 Unauthorized", "Test Permission denied / EACCES", "all providers failed is a test fixture", "Reached maximum conversation turns (100)", "The model produced no response (continuation budget exhausted)"]) {
     const result = await dcClassify("/nonexistent", { phase: "implementation_launched", error: text, reason: text, councilReviewSummary: text }, { richObservation: { alerts: [], latestTimeline: [{ line: text }] } });
     assert.equal(result.classification, null, text);
   }

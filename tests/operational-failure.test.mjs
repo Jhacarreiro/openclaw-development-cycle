@@ -43,3 +43,32 @@ test("corrections attribution remains current after stop and partial finalizatio
     assert.equal(result.matched.attemptId, "corrections");
   }
 });
+
+test("execution limits produce stage-aware preservation notices instead of financial-quota advice", async t => {
+  const dir = await mkdtemp(join(tmpdir(), "cycle-execution-limit-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const status = { implementationAttemptId: "attempt-a", directImplementationStatus: join(dir, "status.json") };
+  await writeFile(status.directImplementationStatus, JSON.stringify({ attemptId: "attempt-a" }));
+  const path = join(dir, "operational-failure.json");
+  const updates = createMainUpdates({ runtimeHome:dir, loadJson:async()=>null, saveJson:async()=>{}, appendJsonl:async()=>{}, cycleStatus:async()=>status });
+  for (const [failureClass, errorCode] of [["turn_limit_reached", "TURN_LIMIT_REACHED"], ["continuation_limit_reached", "CONTINUATION_LIMIT_REACHED"]]) {
+    const evidence = { schemaVersion:1, source:"provider", provider:"fixture-provider", attemptId:"attempt-a", failureClass, errorCode, occurredAt:"2026-01-01T00:00:00Z" };
+    await writeFile(path, JSON.stringify(evidence));
+    const result = await classifyOperationalFailure(status);
+    assert.equal(result.failureClass, failureClass);
+    assert.equal(result.humanRequired, false);
+    assert.equal(result.safeToAutoRetry, false);
+    assert.equal(result.autoStopRecommended, false);
+    assert.match(result.recommendedAction, /Preserve/);
+    if (failureClass === "turn_limit_reached") assert.match(result.recommendedAction, /remaining work/);
+    else assert.match(result.recommendedAction, /unverified/);
+    const notice = await updates.dcNotifyMain(dir,"fixture","run",status,{dryRunMainUpdate:true},await updates.dcClassify(dir,status,{}));
+    assert.match(notice.text,new RegExp(failureClass));
+    assert.match(notice.text,new RegExp(errorCode));
+    assert.doesNotMatch(notice.text,/Failure class: billing_or_quota_blocked/);
+    await writeFile(path, JSON.stringify({ ...evidence, failureClass:"billing_or_quota_blocked" }));
+    assert.equal(await classifyOperationalFailure(status), null);
+    await writeFile(path, JSON.stringify({ ...evidence, attemptId:"previous-attempt" }));
+    assert.equal(await classifyOperationalFailure(status), null);
+  }
+});
